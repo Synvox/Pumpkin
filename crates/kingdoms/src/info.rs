@@ -102,12 +102,21 @@ impl TownInfo {
     #[must_use]
     pub fn from_plan(plan: &TownPlan) -> Self {
         let (cx, cz) = plan.bounds.center();
-        let castle_wall = [
-            [plan.castle.bounds.min_x, plan.castle.bounds.min_z],
-            [plan.castle.bounds.max_x, plan.castle.bounds.min_z],
-            [plan.castle.bounds.max_x, plan.castle.bounds.max_z],
-            [plan.castle.bounds.min_x, plan.castle.bounds.max_z],
-        ];
+        let castle_wall = if plan.castle.outer_ring.verts.len() >= 3 {
+            plan.castle
+                .outer_ring
+                .verts
+                .iter()
+                .map(|&(x, z)| [x, z])
+                .collect()
+        } else {
+            vec![
+                [plan.castle.bounds.min_x, plan.castle.bounds.min_z],
+                [plan.castle.bounds.max_x, plan.castle.bounds.min_z],
+                [plan.castle.bounds.max_x, plan.castle.bounds.max_z],
+                [plan.castle.bounds.min_x, plan.castle.bounds.max_z],
+            ]
+        };
         Self {
             id: town_id(plan.seed, plan.origin.cell_x, plan.origin.cell_z),
             seed: plan.seed,
@@ -140,7 +149,7 @@ impl TownInfo {
                 barbican: plan.castle.barbican,
                 gatehouse: plan.castle.gatehouse,
                 towers: plan.castle.towers.clone(),
-                wall: castle_wall.to_vec(),
+                wall: castle_wall,
             },
             roads: plan.roads.clone(),
             buildings: plan

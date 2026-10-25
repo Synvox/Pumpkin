@@ -6,7 +6,7 @@ This crate is the Synvox-fork feature code for generated medieval towns. It is *
 
 One town per 2048×2048 cell, a pure function of `(seed, cell)`. Each chunk writes only its own columns.
 
-- **Castle** on high ground, at least 128×128 (8×8 chunks): outer curtain with interval towers, gatehouse and barbican, inner bailey, keep, great hall, chapel, stables, barracks, kitchen, courtyards, and a moat/ditch where the approach is low enough. Walls step with the ridge. No flattening.
+- **Castle** on high ground, at least 128×128 (8×8 chunks): contour-following polygonal curtain (not a rectangle), inner ward, mixed round / D / octagon / square towers with cone or crenellated tops, twin-round gatehouse, multi-mass keep, hall, chapel, stables, barracks, kitchen, courtyards, and a moat/ditch where the approach is low enough. Archetype (ridge, concentric, spur, coastal) is a function of seed and terrain. Walls step with the ridge. No flattening.
 - **Town** on the downhill side: market on the flattest patch, well, timber-frame and cottage lots (WFC facades), church, tavern, blacksmith, longhouse, barn, windmill, farms outside the walls.
 - **Roads** by A* over sampled height with a ~1:4 slope cost, stairs when steeper, switchbacks when the path needs them.
 - **Palettes** by vanilla biome: oak/plains, spruce/taiga, sandstone/desert.

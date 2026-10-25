@@ -181,3 +181,95 @@ pub const fn dist2(ax: i32, az: i32, bx: i32, bz: i32) -> i64 {
     let dz = (az - bz) as i64;
     dx * dx + dz * dz
 }
+
+/// Whether `(x, z)` is inside the closed polygon `verts` (ray cast).
+#[must_use]
+pub fn point_in_poly(x: i32, z: i32, verts: &[(i32, i32)]) -> bool {
+    if verts.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = verts.len() - 1;
+    for i in 0..verts.len() {
+        let (xi, zi) = verts[i];
+        let (xj, zj) = verts[j];
+        if (zi > z) != (zj > z) {
+            let den = zj - zi;
+            if den != 0 {
+                let xinters = xi + (z - zi) * (xj - xi) / den;
+                if x < xinters {
+                    inside = !inside;
+                }
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Squared distance from `(px, pz)` to the segment `a→b`.
+#[must_use]
+pub fn dist2_to_segment(px: i32, pz: i32, ax: i32, az: i32, bx: i32, bz: i32) -> i64 {
+    let vx = i64::from(bx - ax);
+    let vz = i64::from(bz - az);
+    let wx = i64::from(px - ax);
+    let wz = i64::from(pz - az);
+    let c2 = vx * vx + vz * vz;
+    if c2 == 0 {
+        return wx * wx + wz * wz;
+    }
+    let c1 = vx * wx + vz * wz;
+    if c1 <= 0 {
+        return wx * wx + wz * wz;
+    }
+    if c1 >= c2 {
+        let dx = i64::from(px - bx);
+        let dz = i64::from(pz - bz);
+        return dx * dx + dz * dz;
+    }
+    // (w - t v)^2 with t = c1/c2, multiplied through by c2^2 then divided.
+    let nx = wx * c2 - c1 * vx;
+    let nz = wz * c2 - c1 * vz;
+    (nx * nx + nz * nz) / (c2 * c2)
+}
+
+/// Whether `(x, z)` is within `radius` of any edge of `verts` (closed).
+#[must_use]
+pub fn near_poly_edge(x: i32, z: i32, verts: &[(i32, i32)], radius: i32) -> bool {
+    if verts.len() < 2 {
+        return false;
+    }
+    let lim = i64::from(radius) * i64::from(radius) + 1;
+    for pair in verts.windows(2) {
+        if dist2_to_segment(x, z, pair[0].0, pair[0].1, pair[1].0, pair[1].1) <= lim {
+            return true;
+        }
+    }
+    let last = verts[verts.len() - 1];
+    let first = verts[0];
+    dist2_to_segment(x, z, last.0, last.1, first.0, first.1) <= lim
+}
+
+/// Axis-aligned bounds of `verts`.
+#[must_use]
+pub fn poly_bounds(verts: &[(i32, i32)]) -> Option<Rect> {
+    let (first, rest) = verts.split_first()?;
+    let mut min_x = first.0;
+    let mut min_z = first.1;
+    let mut max_x = first.0;
+    let mut max_z = first.1;
+    for &(x, z) in rest {
+        min_x = min_x.min(x);
+        min_z = min_z.min(z);
+        max_x = max_x.max(x);
+        max_z = max_z.max(z);
+    }
+    Some(Rect::new(min_x, min_z, max_x, max_z))
+}
+
+/// Integer length of a 2D vector, floored.
+#[must_use]
+pub fn isqrt(dx: i32, dz: i32) -> i32 {
+    let s = dist2(0, 0, dx, dz);
+    (s as f64).sqrt() as i32
+}

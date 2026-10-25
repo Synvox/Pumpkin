@@ -56,11 +56,27 @@ pub fn write_renders(
         7,
         1,
     );
+    let (gx, gz) = plan.castle.gatehouse.center();
+    let gate = render_iso(volume, gx - 22, gz - 22, gx + 22, gz + 22, 8, 1);
+    let skyline = render_iso(
+        volume,
+        castle.min_x - 4,
+        castle.min_z - 4,
+        castle.max_x + 4,
+        castle.max_z + 4,
+        5,
+        1,
+    );
     save(&out_dir.join(format!("{stem}-topdown.png")), &top)?;
     save(&out_dir.join(format!("{stem}-iso.png")), &iso)?;
     save(&out_dir.join(format!("{stem}-castle.png")), &castle_iso)?;
     save(&out_dir.join(format!("{stem}-street.png")), &street)?;
     save(&out_dir.join(format!("{stem}-bailey.png")), &bailey)?;
+    save(&out_dir.join(format!("{stem}-castle-gate.png")), &gate)?;
+    save(
+        &out_dir.join(format!("{stem}-castle-skyline.png")),
+        &skyline,
+    )?;
     Ok(())
 }
 
@@ -92,6 +108,15 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     }
     if id == Block::ANDESITE.id {
         return [136, 136, 136];
+    }
+    if id == Block::TUFF.id {
+        return [108, 109, 102];
+    }
+    if id == Block::DEEPSLATE_BRICKS.id || id == Block::DEEPSLATE.id {
+        return [70, 70, 74];
+    }
+    if id == Block::VINE.id {
+        return [46, 110, 40];
     }
     if id == Block::OAK_LOG.id || id == Block::STRIPPED_OAK_LOG.id {
         return [109, 85, 50];
