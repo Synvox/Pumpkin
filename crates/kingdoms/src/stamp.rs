@@ -243,7 +243,7 @@ fn terrace_floor(ground: i32, planned: i32) -> i32 {
 }
 
 /// One floor Y for a castle building so walls and roofs do not smear down a slope.
-fn ridge_floor(plan: &TownPlan, rect: crate::geom::Rect) -> i32 {
+pub(crate) fn ridge_floor(plan: &TownPlan, rect: crate::geom::Rect) -> i32 {
     let mean = plan
         .heights
         .mean(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
@@ -1062,6 +1062,7 @@ fn place_gabled(
         clear_above(sink, x, floor + 1, roof_y - 1, z);
     }
     place_roof(sink, rect, x, eaves, z, palette, 1);
+    clear_hill_above_roof(sink, x, roof_y, ground, z, false);
 }
 
 /// Roof Y and stair facing for a gable over `rect`.
@@ -1112,11 +1113,29 @@ fn place_roof(
         (x - ridge).abs()
     };
     let (roof_y, roof_dir) = gable_roof_y(rect, x, z, eaves_y, overhang);
-    sink.put(x, roof_y - 1, z, palette.planks);
+    // Interior ceiling only. Overwriting the shell (or the eave overhang)
+    // with planks hid timber framing and turned houses into brown prisms.
+    if rect.contains(x, z) && !rect.on_edge(x, z) {
+        sink.put(x, roof_y - 1, z, palette.planks);
+    }
     sink.put(x, roof_y, z, stair_state(palette.roof, roof_dir));
     if dist == 0 {
         sink.put(x, roof_y + 1, z, palette.roof_slab);
     }
+}
+
+fn clear_hill_above_roof(
+    sink: &mut impl BlockSink,
+    x: i32,
+    roof_y: i32,
+    ground: i32,
+    z: i32,
+    keep_chimney: bool,
+) {
+    if ground <= roof_y || keep_chimney {
+        return;
+    }
+    clear_above(sink, x, roof_y + 1, ground + 2, z);
 }
 
 fn place_court(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
@@ -1182,7 +1201,7 @@ fn place_building(
     match lot.kind {
         BuildingKind::Windmill => place_windmill(sink, lot, x, floor, ground, z, palette),
         BuildingKind::Church => place_town_church(sink, lot, x, floor, ground, z, palette),
-        BuildingKind::Stall => place_stall(sink, x, ground, z, palette),
+        BuildingKind::Stall => place_stall(sink, lot, x, ground, z, palette),
         BuildingKind::Blacksmith => {
             place_house(sink, lot, x, floor, ground, z, palette);
             if x == lot.rect.center().0 && z == lot.rect.center().1 {
@@ -1217,7 +1236,11 @@ fn place_house(
         sink.put(x, floor + 1, z, palette.foundation((x + z) % 5 == 0));
         for y in floor + 2..roof_y {
             let storey_seam = (y - floor) % 4 == 0;
-            let b = if r.is_corner(x, z) || storey_seam {
+            let stud = match lot.facing {
+                Dir::North | Dir::South => (x - r.min_x) % 3 == 0,
+                Dir::East | Dir::West => (z - r.min_z) % 3 == 0,
+            };
+            let b = if r.is_corner(x, z) || storey_seam || (timber && stud) {
                 palette.log
             } else if window_here(lot, x, z, y - floor) {
                 Block::GLASS_PANE.default_state
@@ -1264,6 +1287,7 @@ fn place_house(
         );
     }
     place_roof(sink, r, x, eaves, z, palette, 1);
+    clear_hill_above_roof(sink, x, roof_y, ground, z, r.is_corner(x, z) && !front);
     if r.is_corner(x, z) && !front {
         for y in roof_y..=roof_y + 3 {
             sink.put(x, y, z, palette.cobble);
@@ -1440,11 +1464,9 @@ fn place_eave(
         .iter()
         .find(|lot| lot.rect.inflate(1).contains(x, z))
     {
+        // Overhang stair only. A fence fill here rendered as a solid brown
+        // box and hid the timber-and-plaster walls.
         let eaves = floor.max(ground) + lot.kind.wall_h();
-        let (roof_y, _) = gable_roof_y(lot.rect, x, z, eaves, 1);
-        for y in (ground + 1)..roof_y {
-            sink.put(x, y, z, palette.fence);
-        }
         place_roof(sink, lot.rect, x, eaves, z, palette, 1);
     }
 }
@@ -1483,12 +1505,27 @@ fn place_bridge(
     }
 }
 
-fn place_stall(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+fn place_stall(
+    sink: &mut impl BlockSink,
+    lot: &Lot,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let r = lot.rect;
     sink.put(x, ground, z, palette.planks);
-    if (x + z) % 2 == 0 {
+    if r.on_edge(x, z) {
         sink.put(x, ground + 1, z, palette.fence);
-        sink.put(x, ground + 2, z, Block::RED_WOOL.default_state);
+        if r.is_corner(x, z) {
+            sink.put(x, ground + 2, z, palette.fence);
+        }
+    } else if (x + z) % 2 == 0 {
+        sink.put(x, ground + 1, z, Block::RED_WOOL.default_state);
     }
+    let eaves = ground + 2;
+    let (roof_y, roof_dir) = gable_roof_y(r, x, z, eaves, 0);
+    sink.put(x, roof_y, z, stair_state(palette.roof, roof_dir));
 }
 
 fn is_front(lot: &Lot, x: i32, z: i32) -> bool {

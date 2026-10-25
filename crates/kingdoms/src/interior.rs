@@ -530,26 +530,39 @@ enum KeepRoom {
     Guard,
 }
 
-fn keep_room(spec: TowerSpec, storey: i32, stories: i32) -> KeepRoom {
-    if spec.height >= 20 {
+/// Room name for keep storey `storey` (0 = lowest enclosed floor).
+#[must_use]
+pub fn keep_storey_label(height: i32, inner: bool, storey: i32) -> &'static str {
+    let stories = (height / 4).max(1);
+    if height >= 20 {
         match storey {
-            0 => KeepRoom::Storage,
-            1 => KeepRoom::Guest,
-            2 => KeepRoom::Solar,
-            s if s == stories - 1 => KeepRoom::Guard,
-            _ => KeepRoom::Bedchamber,
+            0 => "storage",
+            1 => "guest rooms",
+            2 => "solar",
+            s if s == stories - 1 => "guard post",
+            _ => "bedchamber",
         }
-    } else if spec.inner {
+    } else if inner {
         match storey {
-            0 => KeepRoom::Storage,
-            1 => KeepRoom::Solar,
-            _ => KeepRoom::Bedchamber,
+            0 => "storage",
+            1 => "solar",
+            _ => "bedchamber",
         }
     } else {
         match storey {
-            0 => KeepRoom::Storage,
-            _ => KeepRoom::Guard,
+            0 => "storage",
+            _ => "guard post",
         }
+    }
+}
+
+fn keep_room(spec: TowerSpec, storey: i32, _stories: i32) -> KeepRoom {
+    match keep_storey_label(spec.height, spec.inner, storey) {
+        "storage" => KeepRoom::Storage,
+        "guest rooms" => KeepRoom::Guest,
+        "solar" => KeepRoom::Solar,
+        "bedchamber" => KeepRoom::Bedchamber,
+        _ => KeepRoom::Guard,
     }
 }
 

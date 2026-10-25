@@ -160,8 +160,8 @@ fn render_one(
     if !tight.ok() {
         for fail in tight.failures() {
             eprintln!(
-                "  watertight fail {} cols={} leak={:?} float={} seed={:?}",
-                fail.name, fail.columns, fail.leak, fail.floating_roofs, fail.seed
+                "  watertight fail {} cols={} leak={:?} float={} sky={} seed={:?}",
+                fail.name, fail.columns, fail.leak, fail.floating_roofs, fail.sky_open, fail.seed
             );
         }
         return false;
