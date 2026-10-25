@@ -3041,6 +3041,7 @@ dependencies = [
  "pumpkin-config",
  "pumpkin-core",
  "pumpkin-data",
+ "pumpkin-kingdoms",
  "pumpkin-util",
  "pumpkin-wasm-host",
  "pumpkin-world",
@@ -3254,6 +3255,18 @@ dependencies = [
  "rand 0.10.3",
  "rustc-hash",
  "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "pumpkin-kingdoms"
+version = "0.2.1+26.3-26.51"
+dependencies = [
+ "image",
+ "pumpkin-core",
+ "pumpkin-data",
+ "pumpkin-util",
+ "pumpkin-world",
  "tracing",
 ]
 

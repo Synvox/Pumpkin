@@ -19,6 +19,7 @@ pumpkin-config.workspace = true
 pumpkin-data = { workspace = true, features = ["default"] }
 pumpkin-util.workspace = true
 pumpkin-world.workspace = true
+pumpkin-kingdoms.workspace = true
 
 rayon.workspace = true
 rustls.workspace = true

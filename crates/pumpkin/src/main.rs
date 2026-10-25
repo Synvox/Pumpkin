@@ -179,6 +179,7 @@ async fn main() {
         exit(1);
     });
     let plugin_wait_time = pumpkin_server.init_plugins().await;
+    pumpkin_kingdoms::install(&pumpkin_server.server);
 
     let time_elapsed = time.elapsed().saturating_sub(plugin_wait_time);
 

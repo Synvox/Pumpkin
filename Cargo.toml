@@ -27,6 +27,7 @@ members = [
     "tools/pumpkin-codegen",
     "tools/pumpkin-fuzzer",
     "tools/pumpkin-tester",
+    "crates/kingdoms",
 ]
 
 # [workspace.lints.rust]
@@ -232,6 +233,7 @@ pumpkin-wasm-host-common = { path = "crates/pumpkin-wasm-host-common", default-f
 pumpkin-wasm-host-v0_1 = { path = "crates/pumpkin-wasm-host-v0_1", default-features = false }
 pumpkin-wasm-host-v0_2 = { path = "crates/pumpkin-wasm-host-v0_2", default-features = false }
 pumpkin-world = { path = "crates/pumpkin-world", default-features = false }
+pumpkin-kingdoms = { path = "crates/kingdoms", default-features = false }
 quote = { version = "1.0", default-features = false, features = ["proc-macro"] }
 rand = { version = "0.10.3", default-features = false, features = ["std", "std_rng", "thread_rng"] }
 rsa = { version = "=0.10.0-rc.19", default-features = false, features = ["std", "encoding"] }
