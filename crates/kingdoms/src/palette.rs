@@ -55,6 +55,10 @@ pub struct Palette {
     pub path: &'static BlockState,
     pub gravel: &'static BlockState,
     pub sand: &'static BlockState,
+    pub andesite: &'static BlockState,
+    pub calcite: &'static BlockState,
+    pub grass: &'static BlockState,
+    pub leaves: &'static BlockState,
 }
 
 impl Palette {
@@ -86,6 +90,10 @@ impl Palette {
                 path: Block::DIRT_PATH.default_state,
                 gravel: Block::GRAVEL.default_state,
                 sand: Block::SAND.default_state,
+                andesite: Block::ANDESITE.default_state,
+                calcite: Block::CALCITE.default_state,
+                grass: Block::GRASS_BLOCK.default_state,
+                leaves: Block::OAK_LEAVES.default_state,
             },
             PaletteKind::Spruce => Self {
                 kind,
@@ -111,6 +119,10 @@ impl Palette {
                 path: Block::DIRT_PATH.default_state,
                 gravel: Block::GRAVEL.default_state,
                 sand: Block::SNOW_BLOCK.default_state,
+                andesite: Block::ANDESITE.default_state,
+                calcite: Block::CALCITE.default_state,
+                grass: Block::GRASS_BLOCK.default_state,
+                leaves: Block::SPRUCE_LEAVES.default_state,
             },
             PaletteKind::Sandstone => Self {
                 kind,
@@ -136,6 +148,10 @@ impl Palette {
                 path: Block::SANDSTONE.default_state,
                 gravel: Block::SAND.default_state,
                 sand: Block::SAND.default_state,
+                andesite: Block::SMOOTH_SANDSTONE.default_state,
+                calcite: Block::SMOOTH_SANDSTONE.default_state,
+                grass: Block::SAND.default_state,
+                leaves: Block::DEAD_BUSH.default_state,
             },
         }
     }
@@ -149,11 +165,34 @@ impl Palette {
     /// Castle masonry, with light aging.
     #[must_use]
     pub fn masonry(self, variant: u8) -> &'static BlockState {
-        match variant % 7 {
-            0..=2 => self.bricks,
-            3 | 4 => self.cobble,
-            5 => self.mossy_bricks,
-            _ => self.cracked_bricks,
+        match variant % 11 {
+            0..=3 => self.bricks,
+            4 | 5 => self.cobble,
+            6 => self.mossy_bricks,
+            7 => self.cracked_bricks,
+            8 => self.andesite,
+            9 => self.mossy,
+            _ => self.bricks,
+        }
+    }
+
+    /// Plaster infill, slightly varied so walls are not one flat color.
+    #[must_use]
+    pub fn infill(self, variant: u8) -> &'static BlockState {
+        match self.kind {
+            PaletteKind::Sandstone => self.plaster,
+            PaletteKind::Spruce => {
+                if variant % 5 == 0 {
+                    self.calcite
+                } else {
+                    self.plaster
+                }
+            }
+            PaletteKind::Oak => match variant % 5 {
+                0 => self.calcite,
+                1 => Block::BIRCH_PLANKS.default_state,
+                _ => self.plaster,
+            },
         }
     }
 }

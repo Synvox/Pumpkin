@@ -38,6 +38,7 @@ use tracing::info;
 pub mod buildings;
 pub mod castle;
 pub mod cells;
+pub mod chunk_fill;
 pub mod command;
 pub mod geom;
 pub mod height;
@@ -45,6 +46,7 @@ pub mod info;
 pub mod marker;
 pub mod palette;
 pub mod plan;
+pub mod portal;
 pub mod render;
 pub mod rng;
 pub mod stamp;
@@ -129,6 +131,11 @@ impl EventHandler<WorldInitEvent> for AttachOnWorldInit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::height::register_world_gen;
+    use crate::plan::{build_plan, plan_for};
+    use crate::portal::PregenPortal;
+    use crate::stamp::{MARKER_FLOOR, stamp_plan_in_chunk};
+    use crate::town::town_in_cell;
     use pumpkin_data::dimension::Dimension;
     use pumpkin_util::math::vector3::Vector3;
     use pumpkin_util::world_seed::Seed;
@@ -137,53 +144,6 @@ mod tests {
     use pumpkin_world::generation::get_world_gen;
     use pumpkin_world::generation::hooks::ChunkDecorationContext;
     use pumpkin_world::generation::proto_chunk::ProtoChunk;
-    use pumpkin_world::world::{BlockAccessor, WorldPortalExt};
-
-    use crate::height::register_world_gen;
-    use crate::plan::{build_plan, plan_for};
-    use crate::stamp::{MARKER_FLOOR, stamp_plan_in_chunk};
-    use crate::town::town_in_cell;
-
-    struct TestPortal;
-
-    impl WorldPortalExt for TestPortal {
-        fn can_place_at(
-            &self,
-            _block: &pumpkin_data::Block,
-            _state: &pumpkin_data::BlockState,
-            _block_accessor: &dyn BlockAccessor,
-            _block_pos: &pumpkin_util::math::position::BlockPos,
-        ) -> bool {
-            true
-        }
-
-        fn mirror(
-            &self,
-            block: &pumpkin_data::Block,
-            state_id: pumpkin_data::BlockStateId,
-            mirror: pumpkin_data::Mirror,
-        ) -> &'static pumpkin_data::BlockState {
-            block.mirror(state_id, mirror)
-        }
-
-        fn rotate(
-            &self,
-            block: &pumpkin_data::Block,
-            state_id: pumpkin_data::BlockStateId,
-            rotation: pumpkin_data::Rotation,
-        ) -> &'static pumpkin_data::BlockState {
-            block.rotate(state_id, rotation)
-        }
-
-        fn spawn_mobs_for_chunk_generation(
-            &self,
-            _cache: &mut dyn pumpkin_world::generation::proto_chunk::GenerationCache,
-            _biome: &'static pumpkin_data::chunk::Biome,
-            _chunk_x: i32,
-            _chunk_z: i32,
-        ) {
-        }
-    }
 
     fn extract_proto(chunk: Chunk) -> ProtoChunk {
         match chunk {
@@ -224,7 +184,7 @@ mod tests {
             for &(cx, cz) in &order {
                 let generated = generate_single_chunk_with_radius(
                     &world_gen,
-                    &TestPortal,
+                    &PregenPortal,
                     cx,
                     cz,
                     StagedChunkEnum::Carvers,

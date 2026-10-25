@@ -18,11 +18,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use pumpkin_data::dimension::Dimension;
+use pumpkin_kingdoms::chunk_fill::fill_volume_from_chunks;
 use pumpkin_kingdoms::height::register_world_gen;
 use pumpkin_kingdoms::marker;
-use pumpkin_kingdoms::palette::PaletteKind;
 use pumpkin_kingdoms::plan::{plan_for, plan_from_cache};
-use pumpkin_kingdoms::render::write_renders;
+use pumpkin_kingdoms::render::{write_planner_renders, write_renders};
 use pumpkin_kingdoms::stamp::{MARKER_FLOOR, fill_volume};
 use pumpkin_kingdoms::town::{CELL_SIZE, nearest_town, town_in_cell};
 use pumpkin_util::world_seed::Seed;
@@ -35,6 +35,7 @@ fn parse_args() -> Result<Args, String> {
     let mut cell_z = 0;
     let mut out_dir = PathBuf::from("kingdoms-renders");
     let mut all = false;
+    let mut planner_only = false;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -55,6 +56,7 @@ fn parse_args() -> Result<Args, String> {
                 out_dir = PathBuf::from(args.next().ok_or("missing --out-dir value")?);
             }
             "--all" => all = true,
+            "--planner-only" => planner_only = true,
             "--help" | "-h" => {
                 println!(
                     "kingdoms-pregen --seed <u64> --cell <x,z> --out-dir <dir> [--all]\n\
@@ -71,6 +73,7 @@ fn parse_args() -> Result<Args, String> {
         cell_z,
         out_dir,
         all,
+        planner_only,
     })
 }
 
@@ -80,6 +83,7 @@ struct Args {
     cell_z: i32,
     out_dir: PathBuf,
     all: bool,
+    planner_only: bool,
 }
 
 fn make_gen(seed: u64) -> Arc<WorldGenerator> {
@@ -96,7 +100,14 @@ fn make_gen(seed: u64) -> Arc<WorldGenerator> {
     world_gen
 }
 
-fn render_one(seed: u64, cell_x: i32, cell_z: i32, out_dir: &std::path::Path, stem: &str) -> bool {
+fn render_one(
+    seed: u64,
+    cell_x: i32,
+    cell_z: i32,
+    out_dir: &std::path::Path,
+    stem: &str,
+    planner_only: bool,
+) -> bool {
     let world_gen = make_gen(seed);
     let town = town_in_cell(seed, cell_x, cell_z);
     println!(
@@ -150,44 +161,39 @@ fn render_one(seed: u64, cell_x: i32, cell_z: i32, out_dir: &std::path::Path, st
         println!("  (well column is built; mossy floor may sit under water)");
     }
 
-    if let Err(error) = write_renders(&plan_a, out_dir, stem) {
-        eprintln!("render failed: {error}");
+    if let Err(error) = write_planner_renders(&plan_a, out_dir, &format!("{stem}-planner")) {
+        eprintln!("planner render failed: {error}");
         return false;
     }
-    println!("  wrote {}/{stem}-*.png", out_dir.display());
+    println!("  wrote planner PNGs");
+
+    if planner_only {
+        println!("  (--planner-only, skipped real chunks)");
+        return true;
+    }
+
+    println!("  generating real chunks through Features + decorator…");
+    let volume = fill_volume_from_chunks(&plan_a, &world_gen);
+    if let Err(error) = write_renders(&plan_a, &volume, out_dir, stem) {
+        eprintln!("chunk render failed: {error}");
+        return false;
+    }
+    println!(
+        "  wrote {}/{stem}-*.png from generated chunks",
+        out_dir.display()
+    );
     let _ = nearest_town(seed, 0, 0);
     true
 }
 
 fn find_variant_seeds() -> Vec<(u64, i32, i32, String)> {
-    let mut out = vec![(20_261_025u64, 0, 0, "plains".to_string())];
-    for seed in [7u64, 42, 2026, 314_159, 1_234_567, 88_512, 9_001] {
-        let world_gen = make_gen(seed);
-        let plan = plan_for(seed, 0, 0, &world_gen);
-        let (lo, hi) = plan.heights.range(
-            plan.castle.bounds.min_x,
-            plan.castle.bounds.min_z,
-            plan.castle.bounds.max_x,
-            plan.castle.bounds.max_z,
-        );
-        let relief = hi - lo;
-        let label = match plan.palette {
-            PaletteKind::Spruce if relief >= 10 => "taiga-hill",
-            PaletteKind::Spruce => "taiga",
-            PaletteKind::Sandstone => "desert",
-            PaletteKind::Oak if relief >= 12 => "hillside",
-            PaletteKind::Oak => "plains",
-        };
-        if (label.contains("hill") || label.contains("taiga") || label.contains("desert"))
-            && !out.iter().any(|(_, _, _, l)| l == label)
-        {
-            out.push((seed, 0, 0, label.to_string()));
-        }
-        if out.len() >= 4 {
-            break;
-        }
-    }
-    out
+    // Same four towns as the first renders, so before/after is comparable.
+    vec![
+        (20_261_025u64, 0, 0, "plains".to_string()),
+        (7, 0, 0, "taiga-hill".to_string()),
+        (42, 0, 0, "hillside".to_string()),
+        (314_159, 0, 0, "desert".to_string()),
+    ]
 }
 
 fn main() -> ExitCode {
@@ -211,7 +217,7 @@ fn main() -> ExitCode {
     let mut ok = true;
     for (seed, cx, cz, label) in jobs {
         let stem = format!("town-{label}-{seed}");
-        if !render_one(seed, cx, cz, &args.out_dir, &stem) {
+        if !render_one(seed, cx, cz, &args.out_dir, &stem, args.planner_only) {
             ok = false;
         }
     }

@@ -115,12 +115,12 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     let mut rng = TownRng::salted(seed, origin.cell_x as u64, origin.cell_z as u64);
     let castle_rect = site_castle(&grid, origin.x, origin.z, &mut rng);
     let gate = downhill_town_dir(&grid, castle_rect);
-    let town_rect = town_beside(castle_rect, gate, 132, 120);
+    let town_rect = driest_town(&grid, castle_rect, gate, 132, 120);
     let bounds = union(castle_rect.inflate(6), town_rect.inflate(18));
     let mut occ = Occupancy::new(bounds);
     let castle = paint_castle(&mut occ, &grid, castle_rect, &mut rng);
 
-    let market = flattest(&grid, town_rect, 28, 28);
+    let market = flattest_dry(&grid, town_rect, 24, 24);
     occ.fill(market, CellKind::Market, false);
     let well = market.center();
     occ.set(well.0, well.1, CellKind::Well, true);
@@ -130,7 +130,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         }
     }
 
-    let (town_wall, town_towers) = paint_town_wall(&mut occ, town_rect, castle_rect, gate);
+    let (town_wall, town_towers) = paint_town_wall(&mut occ, &grid, town_rect, castle_rect, gate);
     let gate_pts = town_gates(town_rect, castle.gatehouse.center(), gate);
     let gates = vec![
         GateInfo {
@@ -158,8 +158,9 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     waypoints.extend(gate_pts);
     let roads = paint_roads(&mut occ, &grid, &waypoints);
 
-    let lots = place_lots(&mut occ, town_rect, market, &mut rng, seed);
+    let lots = place_lots(&mut occ, &grid, town_rect, market, &mut rng, seed);
     place_farms(&mut occ, &grid, town_rect, castle_rect, &mut rng);
+    paint_water_uses(&mut occ, &grid, bounds, castle_rect);
 
     debug_assert!(castle.bounds.width() >= CASTLE_MIN);
     debug_assert!(castle.bounds.depth() >= CASTLE_MIN);
@@ -219,6 +220,130 @@ fn downhill_town_dir(grid: &HeightGrid, castle: Rect) -> Dir {
         .map_or(Dir::South, |(d, _)| *d)
 }
 
+fn driest_town(grid: &HeightGrid, castle: Rect, dir: Dir, w: i32, d: i32) -> Rect {
+    let mut best = town_beside(castle, dir, w, d);
+    let mut best_score = i32::MIN;
+    for search_dir in Dir::ALL {
+        for &(tw, td) in &[(w, d), (108, 96), (88, 80), (72, 64)] {
+            for side in -4..=4 {
+                for pull in 0..8 {
+                    let rect = town_offset(castle, search_dir, tw, td, side * 16, pull * 12);
+                    let dry = grid.dry_ratio(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+                    if dry < 55 && search_dir != dir {
+                        continue;
+                    }
+                    let mean = grid.mean(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+                    let prefer_downhill = i32::from(search_dir == dir) * 8;
+                    let score = dry * 12 + (mean - grid.sea_level).clamp(0, 30) + prefer_downhill
+                        - pull
+                        - (w - tw) / 3;
+                    if score > best_score {
+                        best_score = score;
+                        best = rect;
+                    }
+                }
+            }
+        }
+    }
+    shrink_to_dry(grid, best)
+}
+
+fn shrink_to_dry(grid: &HeightGrid, rect: Rect) -> Rect {
+    let mut current = rect;
+    for _ in 0..10 {
+        if grid.dry_ratio(current.min_x, current.min_z, current.max_x, current.max_z) >= 78 {
+            return current;
+        }
+        if current.width() < 56 || current.depth() < 48 {
+            return current;
+        }
+        let north = grid.dry_ratio(
+            current.min_x,
+            current.min_z,
+            current.max_x,
+            current.min_z + 8,
+        );
+        let south = grid.dry_ratio(
+            current.min_x,
+            current.max_z - 8,
+            current.max_x,
+            current.max_z,
+        );
+        let west = grid.dry_ratio(
+            current.min_x,
+            current.min_z,
+            current.min_x + 8,
+            current.max_z,
+        );
+        let east = grid.dry_ratio(
+            current.max_x - 8,
+            current.min_z,
+            current.max_x,
+            current.max_z,
+        );
+        let worst = north.min(south).min(west).min(east);
+        current = if worst == north {
+            Rect::new(
+                current.min_x,
+                current.min_z + 8,
+                current.max_x,
+                current.max_z,
+            )
+        } else if worst == south {
+            Rect::new(
+                current.min_x,
+                current.min_z,
+                current.max_x,
+                current.max_z - 8,
+            )
+        } else if worst == west {
+            Rect::new(
+                current.min_x + 8,
+                current.min_z,
+                current.max_x,
+                current.max_z,
+            )
+        } else {
+            Rect::new(
+                current.min_x,
+                current.min_z,
+                current.max_x - 8,
+                current.max_z,
+            )
+        };
+    }
+    current
+}
+
+fn town_offset(castle: Rect, dir: Dir, w: i32, d: i32, slide: i32, shift: i32) -> Rect {
+    match dir {
+        Dir::South => Rect::new(
+            castle.min_x - 16 + slide,
+            castle.max_z - 8 + shift,
+            castle.min_x - 16 + slide + w,
+            castle.max_z - 8 + shift + d,
+        ),
+        Dir::North => Rect::new(
+            castle.min_x - 16 + slide,
+            castle.min_z - d + 8 - shift,
+            castle.min_x - 16 + slide + w,
+            castle.min_z + 8 - shift,
+        ),
+        Dir::East => Rect::new(
+            castle.max_x - 8 + shift,
+            castle.min_z - 16 + slide,
+            castle.max_x - 8 + shift + w,
+            castle.min_z - 16 + slide + d,
+        ),
+        Dir::West => Rect::new(
+            castle.min_x - w + 8 - shift,
+            castle.min_z - 16 + slide,
+            castle.min_x + 8 - shift,
+            castle.min_z - 16 + slide + d,
+        ),
+    }
+}
+
 fn town_beside(castle: Rect, dir: Dir, w: i32, d: i32) -> Rect {
     match dir {
         Dir::South => Rect::new(
@@ -257,7 +382,7 @@ fn union(a: Rect, b: Rect) -> Rect {
     )
 }
 
-fn flattest(grid: &HeightGrid, within: Rect, w: i32, d: i32) -> Rect {
+fn flattest_dry(grid: &HeightGrid, within: Rect, w: i32, d: i32) -> Rect {
     let mut best = Rect::new(
         within.min_x,
         within.min_z,
@@ -270,6 +395,10 @@ fn flattest(grid: &HeightGrid, within: Rect, w: i32, d: i32) -> Rect {
         let mut x = within.min_x;
         while x + w <= within.max_x {
             let (lo, hi) = grid.range(x, z, x + w - 1, z + d - 1);
+            if lo <= grid.sea_level + 1 {
+                x += 8;
+                continue;
+            }
             let r = hi - lo;
             if r < best_range || (r == best_range && (x, z) < (best.min_x, best.min_z)) {
                 best_range = r;
@@ -284,6 +413,7 @@ fn flattest(grid: &HeightGrid, within: Rect, w: i32, d: i32) -> Rect {
 
 fn paint_town_wall(
     occ: &mut Occupancy,
+    grid: &HeightGrid,
     town: Rect,
     castle: Rect,
     gate: Dir,
@@ -308,12 +438,15 @@ fn paint_town_wall(
         if skip {
             continue;
         }
-        let line = bresenham(a.0, a.1, b.0, b.1);
+        let line: Vec<(i32, i32)> = bresenham(a.0, a.1, b.0, b.1)
+            .into_iter()
+            .filter(|&(x, z)| grid.is_dry(x, z))
+            .collect();
         occ.stroke(&line, 1, CellKind::TownWall, false);
     }
     let mut towers = Vec::new();
     for &(x, z) in &verts {
-        if !castle.contains(x, z) {
+        if !castle.contains(x, z) && grid.is_dry(x, z) {
             let tower = Rect::new(x - 2, z - 2, x + 2, z + 2);
             towers.push(tower);
             for dz in -2..=2 {
@@ -476,8 +609,8 @@ fn astar(
             if slope > 50 {
                 cost += 40;
             }
-            if grid.height(nx, nz) <= grid.sea_level {
-                cost += 80;
+            if grid.height(nx, nz) <= grid.sea_level + 1 {
+                cost += 240;
             }
             let tentative = g.saturating_add(cost);
             if tentative < *gscore.get(&(nx, nz)).unwrap_or(&i32::MAX) {
@@ -520,6 +653,7 @@ fn rebuild(
 
 fn place_lots(
     occ: &mut Occupancy,
+    grid: &HeightGrid,
     town: Rect,
     market: Rect,
     rng: &mut TownRng,
@@ -530,8 +664,10 @@ fn place_lots(
         BuildingKind::Church,
         BuildingKind::Tavern,
         BuildingKind::Blacksmith,
+        BuildingKind::Townhouse,
         BuildingKind::Timber,
         BuildingKind::Timber,
+        BuildingKind::Townhouse,
         BuildingKind::Longhouse,
         BuildingKind::Cottage,
         BuildingKind::Cottage,
@@ -542,33 +678,77 @@ fn place_lots(
         BuildingKind::Stall,
     ];
     let mut id = 1u16;
-    for z in (town.min_z + 4..town.max_z - 4).step_by(12) {
-        for x in (town.min_x + 4..town.max_x - 4).step_by(12) {
-            if market.inflate(2).contains(x, z) {
+    for z in (town.min_z + 6..town.max_z - 6).step_by(9) {
+        for x in (town.min_x + 6..town.max_x - 6).step_by(8) {
+            let jx = x + rng.gen_range(-2, 3);
+            let jz = z + rng.gen_range(-2, 3);
+            if market.inflate(3).contains(jx, jz) {
                 continue;
             }
             let Some(&kind) = rng.choose(&kinds) else {
                 continue;
             };
-            let (w, d) = kind.size();
-            let facing = *rng.choose(&Dir::ALL).unwrap_or(&Dir::South);
-            let rect = Rect::new(x, z, x + w - 1, z + d - 1);
-            if !occ.is_free(rect.inflate(1)) {
+            let (mut w, mut d) = kind.size();
+            w += rng.gen_range(0, 2);
+            d += rng.gen_range(0, 2);
+            if rng.chance(1, 3) {
+                std::mem::swap(&mut w, &mut d);
+            }
+            let rect = Rect::new(jx, jz, jx + w - 1, jz + d - 1);
+            if !occ.is_free(rect.inflate(1)) || !town.contains(rect.max_x, rect.max_z) {
                 continue;
             }
-            if !town.contains(rect.max_x, rect.max_z) {
+            if !grid.rect_is_dry(rect) {
                 continue;
             }
+            let facing = facing_toward_road(occ, rect)
+                .unwrap_or(*rng.choose(&Dir::ALL).unwrap_or(&Dir::South));
             let lot = Lot::new(id, kind, rect, facing, seed ^ (u64::from(id) << 8));
             occ.fill_building(rect, id, false);
+            paint_eaves(occ, rect);
             lots.push(lot);
             id += 1;
-            if lots.len() >= 36 {
+            if lots.len() >= 40 {
                 return lots;
             }
         }
     }
     lots
+}
+
+fn paint_eaves(occ: &mut Occupancy, rect: Rect) {
+    for z in rect.min_z - 1..=rect.max_z + 1 {
+        for x in rect.min_x - 1..=rect.max_x + 1 {
+            if rect.contains(x, z) {
+                continue;
+            }
+            if occ.kind(x, z) == CellKind::Empty {
+                occ.set(x, z, CellKind::Eave, false);
+            }
+        }
+    }
+}
+
+fn facing_toward_road(occ: &Occupancy, rect: Rect) -> Option<Dir> {
+    let (cx, cz) = rect.center();
+    for dist in 2..=8 {
+        for dir in Dir::ALL {
+            let x = cx + dir.dx() * dist;
+            let z = cz + dir.dz() * dist;
+            if matches!(
+                occ.kind(x, z),
+                CellKind::Road
+                    | CellKind::RoadStairN
+                    | CellKind::RoadStairS
+                    | CellKind::RoadStairE
+                    | CellKind::RoadStairW
+                    | CellKind::Market
+            ) {
+                return Some(dir);
+            }
+        }
+    }
+    None
 }
 
 fn place_farms(
@@ -590,9 +770,9 @@ fn place_farms(
                 continue;
             }
             let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
-            let near_water = lo <= grid.sea_level + 6;
-            let gentle = hi - lo <= 8;
-            if gentle && (near_water || rng.chance(1, 2)) && occ.is_free(rect) {
+            let dry = lo > grid.sea_level + 1;
+            let gentle = hi - lo <= 6;
+            if dry && gentle && occ.is_free(rect) && rng.chance(2, 3) {
                 occ.fill(rect.deflate(1), CellKind::Farm, false);
                 occ.fill(rect, CellKind::FarmEdge, false);
                 occ.fill(rect.deflate(1), CellKind::Farm, true);
@@ -601,6 +781,73 @@ fn place_farms(
             x += 22;
         }
         z += 16;
+    }
+}
+
+fn paint_water_uses(occ: &mut Occupancy, grid: &HeightGrid, bounds: Rect, castle: Rect) {
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            if grid.is_dry(x, z) {
+                continue;
+            }
+            let kind = occ.kind(x, z);
+            if castle.contains(x, z)
+                && !matches!(
+                    kind,
+                    CellKind::Empty
+                        | CellKind::Harbor
+                        | CellKind::Dock
+                        | CellKind::CastleMoat
+                        | CellKind::Bridge
+                )
+            {
+                continue;
+            }
+            match kind {
+                CellKind::Empty
+                | CellKind::Green
+                | CellKind::Farm
+                | CellKind::FarmEdge
+                | CellKind::TownWall
+                | CellKind::TownTower => {
+                    let dock = Dir::ALL.iter().any(|dir| {
+                        let n = occ.kind(x + dir.dx(), z + dir.dz());
+                        matches!(
+                            n,
+                            CellKind::Road
+                                | CellKind::RoadStairN
+                                | CellKind::RoadStairS
+                                | CellKind::RoadStairE
+                                | CellKind::RoadStairW
+                                | CellKind::Market
+                                | CellKind::Building
+                                | CellKind::TownGate
+                        )
+                    });
+                    occ.set(
+                        x,
+                        z,
+                        if dock {
+                            CellKind::Dock
+                        } else {
+                            CellKind::Harbor
+                        },
+                        true,
+                    );
+                }
+                CellKind::Road
+                | CellKind::RoadStairN
+                | CellKind::RoadStairS
+                | CellKind::RoadStairE
+                | CellKind::RoadStairW => {
+                    occ.set(x, z, CellKind::Bridge, true);
+                }
+                CellKind::Eave | CellKind::Hedge => {
+                    occ.set(x, z, CellKind::Harbor, true);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -663,6 +910,54 @@ mod tests {
         assert_eq!(
             a.planned_block(mid.x, mid.y, mid.z).map(|p| p.state),
             Some(mid.state)
+        );
+    }
+
+    #[test]
+    fn lots_stay_on_dry_land() {
+        let origin = town_in_cell(5, 0, 0);
+        let mut grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            58,
+            24,
+            10,
+        );
+        grid.sea_level = 63;
+        let plan = build_plan(5, origin, grid, PaletteKind::Oak);
+        for lot in &plan.lots {
+            assert!(
+                plan.heights.rect_is_dry(lot.rect),
+                "lot {} sited on water",
+                lot.id
+            );
+        }
+        for z in plan.bounds.min_z..=plan.bounds.max_z {
+            for x in plan.bounds.min_x..=plan.bounds.max_x {
+                if matches!(plan.occ.kind(x, z), CellKind::Building | CellKind::Farm) {
+                    assert!(
+                        plan.heights.is_dry(x, z)
+                            || matches!(
+                                plan.occ.kind(x, z),
+                                CellKind::Harbor | CellKind::Dock | CellKind::Bridge
+                            ),
+                        "occupied wet column {x},{z} is not a water use"
+                    );
+                }
+            }
+        }
+        let town_dry = plan.heights.dry_ratio(
+            plan.market.min_x - 8,
+            plan.market.min_z - 8,
+            plan.market.max_x + 8,
+            plan.market.max_z + 8,
+        );
+        assert!(
+            town_dry >= 70,
+            "market neighborhood should be mostly dry, got {town_dry}"
         );
     }
 }

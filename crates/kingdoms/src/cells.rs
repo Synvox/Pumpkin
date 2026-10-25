@@ -34,6 +34,18 @@ pub enum CellKind {
     CastleCourt,
     CastleMoat,
     CastleInnerWall,
+    /// Grass courtyard or garden (not paved).
+    Green,
+    /// Roof overhang beside a building.
+    Eave,
+    /// Hedge or leaf screen.
+    Hedge,
+    /// Open water kept as a harbor basin.
+    Harbor,
+    /// Plank walk on the water's edge.
+    Dock,
+    /// Road crossing water.
+    Bridge,
 }
 
 impl CellKind {

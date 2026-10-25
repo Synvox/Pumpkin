@@ -9,6 +9,7 @@ use crate::wfc::collapse_facade;
 pub enum BuildingKind {
     Cottage,
     Timber,
+    Townhouse,
     Longhouse,
     Church,
     Tavern,
@@ -23,11 +24,12 @@ impl BuildingKind {
     #[must_use]
     pub const fn size(self) -> (i32, i32) {
         match self {
-            Self::Cottage => (9, 9),
-            Self::Timber => (11, 9),
-            Self::Longhouse => (16, 8),
-            Self::Church => (18, 11),
-            Self::Tavern => (12, 10),
+            Self::Cottage => (8, 7),
+            Self::Timber => (10, 8),
+            Self::Townhouse => (9, 8),
+            Self::Longhouse => (18, 8),
+            Self::Church => (16, 11),
+            Self::Tavern => (13, 10),
             Self::Blacksmith => (11, 9),
             Self::Barn => (14, 10),
             Self::Windmill => (7, 7),
@@ -35,16 +37,38 @@ impl BuildingKind {
         }
     }
 
+    /// Storeys above the foundation (1 = cottage).
+    #[must_use]
+    pub const fn stories(self) -> i32 {
+        match self {
+            Self::Cottage | Self::Stall | Self::Barn | Self::Windmill => 1,
+            Self::Longhouse | Self::Blacksmith => 1,
+            Self::Timber | Self::Tavern | Self::Church => 2,
+            Self::Townhouse => 3,
+        }
+    }
+
     /// Wall height above the local floor (not including roof).
     #[must_use]
     pub const fn wall_h(self) -> i32 {
         match self {
-            Self::Cottage | Self::Stall => 4,
-            Self::Timber | Self::Blacksmith | Self::Barn => 5,
-            Self::Longhouse | Self::Tavern => 6,
-            Self::Church => 7,
-            Self::Windmill => 10,
+            Self::Stall => 3,
+            Self::Cottage => 5,
+            Self::Longhouse | Self::Blacksmith | Self::Barn => 6,
+            Self::Timber | Self::Tavern => 8,
+            Self::Townhouse => 11,
+            Self::Church => 8,
+            Self::Windmill => 12,
         }
+    }
+
+    /// Whether walls use a timber frame with plaster infill.
+    #[must_use]
+    pub const fn timber_frame(self) -> bool {
+        matches!(
+            self,
+            Self::Cottage | Self::Timber | Self::Townhouse | Self::Tavern | Self::Longhouse
+        )
     }
 }
 
