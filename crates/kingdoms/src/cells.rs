@@ -69,6 +69,24 @@ impl CellKind {
                 | Self::CastleInnerWall
         )
     }
+
+    /// Stone volumes that can bound an interior room.
+    #[must_use]
+    pub const fn is_shell(self) -> bool {
+        matches!(
+            self,
+            Self::CastleWall
+                | Self::CastleInnerWall
+                | Self::CastleTower
+                | Self::CastleGate
+                | Self::CastleBarbican
+                | Self::CastleKeep
+                | Self::CastleHall
+                | Self::CastleChapel
+                | Self::TownWall
+                | Self::TownTower
+        )
+    }
 }
 
 /// Dense occupancy grid covering the town AABB.

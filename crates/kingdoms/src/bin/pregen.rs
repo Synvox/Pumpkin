@@ -25,6 +25,7 @@ use pumpkin_kingdoms::plan::{plan_for, plan_from_cache};
 use pumpkin_kingdoms::render::{write_planner_renders, write_renders};
 use pumpkin_kingdoms::stamp::{MARKER_FLOOR, fill_volume};
 use pumpkin_kingdoms::town::{CELL_SIZE, nearest_town, town_in_cell};
+use pumpkin_kingdoms::watertight::check_town;
 use pumpkin_util::world_seed::Seed;
 use pumpkin_world::generation::generator::WorldGenerator;
 use pumpkin_world::generation::get_world_gen;
@@ -154,6 +155,18 @@ fn render_one(
     }
     println!("  two plan fills produced the same top blocks");
 
+    let tight = check_town(&plan_a, &vol_a);
+    println!("  {}", tight.summary());
+    if !tight.ok() {
+        for fail in tight.failures() {
+            eprintln!(
+                "  watertight fail {} cols={} leak={:?} float={} sky={} seed={:?}",
+                fail.name, fail.columns, fail.leak, fail.floating_roofs, fail.sky_open, fail.seed
+            );
+        }
+        return false;
+    }
+
     let well_ok = vol_a
         .top(plan_a.well.0, plan_a.well.1)
         .is_some_and(|(_, s)| s.id == MARKER_FLOOR.default_state.id || !s.is_air());
@@ -215,11 +228,20 @@ fn main() -> ExitCode {
     };
 
     let mut ok = true;
+    let mut reports = Vec::new();
     for (seed, cx, cz, label) in jobs {
         let stem = format!("town-{label}-{seed}");
-        if !render_one(seed, cx, cz, &args.out_dir, &stem, args.planner_only) {
+        if render_one(seed, cx, cz, &args.out_dir, &stem, args.planner_only) {
+            reports.push(format!("{label} {seed}: watertight ok"));
+        } else {
             ok = false;
+            reports.push(format!("{label} {seed}: render/watertight failed"));
         }
+    }
+    let report_path = args.out_dir.join("watertight.txt");
+    if let Err(error) = std::fs::write(&report_path, reports.join("\n") + "\n") {
+        eprintln!("could not write {}: {error}", report_path.display());
+        ok = false;
     }
     if ok {
         ExitCode::SUCCESS
