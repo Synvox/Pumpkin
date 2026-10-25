@@ -77,7 +77,124 @@ pub fn write_renders(
         &out_dir.join(format!("{stem}-castle-skyline.png")),
         &skyline,
     )?;
+    write_cutaways(plan, volume, out_dir, stem)?;
     Ok(())
+}
+
+fn write_cutaways(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<()> {
+    let keep = plan.castle.keep;
+    let (kx, _kz) = keep.center();
+    let keep_lid = lid_y(volume, keep.min_x, keep.max_x, keep.min_z, keep.max_z);
+    let keep_cut = render_iso_cut(
+        volume,
+        keep.min_x - 6,
+        keep.min_z - 6,
+        keep.max_x + 6,
+        keep.max_z + 6,
+        8,
+        1,
+        |x, y, _z| x <= kx + 1 && y <= keep_lid,
+    );
+    let hall = plan.castle.hall;
+    let hx = hall.center().0;
+    let hall_lid = lid_y(volume, hall.min_x, hall.max_x, hall.min_z, hall.max_z);
+    let hall_cut = render_iso_cut(
+        volume,
+        hall.min_x - 4,
+        hall.min_z - 4,
+        hall.max_x + 4,
+        hall.max_z + 4,
+        8,
+        1,
+        |x, y, _z| x <= hx + 1 && y <= hall_lid,
+    );
+    let chapel = plan.castle.chapel;
+    let cx = chapel.center().0;
+    let chapel_lid = lid_y(
+        volume,
+        chapel.min_x,
+        chapel.max_x,
+        chapel.min_z,
+        chapel.max_z,
+    );
+    let chapel_cut = render_iso_cut(
+        volume,
+        chapel.min_x - 6,
+        chapel.min_z - 6,
+        chapel.max_x + 6,
+        chapel.max_z + 6,
+        8,
+        1,
+        |x, y, _z| x <= cx + 1 && y <= chapel_lid,
+    );
+    let house = plan
+        .lots
+        .iter()
+        .find(|lot| {
+            matches!(
+                lot.kind,
+                crate::buildings::BuildingKind::Cottage
+                    | crate::buildings::BuildingKind::Timber
+                    | crate::buildings::BuildingKind::Townhouse
+                    | crate::buildings::BuildingKind::Tavern
+            )
+        })
+        .map_or(plan.market, |lot| lot.rect);
+    let house_x = house.center().0;
+    let house_lid = lid_y(volume, house.min_x, house.max_x, house.min_z, house.max_z);
+    let house_cut = render_iso_cut(
+        volume,
+        house.min_x - 3,
+        house.min_z - 3,
+        house.max_x + 3,
+        house.max_z + 3,
+        10,
+        1,
+        |x, y, _z| x <= house_x + 1 && y <= house_lid,
+    );
+    let house_ext = render_iso(
+        volume,
+        house.min_x - 3,
+        house.min_z - 3,
+        house.max_x + 3,
+        house.max_z + 3,
+        10,
+        1,
+    );
+    save(&out_dir.join(format!("{stem}-keep-cutaway.png")), &keep_cut)?;
+    save(&out_dir.join(format!("{stem}-hall-cutaway.png")), &hall_cut)?;
+    save(
+        &out_dir.join(format!("{stem}-chapel-cutaway.png")),
+        &chapel_cut,
+    )?;
+    save(
+        &out_dir.join(format!("{stem}-house-cutaway.png")),
+        &house_cut,
+    )?;
+    save(&out_dir.join(format!("{stem}-house.png")), &house_ext)?;
+    Ok(())
+}
+
+fn lid_y(volume: &VolumeSink, min_x: i32, max_x: i32, min_z: i32, max_z: i32) -> i32 {
+    let mut tops = Vec::new();
+    for z in min_z..=max_z {
+        for x in min_x..=max_x {
+            if let Some((y, _)) = volume.top(x, z) {
+                tops.push(y);
+            }
+        }
+    }
+    if tops.is_empty() {
+        return volume.min_y + 8;
+    }
+    tops.sort_unstable();
+    let eaves = tops[tops.len() * 3 / 10];
+    eaves - 2
 }
 
 fn save(path: &std::path::Path, image: &RgbImage) -> std::io::Result<()> {
@@ -149,6 +266,33 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     }
     if id == Block::IRON_BARS.id {
         return [90, 90, 98];
+    }
+    if id == Block::LANTERN.id || id == Block::CANDLE.id {
+        return [240, 190, 70];
+    }
+    if id == Block::BOOKSHELF.id {
+        return [140, 90, 45];
+    }
+    if id == Block::RED_CARPET.id || id == Block::RED_WOOL.id || id == Block::RED_BED.id {
+        return [160, 36, 36];
+    }
+    if id == Block::WHITE_BED.id {
+        return [230, 230, 225];
+    }
+    if id == Block::OAK_DOOR.id || id == Block::SPRUCE_DOOR.id {
+        return [110, 78, 40];
+    }
+    if id == Block::RED_STAINED_GLASS_PANE.id {
+        return [170, 40, 40];
+    }
+    if id == Block::YELLOW_STAINED_GLASS_PANE.id {
+        return [210, 190, 50];
+    }
+    if id == Block::FURNACE.id || id == Block::SMOKER.id || id == Block::BLAST_FURNACE.id {
+        return [80, 80, 80];
+    }
+    if id == Block::BARREL.id || id == Block::CHEST.id {
+        return [130, 88, 40];
     }
     if id == Block::RED_BANNER.id {
         return [160, 32, 32];
@@ -236,6 +380,30 @@ pub fn render_iso(
     tile: i32,
     pitch: i32,
 ) -> RgbImage {
+    render_iso_cut(
+        volume,
+        min_x,
+        min_z,
+        max_x,
+        max_z,
+        tile,
+        pitch,
+        |_, _, _| true,
+    )
+}
+
+/// Isometric view that keeps only voxels matching `keep`.
+#[must_use]
+pub fn render_iso_cut(
+    volume: &VolumeSink,
+    min_x: i32,
+    min_z: i32,
+    max_x: i32,
+    max_z: i32,
+    tile: i32,
+    pitch: i32,
+    keep: impl Fn(i32, i32, i32) -> bool,
+) -> RgbImage {
     let tile = tile.max(2);
     let tw = tile;
     let th = (tile / (1 + pitch.max(1))).max(1);
@@ -255,6 +423,9 @@ pub fn render_iso(
             let top_y = volume.top(x, z).map_or(min_y, |(y, _)| y);
             let draw_min = column_draw_min(volume, x, z, top_y, min_y);
             for y in draw_min..=max_y {
+                if !keep(x, y, z) {
+                    continue;
+                }
                 let Some(state) = volume.get(x, y, z) else {
                     continue;
                 };
