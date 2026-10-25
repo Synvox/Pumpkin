@@ -1,9 +1,29 @@
-//! Medieval kingdoms world-gen plugin (milestone 0).
+//! Medieval kingdoms world-gen plugin.
 //!
 //! Feature code lives here so upstream Pumpkin files stay limited to the
 //! small generation hooks in `pumpkin-world` / `pumpkin-core`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::manual_is_multiple_of,
+    clippy::manual_midpoint,
+    clippy::many_single_char_names,
+    clippy::match_same_arms,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate,
+    clippy::needless_pass_by_value,
+    clippy::similar_names,
+    clippy::single_match_else,
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::tuple_array_conversions,
+    clippy::type_complexity
+)]
 
 use std::sync::Arc;
 
@@ -15,10 +35,30 @@ use pumpkin_core::world::World;
 use pumpkin_data::dimension::Dimension;
 use tracing::info;
 
+pub mod buildings;
+pub mod castle;
+pub mod cells;
 pub mod command;
+pub mod geom;
+pub mod height;
+pub mod info;
 pub mod marker;
+pub mod palette;
+pub mod plan;
+pub mod render;
+pub mod rng;
+pub mod stamp;
 pub mod town;
+pub mod wfc;
 
+pub use info::{TownInfo, town_id, town_info, town_info_at};
+pub use plan::{plan_at, plan_from_cache};
+pub use stamp::{
+    PlannedBlock, planned_block, planned_block_at, planned_blocks_in, planned_blocks_in_at,
+    planned_building_blocks, planned_building_blocks_for, planned_column, planned_column_at,
+};
+
+use height::register_world_gen;
 use marker::register_hooks;
 
 /// Installs the plugin on a running server: command, hooks, and future worlds.
@@ -34,15 +74,17 @@ pub fn install(server: &Server) {
     }
 
     register_world_init_handler(server);
-    info!("Kingdoms plugin installed (town cells + /locatetown)");
+    info!("Kingdoms plugin installed (medieval towns + /locatetown)");
 }
 
-/// Registers the decorator and village filter on an overworld.
+/// Registers the decorator, village filter, and height sampler on an overworld.
 pub fn attach_world(world: &World) {
     if world.dimension.minecraft_name != Dimension::OVERWORLD.minecraft_name {
         return;
     }
-    register_hooks(world.level.world_gen().extensions());
+    let world_gen = world.level.world_gen();
+    register_world_gen(Arc::clone(&world_gen));
+    register_hooks(world_gen.extensions());
 }
 
 fn register_world_init_handler(server: &Server) {
@@ -87,18 +129,19 @@ impl EventHandler<WorldInitEvent> for AttachOnWorldInit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pumpkin_data::Block;
     use pumpkin_data::dimension::Dimension;
     use pumpkin_util::math::vector3::Vector3;
     use pumpkin_util::world_seed::Seed;
     use pumpkin_world::chunk_system::generation::generate_single_chunk_with_radius;
-    use pumpkin_world::chunk_system::{Chunk, StagedChunkEnum, generate_single_chunk};
+    use pumpkin_world::chunk_system::{Chunk, StagedChunkEnum};
     use pumpkin_world::generation::get_world_gen;
     use pumpkin_world::generation::hooks::ChunkDecorationContext;
     use pumpkin_world::generation::proto_chunk::ProtoChunk;
     use pumpkin_world::world::{BlockAccessor, WorldPortalExt};
 
-    use crate::marker::{MARKER_FLOOR, stamp_well_in_chunk};
+    use crate::height::register_world_gen;
+    use crate::plan::{build_plan, plan_for};
+    use crate::stamp::{MARKER_FLOOR, stamp_plan_in_chunk};
     use crate::town::town_in_cell;
 
     struct TestPortal;
@@ -142,11 +185,6 @@ mod tests {
         }
     }
 
-    fn stamp_on_chunk(chunk: &mut ProtoChunk, seed: u64, town_x: i32, town_z: i32) {
-        let mut ctx = ChunkDecorationContext::new(chunk, seed);
-        stamp_well_in_chunk(&mut ctx, town_x, town_z);
-    }
-
     fn extract_proto(chunk: Chunk) -> ProtoChunk {
         match chunk {
             Chunk::Proto(proto) => *proto,
@@ -169,16 +207,16 @@ mod tests {
     #[test]
     fn well_is_identical_for_two_chunk_orders() {
         let seed = Seed(20_261_025);
-        let world_gen = get_world_gen(seed, Dimension::OVERWORLD, false, Vec::new(), String::new());
-        let town = town_in_cell(seed.0, 0, 0);
-        // Force a border-spanning well by stamping at a chunk seam, then also
-        // stamp the planned town through the public decorator path.
-        let border_x = 16;
-        let border_z = 0;
-        let origin = (border_x >> 4, border_z >> 4);
-        let west = (origin.0 - 1, origin.1);
-
-        let orders = [[origin, west], [west, origin]];
+        let boxed = get_world_gen(seed, Dimension::OVERWORLD, false, Vec::new(), String::new());
+        let world_gen = Arc::from(boxed);
+        register_world_gen(Arc::clone(&world_gen));
+        register_hooks(world_gen.extensions());
+        let origin = town_in_cell(seed.0, 0, 0);
+        let plan = plan_for(seed.0, 0, 0, &world_gen);
+        let (wx, wz) = plan.well;
+        let origin_chunk = (wx >> 4, wz >> 4);
+        let west = (origin_chunk.0 - 1, origin_chunk.1);
+        let orders = [[origin_chunk, west], [west, origin_chunk]];
         let mut floors = Vec::new();
 
         for order in orders {
@@ -196,14 +234,15 @@ mod tests {
             }
             for &(cx, cz) in &order {
                 let mut center = chunks.remove(&(cx, cz)).unwrap();
-                stamp_on_chunk(&mut center, seed.0, border_x, border_z);
+                let mut ctx = ChunkDecorationContext::new(&mut center, seed.0);
+                stamp_plan_in_chunk(&mut ctx, &plan);
                 chunks.insert((cx, cz), center);
             }
             let mut found = Vec::new();
             for dx in -2..=2 {
                 for dz in -2..=2 {
-                    let x = border_x + dx;
-                    let z = border_z + dz;
+                    let x = wx + dx;
+                    let z = wz + dz;
                     let key = (x >> 4, z >> 4);
                     if let Some(chunk) = chunks.get(&key)
                         && let Some((y, id)) = marker_at(chunk, x, z)
@@ -217,40 +256,52 @@ mod tests {
 
         assert_eq!(floors[0], floors[1]);
         assert!(
-            floors[0]
-                .iter()
-                .any(|(x, _, z, _)| *x == border_x && *z == border_z),
+            floors[0].iter().any(|(x, _, z, _)| *x == wx && *z == wz),
             "mossy well floor missing at the seam"
         );
-        let _ = town;
+        let _ = origin;
     }
 
     #[test]
-    fn decorator_hook_places_town_well() {
+    fn castle_meets_minimum_footprint() {
         let seed = Seed(11);
-        let world_gen = get_world_gen(seed, Dimension::OVERWORLD, false, Vec::new(), String::new());
-        register_hooks(world_gen.extensions());
-        let town = town_in_cell(seed.0, 0, 0);
-        let cx = town.x >> 4;
-        let cz = town.z >> 4;
-        let generated =
-            generate_single_chunk(&world_gen, &TestPortal, cx, cz, StagedChunkEnum::Features);
-        let chunk = extract_proto(generated);
+        let boxed = get_world_gen(seed, Dimension::OVERWORLD, false, Vec::new(), String::new());
+        let world_gen = Arc::from(boxed);
+        let plan = plan_for(seed.0, 0, 0, &world_gen);
+        let (w, d) = plan.castle_footprint();
         assert!(
-            marker_at(&chunk, town.x, town.z).is_some(),
-            "decorator did not place the well floor at {} {}",
-            town.x,
-            town.z
+            w >= 128 && d >= 128,
+            "castle {w}x{d} is smaller than 8x8 chunks"
         );
-        let oak = Block::OAK_LOG.default_state.id;
-        let corner_x = town.x - 2;
-        let corner_z = town.z - 2;
-        if corner_x >> 4 == cx && corner_z >> 4 == cz {
-            let min_y = i32::from(chunk.bottom_y());
-            let height = i32::from(chunk.height());
-            let has_oak = (min_y..min_y + height)
-                .any(|y| chunk.get_block_state(&Vector3::new(corner_x, y, corner_z)) == oak);
-            assert!(has_oak, "oak post missing at well corner");
+    }
+
+    #[test]
+    fn synthetic_hillside_plan_is_stable() {
+        let origin = town_in_cell(99, 1, -1);
+        let grid = crate::height::HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            72,
+            22,
+            10,
+        );
+        let a = build_plan(
+            99,
+            origin,
+            grid.clone(),
+            crate::palette::PaletteKind::Spruce,
+        );
+        let b = build_plan(99, origin, grid, crate::palette::PaletteKind::Spruce);
+        assert_eq!(a.bounds, b.bounds);
+        assert_eq!(a.castle.keep, b.castle.keep);
+        assert_eq!(a.lots.len(), b.lots.len());
+        for z in a.bounds.min_z..=a.bounds.max_z {
+            for x in a.bounds.min_x..=a.bounds.max_x {
+                assert_eq!(a.occ.kind(x, z), b.occ.kind(x, z));
+            }
         }
     }
 }

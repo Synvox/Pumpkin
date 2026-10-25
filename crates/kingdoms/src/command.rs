@@ -7,6 +7,7 @@ use pumpkin_util::permission::{Permission, PermissionDefault, PermissionManager}
 use pumpkin_util::text::TextComponent;
 use pumpkin_util::text::color::NamedColor;
 
+use crate::plan::plan_from_cache;
 use crate::town::nearest_town;
 
 const NAME: &str = "locatetown";
@@ -25,9 +26,19 @@ impl CommandExecutor for LocateTownExecutor {
             .sample_surface_height(town.x, town.z)
             .unwrap_or(world.sea_level);
 
+        let extra =
+            plan_from_cache(seed, town.cell_x, town.cell_z).map_or_else(String::new, |plan| {
+                let (cx, cz) = plan.castle.bounds.center();
+                let (w, d) = plan.castle_footprint();
+                format!(
+                    " castle {cx} {cz} ({w}x{d}) well {} {}",
+                    plan.well.0, plan.well.1
+                )
+            });
+
         context.source.send_feedback(
             TextComponent::text(format!(
-                "Nearest kingdom town: {} {} {} (cell {}, {})",
+                "Nearest kingdom town: {} {} {} (cell {}, {}){extra}",
                 town.x, y, town.z, town.cell_x, town.cell_z
             ))
             .color_named(NamedColor::Gold),

@@ -6,18 +6,24 @@
 /// Side length of a town planning cell, in blocks.
 pub const CELL_SIZE: i32 = 2048;
 
-/// Blocks around a town marker where vanilla villages are vetoed.
-pub const VILLAGE_EXCLUSION_RADIUS: i32 = 48;
+/// Keep the whole castle+town inside its cell.
+pub const TOWN_MARGIN: i32 = 400;
+
+/// Blocks around a town where vanilla villages are vetoed.
+pub const VILLAGE_EXCLUSION_RADIUS: i32 = 360;
+
+/// Conservative radius used to decide which chunks a town may touch.
+pub const TOWN_INFLUENCE: i32 = 360;
 
 /// Mixer seed so town positions do not line up with vanilla structure salts.
 const TOWN_SALT: u64 = 0x4B49_4E47_444F_4D53; // "KINGDOMS"
 
-/// Planned town location in a cell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Planned town location in a cell (search origin, not the well).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TownPos {
-    /// World X of the well center.
+    /// World X of the planning origin.
     pub x: i32,
-    /// World Z of the well center.
+    /// World Z of the planning origin.
     pub z: i32,
     /// Planning-cell X (`floor(x / CELL_SIZE)`).
     pub cell_x: i32,
@@ -39,10 +45,9 @@ const fn mix_town(seed: u64, cell_x: i32, cell_z: i32) -> u64 {
 #[must_use]
 pub const fn town_in_cell(seed: u64, cell_x: i32, cell_z: i32) -> TownPos {
     let hash = mix_town(seed, cell_x, cell_z);
-    // Keep the 5×5 well inside the cell so planning stays a function of one cell.
-    let inner = (CELL_SIZE - 8) as u64;
-    let ox = 4 + (hash % inner) as i32;
-    let oz = 4 + ((hash >> 32) % inner) as i32;
+    let inner = (CELL_SIZE - TOWN_MARGIN * 2) as u64;
+    let ox = TOWN_MARGIN + (hash % inner) as i32;
+    let oz = TOWN_MARGIN + ((hash >> 32) % inner) as i32;
     TownPos {
         x: cell_x.wrapping_mul(CELL_SIZE) + ox,
         z: cell_z.wrapping_mul(CELL_SIZE) + oz,
@@ -108,7 +113,7 @@ pub fn is_inside_village_exclusion(seed: u64, block_x: i32, block_z: i32) -> boo
     false
 }
 
-/// Towns whose well may touch chunk `(chunk_x, chunk_z)`.
+/// Towns whose footprint may touch chunk `(chunk_x, chunk_z)`.
 #[must_use]
 pub fn towns_touching_chunk(seed: u64, chunk_x: i32, chunk_z: i32) -> Vec<TownPos> {
     let min_x = chunk_x * 16;
@@ -116,18 +121,18 @@ pub fn towns_touching_chunk(seed: u64, chunk_x: i32, chunk_z: i32) -> Vec<TownPo
     let max_x = min_x + 15;
     let max_z = min_z + 15;
     let mut towns = Vec::new();
-    let min_cell_x = (min_x - 2).div_euclid(CELL_SIZE);
-    let max_cell_x = (max_x + 2).div_euclid(CELL_SIZE);
-    let min_cell_z = (min_z - 2).div_euclid(CELL_SIZE);
-    let max_cell_z = (max_z + 2).div_euclid(CELL_SIZE);
+    let pad = TOWN_INFLUENCE;
+    let min_cell_x = (min_x - pad).div_euclid(CELL_SIZE);
+    let max_cell_x = (max_x + pad).div_euclid(CELL_SIZE);
+    let min_cell_z = (min_z - pad).div_euclid(CELL_SIZE);
+    let max_cell_z = (max_z + pad).div_euclid(CELL_SIZE);
+    let radius2 = i64::from(TOWN_INFLUENCE + 16) * i64::from(TOWN_INFLUENCE + 16);
     for cell_x in min_cell_x..=max_cell_x {
         for cell_z in min_cell_z..=max_cell_z {
             let town = town_in_cell(seed, cell_x, cell_z);
-            if town.x + 2 >= min_x
-                && town.x - 2 <= max_x
-                && town.z + 2 >= min_z
-                && town.z - 2 <= max_z
-            {
+            let cx = min_x.midpoint(max_x);
+            let cz = min_z.midpoint(max_z);
+            if dist2(cx, cz, town.x, town.z) <= radius2 {
                 towns.push(town);
             }
         }
@@ -157,6 +162,10 @@ mod tests {
                 assert_eq!(town.z.div_euclid(CELL_SIZE), cell_z);
                 assert_eq!(town.cell_x, cell_x);
                 assert_eq!(town.cell_z, cell_z);
+                let local_x = town.x - cell_x * CELL_SIZE;
+                let local_z = town.z - cell_z * CELL_SIZE;
+                assert!((TOWN_MARGIN..CELL_SIZE - TOWN_MARGIN).contains(&local_x));
+                assert!((TOWN_MARGIN..CELL_SIZE - TOWN_MARGIN).contains(&local_z));
             }
         }
     }
