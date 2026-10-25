@@ -523,6 +523,7 @@ fn verify_stage_parity(seed: u64, stage_dumps: &[ChunkStageDump]) {
             &mut grid_cache,
             &block_registry,
             &generator.random_config,
+            None,
         );
 
         let center = grid_cache.chunks.get(&(cx, cz)).unwrap();

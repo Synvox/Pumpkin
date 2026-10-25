@@ -11,21 +11,19 @@ pub struct FlatGenerator {
     pub dimension: Dimension,
     pub layers: Vec<FlatLayer>,
     pub biome: String,
+    /// Optional plugin/host generation hooks. Empty by default.
+    pub extensions: crate::generation::hooks::WorldGenExtensions,
 }
 
 impl FlatGenerator {
     #[must_use]
-    pub const fn new(
-        seed: Seed,
-        dimension: Dimension,
-        layers: Vec<FlatLayer>,
-        biome: String,
-    ) -> Self {
+    pub fn new(seed: Seed, dimension: Dimension, layers: Vec<FlatLayer>, biome: String) -> Self {
         Self {
             seed: seed.0,
             dimension,
             layers,
             biome,
+            extensions: crate::generation::hooks::WorldGenExtensions::new(),
         }
     }
 

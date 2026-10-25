@@ -341,6 +341,36 @@ impl Level {
         self.world_gen.load_full()
     }
 
+    /// Samples approximate terrain surface height at `(block_x, block_z)`
+    /// without generating a chunk.
+    ///
+    /// Returns `None` when this level is not using the vanilla noise generator.
+    #[must_use]
+    pub fn sample_surface_height(&self, block_x: i32, block_z: i32) -> Option<i32> {
+        self.world_gen().sample_surface_height(block_x, block_z)
+    }
+
+    /// Registers a chunk decorator on this level's generator.
+    ///
+    /// Decorators run after vanilla feature/structure generation. Unused
+    /// registries stay off the hot path.
+    pub fn register_chunk_decorator(
+        &self,
+        decorator: Arc<dyn crate::generation::hooks::ChunkDecorator>,
+    ) {
+        self.world_gen().extensions().register_decorator(decorator);
+    }
+
+    /// Registers a structure-start filter on this level's generator.
+    pub fn register_structure_start_filter(
+        &self,
+        filter: Arc<dyn crate::generation::hooks::StructureStartFilter>,
+    ) {
+        self.world_gen()
+            .extensions()
+            .register_structure_filter(filter);
+    }
+
     pub fn spawn_entity_generation(self: &Arc<Self>, pos: Vector2<i32>) {
         let level = self.clone();
         rayon::spawn(move || {

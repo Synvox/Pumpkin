@@ -701,13 +701,16 @@ impl Cache {
                         self,
                         block_registry,
                         &noise_gen.random_config,
+                        Some(&noise_gen.extensions),
                     );
                 }
-                generator::WorldGenerator::Flat(_) => {
+                generator::WorldGenerator::Flat(flat_gen) => {
                     self.chunks[mid].get_proto_chunk_mut().stage = StagedChunkEnum::Features;
+                    flat_gen.extensions.decorate(self, generator.seed());
                 }
                 generator::WorldGenerator::Custom(custom_gen) => {
                     custom_gen.step_to_features(self, block_registry);
+                    generator.extensions().decorate(self, generator.seed());
                 }
             },
             StagedChunkEnum::Lighting => {
@@ -728,8 +731,11 @@ impl Cache {
             StagedChunkEnum::Full => {
                 let chunk = self.chunks[mid].get_proto_chunk_mut();
                 debug_assert_eq!(chunk.stage, StagedChunkEnum::Spawn);
+                let chunk_x = chunk.x;
+                let chunk_z = chunk.z;
                 chunk.stage = StagedChunkEnum::Full;
                 self.chunks[mid].upgrade_to_level_chunk(generator.dimension(), lighting_config);
+                block_registry.on_chunk_populated(chunk_x, chunk_z);
             }
             StagedChunkEnum::None => {}
         }

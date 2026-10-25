@@ -83,6 +83,12 @@ pub trait WorldPortalExt: Send + Sync {
     );
 
     fn spawn_structure_entities(&self, _entities: Vec<NbtCompound>) {}
+
+    /// Called once when a newly generated chunk is upgraded to `Full`.
+    ///
+    /// Default is a no-op. The gameplay `World` uses this to fire
+    /// `ChunkPopulate` for plugins. Loaded-from-disk chunks do not call this.
+    fn on_chunk_populated(&self, _chunk_x: i32, _chunk_z: i32) {}
 }
 
 pub trait BlockAccessor: Send + Sync {

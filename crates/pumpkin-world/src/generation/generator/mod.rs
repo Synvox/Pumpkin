@@ -119,6 +119,27 @@ impl WorldGenerator {
             _ => pumpkin_util::math::position::BlockPos::ZERO,
         }
     }
+
+    /// Per-world generation hooks. Custom generators share a process-wide empty registry.
+    #[must_use]
+    pub fn extensions(&self) -> &crate::generation::hooks::WorldGenExtensions {
+        match self {
+            Self::Noise(noise_gen) => &noise_gen.extensions,
+            Self::Flat(flat_gen) => &flat_gen.extensions,
+            Self::Custom(_) => crate::generation::hooks::WorldGenExtensions::empty(),
+        }
+    }
+
+    /// Samples approximate terrain surface height without generating a chunk.
+    ///
+    /// Returns `None` for flat and custom generators, which have no noise column.
+    #[must_use]
+    pub fn sample_surface_height(&self, block_x: i32, block_z: i32) -> Option<i32> {
+        match self {
+            Self::Noise(noise_gen) => Some(noise_gen.sample_surface_height(block_x, block_z)),
+            Self::Flat(_) | Self::Custom(_) => None,
+        }
+    }
 }
 
 pub struct VanillaGenerator {
@@ -138,6 +159,8 @@ pub struct VanillaGenerator {
     pub structure_calculator: StructurePlacementCalculator,
     pub structure_allowed_biomes: FxHashMap<usize, Vec<u16>>,
     pub enabled_structure_sets: Option<rustc_hash::FxHashSet<usize>>,
+    /// Optional plugin/host generation hooks. Empty by default.
+    pub extensions: crate::generation::hooks::WorldGenExtensions,
 }
 
 impl VanillaGenerator {
@@ -240,7 +263,32 @@ impl VanillaGenerator {
             structure_calculator: StructurePlacementCalculator::new(seed.0 as i64),
             structure_allowed_biomes,
             enabled_structure_sets,
+            extensions: crate::generation::hooks::WorldGenExtensions::new(),
         }
+    }
+
+    /// Samples approximate terrain surface height at `(block_x, block_z)`
+    /// without generating a chunk.
+    ///
+    /// Uses the same noise-column sampler as structure placement
+    /// ([`crate::generation::structure::height_sampler::NoiseHeightSampler`]).
+    /// This is typically about half a millisecond per first sample at a
+    /// column and is a close match to the saved world-surface heightmap, not
+    /// a bit-identical copy of a finished chunk.
+    #[must_use]
+    pub fn sample_surface_height(&self, block_x: i32, block_z: i32) -> i32 {
+        use crate::generation::structure::structures::HeightSampler;
+        let mut sampler =
+            crate::generation::structure::height_sampler::NoiseHeightSampler::new(self);
+        sampler.estimate_height(block_x, block_z)
+    }
+
+    /// Reusable column sampler for many [`Self::sample_surface_height`] calls.
+    #[must_use]
+    pub fn surface_height_sampler(
+        &self,
+    ) -> crate::generation::structure::height_sampler::NoiseHeightSampler<'_> {
+        crate::generation::structure::height_sampler::NoiseHeightSampler::new(self)
     }
 }
 
