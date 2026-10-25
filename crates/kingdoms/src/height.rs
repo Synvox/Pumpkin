@@ -200,6 +200,44 @@ impl HeightGrid {
         if lo == i32::MAX { (64, 64) } else { (lo, hi) }
     }
 
+    /// Dry enough to host a street or lot. One block of freeboard above sea.
+    #[must_use]
+    pub fn is_dry(&self, x: i32, z: i32) -> bool {
+        self.height(x, z) > self.sea_level + 1
+    }
+
+    /// Share of samples in `rect` that are dry, as 0..=100.
+    #[must_use]
+    pub fn dry_ratio(&self, min_x: i32, min_z: i32, max_x: i32, max_z: i32) -> i32 {
+        let mut dry = 0i32;
+        let mut n = 0i32;
+        let mut z = min_z;
+        while z <= max_z {
+            let mut x = min_x;
+            while x <= max_x {
+                if self.is_dry(x, z) {
+                    dry += 1;
+                }
+                n += 1;
+                x += self.step;
+            }
+            z += self.step;
+        }
+        if n == 0 { 100 } else { dry * 100 / n }
+    }
+
+    /// Whether every corner and the center of `rect` is dry.
+    #[must_use]
+    pub fn rect_is_dry(&self, rect: crate::geom::Rect) -> bool {
+        let (cx, cz) = rect.center();
+        self.is_dry(rect.min_x, rect.min_z)
+            && self.is_dry(rect.max_x, rect.min_z)
+            && self.is_dry(rect.min_x, rect.max_z)
+            && self.is_dry(rect.max_x, rect.max_z)
+            && self.is_dry(cx, cz)
+            && self.dry_ratio(rect.min_x, rect.min_z, rect.max_x, rect.max_z) >= 85
+    }
+
     /// Highest sample in `rect`.
     #[must_use]
     pub fn peak(&self, min_x: i32, min_z: i32, max_x: i32, max_z: i32) -> (i32, i32, i32) {

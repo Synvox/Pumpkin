@@ -3267,6 +3267,7 @@ dependencies = [
  "pumpkin-data",
  "pumpkin-util",
  "pumpkin-world",
+ "rayon",
  "serde",
  "serde_json",
  "tracing",

@@ -39,13 +39,12 @@ impl CastlePlan {
 #[must_use]
 pub fn site_castle(grid: &HeightGrid, origin_x: i32, origin_z: i32, rng: &mut TownRng) -> Rect {
     let size = CASTLE_SIZE;
-    let search = 96;
-    let mut best = Rect::new(origin_x - size / 2, origin_z - size / 2, 0, 0);
-    best = Rect::new(
-        best.min_x,
-        best.min_z,
-        best.min_x + size - 1,
-        best.min_z + size - 1,
+    let search = 128;
+    let mut best = Rect::new(
+        origin_x - size / 2,
+        origin_z - size / 2,
+        origin_x - size / 2 + size - 1,
+        origin_z - size / 2 + size - 1,
     );
     let mut best_score = i64::MIN;
     let mut z = origin_z - search;
@@ -55,7 +54,8 @@ pub fn site_castle(grid: &HeightGrid, origin_x: i32, origin_z: i32, rng: &mut To
             let rect = Rect::new(x, z, x + size - 1, z + size - 1);
             let mean = i64::from(grid.mean(rect.min_x, rect.min_z, rect.max_x, rect.max_z));
             let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
-            if mean <= i64::from(grid.sea_level + 2) {
+            let dry = i64::from(grid.dry_ratio(rect.min_x, rect.min_z, rect.max_x, rect.max_z));
+            if mean <= i64::from(grid.sea_level) {
                 x += 16;
                 continue;
             }
@@ -66,8 +66,9 @@ pub fn site_castle(grid: &HeightGrid, origin_x: i32, origin_z: i32, rng: &mut To
                 rect.max_z + 32,
             ));
             let roughness = i64::from((hi - lo).abs());
-            // Prefer high ground that is a ridge, with terrace-scale (not cliff) relief.
-            let score = mean * 3 + (mean - surround) * 4 - (roughness - 8).abs() * 2
+            // Prefer high, dry ridges. Wet footprints only win if nothing drier exists.
+            let score = mean * 2 + (mean - surround) * 3 - (roughness - 8).abs() * 2
+                + dry * 14
                 + i64::from(rng.gen_range(0, 3));
             if score > best_score || (score == best_score && (x, z) < (best.min_x, best.min_z)) {
                 best_score = score;
@@ -114,7 +115,8 @@ pub fn paint_castle(
     towers.extend(interval_towers(bounds, 7, 28, gate_dir));
     towers.extend(corner_towers(inner, 7));
 
-    occ.fill(bounds.deflate(4), CellKind::CastleCourt, false);
+    occ.fill(bounds.deflate(4), CellKind::Green, false);
+    paint_court_paths(occ, bounds, keep, hall, gatehouse);
     paint_wall_ring(occ, bounds.deflate(2), 2, CellKind::CastleWall);
     paint_wall_ring(occ, inner, 1, CellKind::CastleInnerWall);
     occ.fill(keep, CellKind::CastleKeep, true);
@@ -312,6 +314,21 @@ fn paint_wall_ring(occ: &mut Occupancy, bounds: Rect, thickness: i32, kind: Cell
     }
 }
 
+fn paint_court_paths(occ: &mut Occupancy, bounds: Rect, keep: Rect, hall: Rect, gatehouse: Rect) {
+    let (cx, cz) = bounds.center();
+    let (kx, kz) = keep.center();
+    let (hx, hz) = hall.center();
+    let (gx, gz) = gatehouse.center();
+    for line in [
+        bresenham(gx, gz, kx, kz),
+        bresenham(kx, kz, hx, hz),
+        bresenham(cx, bounds.min_z + 8, cx, bounds.max_z - 8),
+        bresenham(bounds.min_x + 8, cz, bounds.max_x - 8, cz),
+    ] {
+        occ.stroke(&line, 1, CellKind::CastleCourt, true);
+    }
+}
+
 fn paint_moat(occ: &mut Occupancy, grid: &HeightGrid, bounds: Rect, gate: Dir) {
     let ring = bounds.inflate(3);
     let (cx, cz) = bounds.center();
@@ -334,5 +351,25 @@ fn paint_moat(occ: &mut Occupancy, grid: &HeightGrid, bounds: Rect, gate: Dir) {
                 occ.set(x, z, CellKind::CastleMoat, false);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::height::HeightGrid;
+
+    #[test]
+    fn wet_search_still_sites_near_origin() {
+        let mut grid = HeightGrid::synthetic_slope(0, 400, 800, 1200, 8, 58, 6, 4);
+        grid.sea_level = 63;
+        let mut rng = TownRng::new(42);
+        let rect = site_castle(&grid, 558, 979, &mut rng);
+        assert!(
+            (rect.center().0 - 558).abs() < 200,
+            "castle wandered to {rect:?}"
+        );
+        assert_eq!(rect.width(), CASTLE_SIZE);
+        assert_eq!(rect.depth(), CASTLE_SIZE);
     }
 }

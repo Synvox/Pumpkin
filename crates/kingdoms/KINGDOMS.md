@@ -11,7 +11,7 @@ One town per 2048×2048 cell, a pure function of `(seed, cell)`. Each chunk writ
 - **Roads** by A* over sampled height with a ~1:4 slope cost, stairs when steeper, switchbacks when the path needs them.
 - **Palettes** by vanilla biome: oak/plains, spruce/taiga, sandstone/desert.
 
-Siting uses `VanillaGenerator::sample_surface_height` (the same noise column structures use). Placement uses the real chunk surface and only local foundations, terraces, stilts, or retaining walls.
+Siting uses `VanillaGenerator::sample_surface_height` (the same noise column structures use). Placement uses the real chunk surface and only local foundations, terraces, stilts, or retaining walls. Lots, streets, and farms stay on dry land; leftover water becomes harbor, dock, bridge, or moat. The town rectangle shrinks off wet edges instead of walling in a lake. Courtyards are grass with paths and trees. Houses are timber-frame with cobble foundations, plaster, gabled roofs, and chimneys. Castle keeps and halls sit on one ridge floor so they do not smear into dirt terraces. Castles mix stone variants, merlons, wall walks, a portcullis, and banners.
 
 ## Query API (for later gameplay)
 
@@ -114,8 +114,10 @@ locatetown
 stop
 ```
 
-Renders (three seeds, including hillside / taiga when the scan finds them):
+Renders. `--all` writes planner PNGs (`*-planner-*`) then the same views from real Features chunks (terrain, trees, the kingdoms decorator):
 
 ```bash
 cargo run -p pumpkin-kingdoms --bin kingdoms-pregen -- --all --out-dir kingdoms-renders
+# faster layout check:
+cargo run -p pumpkin-kingdoms --bin kingdoms-pregen -- --all --planner-only --out-dir kingdoms-renders
 ```

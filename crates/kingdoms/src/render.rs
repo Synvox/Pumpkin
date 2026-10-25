@@ -7,38 +7,60 @@ use pumpkin_data::{Block, BlockState};
 use crate::plan::TownPlan;
 use crate::stamp::{VolumeSink, fill_volume};
 
-/// Renders a town into PNG files under `out_dir`.
-pub fn write_renders(
+/// Planner-only renders (no chunk generation).
+pub fn write_planner_renders(
     plan: &TownPlan,
     out_dir: &std::path::Path,
     stem: &str,
 ) -> std::io::Result<()> {
+    write_renders(plan, &fill_volume(plan), out_dir, stem)
+}
+
+/// Renders a town volume into PNG files under `out_dir`.
+pub fn write_renders(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<()> {
     std::fs::create_dir_all(out_dir)?;
-    let volume = fill_volume(plan);
-    let top = render_topdown(plan, &volume);
+    let top = render_topdown(plan, volume);
     let iso = render_iso(
-        &volume,
+        volume,
         plan.bounds.min_x,
         plan.bounds.min_z,
         plan.bounds.max_x,
         plan.bounds.max_z,
-        3,
+        4,
+        1,
     );
     let castle = plan.castle.bounds;
     let castle_iso = render_iso(
-        &volume,
+        volume,
         castle.min_x - 8,
         castle.min_z - 8,
         castle.max_x + 8,
         castle.max_z + 8,
-        5,
+        6,
+        1,
     );
     let (mx, mz) = plan.market.center();
-    let street = render_iso(&volume, mx - 36, mz - 36, mx + 36, mz + 36, 7);
+    let street = render_iso(volume, mx - 32, mz - 32, mx + 32, mz + 32, 7, 1);
+    let keep = plan.castle.keep.center();
+    let bailey = render_iso(
+        volume,
+        keep.0 - 28,
+        keep.1 - 28,
+        keep.0 + 28,
+        keep.1 + 28,
+        7,
+        1,
+    );
     save(&out_dir.join(format!("{stem}-topdown.png")), &top)?;
     save(&out_dir.join(format!("{stem}-iso.png")), &iso)?;
     save(&out_dir.join(format!("{stem}-castle.png")), &castle_iso)?;
     save(&out_dir.join(format!("{stem}-street.png")), &street)?;
+    save(&out_dir.join(format!("{stem}-bailey.png")), &bailey)?;
     Ok(())
 }
 
@@ -50,17 +72,87 @@ fn save(path: &std::path::Path, image: &RgbImage) -> std::io::Result<()> {
 
 fn block_rgb(state: &BlockState) -> [u8; 3] {
     let block = Block::from_state_id(state.id);
+    let id = block.id;
+    // Hand-tuned colors for the blocks towns actually use. Mojang textures
+    // are not redistributed here.
+    if id == Block::GRASS_BLOCK.id {
+        return [86, 158, 61];
+    }
+    if id == Block::DIRT.id || id == Block::DIRT_PATH.id {
+        return [134, 96, 67];
+    }
+    if id == Block::COBBLESTONE.id || id == Block::MOSSY_COBBLESTONE.id {
+        return [127, 127, 127];
+    }
+    if id == Block::STONE_BRICKS.id || id == Block::CRACKED_STONE_BRICKS.id {
+        return [122, 122, 122];
+    }
+    if id == Block::MOSSY_STONE_BRICKS.id {
+        return [115, 121, 105];
+    }
+    if id == Block::ANDESITE.id {
+        return [136, 136, 136];
+    }
+    if id == Block::OAK_LOG.id || id == Block::STRIPPED_OAK_LOG.id {
+        return [109, 85, 50];
+    }
+    if id == Block::SPRUCE_LOG.id {
+        return [58, 37, 16];
+    }
+    if id == Block::OAK_PLANKS.id {
+        return [162, 130, 78];
+    }
+    if id == Block::WHITE_TERRACOTTA.id
+        || id == Block::CALCITE.id
+        || id == Block::BIRCH_PLANKS.id
+        || id == Block::LIGHT_GRAY_TERRACOTTA.id
+    {
+        return [220, 214, 200];
+    }
+    if id == Block::DARK_OAK_STAIRS.id || id == Block::DARK_OAK_SLAB.id {
+        return [67, 43, 20];
+    }
+    if id == Block::SPRUCE_STAIRS.id
+        || id == Block::SPRUCE_PLANKS.id
+        || id == Block::SPRUCE_SLAB.id
+        || id == Block::STRIPPED_SPRUCE_LOG.id
+    {
+        return [114, 84, 48];
+    }
+    if id == Block::STONE_BRICK_STAIRS.id || id == Block::STONE_BRICK_SLAB.id {
+        return [122, 122, 122];
+    }
+    if id == Block::IRON_BARS.id {
+        return [90, 90, 98];
+    }
+    if id == Block::RED_BANNER.id {
+        return [160, 32, 32];
+    }
+    if id == Block::OAK_LEAVES.id || id == Block::SPRUCE_LEAVES.id {
+        return [48, 116, 40];
+    }
+    if id == Block::WATER.id {
+        return [45, 82, 162];
+    }
+    if id == Block::SAND.id || id == Block::SANDSTONE.id || id == Block::CUT_SANDSTONE.id {
+        return [219, 207, 163];
+    }
+    if id == Block::FARMLAND.id {
+        return [95, 58, 31];
+    }
+    if id == Block::WHEAT.id || id == Block::CARROTS.id || id == Block::POTATOES.id {
+        return [180, 170, 55];
+    }
+    if id == Block::HAY_BLOCK.id {
+        return [182, 154, 52];
+    }
     if let Some(color) = MapColor::from_id(block.map_color) {
         let (r, g, b) = color.rgb;
         if r != 0 || g != 0 || b != 0 {
             return [r, g, b];
         }
     }
-    // Fallbacks that map_color 0 would hide.
-    if state.id == Block::WATER.default_state.id {
-        return [50, 90, 180];
-    }
-    [90, 90, 90]
+    [96, 96, 96]
 }
 
 fn shade(rgb: [u8; 3], light: f32) -> Rgb<u8> {
@@ -77,7 +169,7 @@ fn shade(rgb: [u8; 3], light: f32) -> Rgb<u8> {
 pub fn render_topdown(plan: &TownPlan, volume: &VolumeSink) -> RgbImage {
     let w = plan.bounds.width() as u32;
     let h = plan.bounds.depth() as u32;
-    let scale = 2u32;
+    let scale = 3u32;
     let mut raw: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(w, h);
     for z in plan.bounds.min_z..=plan.bounds.max_z {
         for x in plan.bounds.min_x..=plan.bounds.max_x {
@@ -117,10 +209,11 @@ pub fn render_iso(
     max_x: i32,
     max_z: i32,
     tile: i32,
+    pitch: i32,
 ) -> RgbImage {
     let tile = tile.max(2);
     let tw = tile;
-    let th = tile / 2;
+    let th = (tile / (1 + pitch.max(1))).max(1);
     let min_y = volume.min_y;
     let max_y = volume.min_y + volume.sy - 1;
     let span_x = max_x - min_x + 1;
@@ -134,7 +227,9 @@ pub fn render_iso(
     // Back-to-front: high Z, then X, then Y.
     for z in min_z..=max_z {
         for x in min_x..=max_x {
-            for y in min_y..=max_y {
+            let top_y = volume.top(x, z).map_or(min_y, |(y, _)| y);
+            let draw_min = column_draw_min(volume, x, z, top_y, min_y);
+            for y in draw_min..=max_y {
                 let Some(state) = volume.get(x, y, z) else {
                     continue;
                 };
@@ -154,6 +249,52 @@ pub fn render_iso(
         }
     }
     image
+}
+
+fn column_draw_min(volume: &VolumeSink, x: i32, z: i32, top_y: i32, min_y: i32) -> i32 {
+    let mut vis = top_y;
+    let mut ground_run = 0;
+    let stop = (top_y - 48).max(min_y);
+    let mut y = top_y;
+    while y >= stop {
+        if let Some(state) = volume.get(x, y, z)
+            && !state.is_air()
+        {
+            vis = y;
+            if is_natural_ground(state) {
+                ground_run += 1;
+                if ground_run >= 3 {
+                    break;
+                }
+            } else {
+                ground_run = 0;
+            }
+        }
+        y -= 1;
+    }
+    vis
+}
+
+fn is_natural_ground(state: &BlockState) -> bool {
+    let id = Block::from_state_id(state.id).id;
+    id == Block::GRASS_BLOCK.id
+        || id == Block::DIRT.id
+        || id == Block::DIRT_PATH.id
+        || id == Block::FARMLAND.id
+        || id == Block::STONE.id
+        || id == Block::GRAVEL.id
+        || id == Block::SAND.id
+        || id == Block::RED_SAND.id
+        || id == Block::WATER.id
+        || id == Block::SNOW.id
+        || id == Block::SNOW_BLOCK.id
+        || id == Block::POWDER_SNOW.id
+        || id == Block::DEEPSLATE.id
+        || id == Block::TUFF.id
+        || id == Block::CLAY.id
+        || id == Block::MUD.id
+        || id == Block::GRANITE.id
+        || id == Block::DIORITE.id
 }
 
 fn occlusion(volume: &VolumeSink, x: i32, y: i32, z: i32) -> f32 {
