@@ -165,13 +165,24 @@ impl Palette {
     /// Castle masonry, with light aging.
     #[must_use]
     pub fn masonry(self, variant: u8) -> &'static BlockState {
-        match variant % 11 {
+        if matches!(self.kind, PaletteKind::Sandstone) {
+            return match variant % 7 {
+                0..=2 => self.bricks,
+                3 => self.cobble,
+                4 => self.andesite,
+                5 => self.mossy,
+                _ => self.cracked_bricks,
+            };
+        }
+        match variant % 13 {
             0..=3 => self.bricks,
             4 | 5 => self.cobble,
             6 => self.mossy_bricks,
             7 => self.cracked_bricks,
             8 => self.andesite,
             9 => self.mossy,
+            10 => Block::TUFF.default_state,
+            11 => Block::DEEPSLATE_BRICKS.default_state,
             _ => self.bricks,
         }
     }

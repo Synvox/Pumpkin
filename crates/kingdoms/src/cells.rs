@@ -1,6 +1,6 @@
 //! Per-block occupancy of a planned town.
 
-use crate::geom::Rect;
+use crate::geom::{Rect, near_poly_edge, point_in_poly, poly_bounds};
 
 /// What the planner assigned to one XZ column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +145,45 @@ impl Occupancy {
         for z in rect.min_z..=rect.max_z {
             for x in rect.min_x..=rect.max_x {
                 self.set_building(x, z, lot_id, overwrite);
+            }
+        }
+    }
+
+    /// Fills the interior of a closed polygon.
+    pub fn fill_poly(&mut self, verts: &[(i32, i32)], kind: CellKind, overwrite: bool) {
+        let Some(bounds) = poly_bounds(verts) else {
+            return;
+        };
+        for z in bounds.min_z.max(self.bounds.min_z)..=bounds.max_z.min(self.bounds.max_z) {
+            for x in bounds.min_x.max(self.bounds.min_x)..=bounds.max_x.min(self.bounds.max_x) {
+                if point_in_poly(x, z, verts) {
+                    self.set(x, z, kind, overwrite);
+                }
+            }
+        }
+    }
+
+    /// Paints columns within `radius` of a closed polygon's edges.
+    pub fn stroke_poly(
+        &mut self,
+        verts: &[(i32, i32)],
+        radius: i32,
+        kind: CellKind,
+        overwrite: bool,
+    ) {
+        let Some(bounds) = poly_bounds(verts) else {
+            return;
+        };
+        let pad = radius + 1;
+        for z in (bounds.min_z - pad).max(self.bounds.min_z)
+            ..=(bounds.max_z + pad).min(self.bounds.max_z)
+        {
+            for x in (bounds.min_x - pad).max(self.bounds.min_x)
+                ..=(bounds.max_x + pad).min(self.bounds.max_x)
+            {
+                if near_poly_edge(x, z, verts, radius) {
+                    self.set(x, z, kind, overwrite);
+                }
             }
         }
     }

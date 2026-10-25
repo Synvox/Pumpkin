@@ -11,8 +11,9 @@ use pumpkin_util::math::position::BlockPos;
 use pumpkin_world::generation::hooks::ChunkDecorationContext;
 
 use crate::buildings::{BuildingKind, Lot};
+use crate::castle::{RoofKind, TowerShape, TowerSpec};
 use crate::cells::CellKind;
-use crate::geom::Dir;
+use crate::geom::{Dir, isqrt};
 use crate::palette::{Palette, PaletteKind, stair_state};
 use crate::plan::TownPlan;
 
@@ -110,12 +111,41 @@ pub fn stamp_column(
                 place_building(sink, plan, lot, x, ground, z, &palette);
             }
         }
-        CellKind::CastleWall | CellKind::CastleInnerWall => {
-            place_curtain(sink, plan, x, floor, ground, z, &palette, 8, true);
+        CellKind::CastleWall => {
+            place_curtain(
+                sink,
+                plan,
+                x,
+                floor,
+                ground,
+                z,
+                &palette,
+                plan.castle.outer_ring.height,
+                true,
+            );
         }
-        CellKind::CastleTower => place_tower(sink, plan, x, floor, ground, z, &palette, 7, 18),
+        CellKind::CastleInnerWall => {
+            place_curtain(
+                sink,
+                plan,
+                x,
+                floor,
+                ground,
+                z,
+                &palette,
+                plan.castle.inner_ring.height,
+                true,
+            );
+        }
+        CellKind::CastleTower => {
+            if let Some(spec) = plan.castle.tower_at(x, z) {
+                place_shaped_tower(sink, plan, spec, x, ground, z, &palette);
+            } else {
+                place_tower(sink, plan, x, floor, ground, z, &palette, 7, 18);
+            }
+        }
         CellKind::CastleGate => place_gatehouse(sink, plan, x, floor, ground, z, &palette),
-        CellKind::CastleBarbican => place_barbican(sink, x, floor, ground, z, &palette),
+        CellKind::CastleBarbican => place_barbican(sink, plan, x, floor, ground, z, &palette),
         CellKind::CastleKeep => place_keep(sink, plan, x, floor, ground, z, &palette),
         CellKind::CastleHall => place_hall(sink, plan, x, floor, ground, z, &palette),
         CellKind::CastleChapel => place_chapel(sink, plan, x, floor, ground, z, &palette),
@@ -405,15 +435,33 @@ fn place_curtain(
             },
         );
     }
-    // Arrow slits on the outer face.
-    if castle && (x + z) % 4 == 0 {
-        sink.put(x, floor + 4, z, Block::IRON_BARS.default_state);
+    if castle {
+        sink.put(x, floor, z, palette.cobble);
+        sink.put(x, floor + 1, z, palette.cobble);
+        if top >= floor + 4 {
+            sink.put(x, floor + 4, z, palette.andesite);
+        }
+        if top >= floor + 8 {
+            sink.put(x, floor + 8, z, palette.andesite);
+        }
+        if (x + z) % 4 == 0 {
+            sink.put(x, floor + 5, z, Block::IRON_BARS.default_state);
+        }
+        if outer_wall_face(plan, x, z) && (x.wrapping_mul(7) + z) % 11 == 0 {
+            sink.put(x, floor + 3, z, Block::VINE.default_state);
+        }
     }
     let outer = wall_is_outer(plan, x, z);
     if outer {
         if ((x + z) & 1) == 0 {
             sink.put(x, top + 1, z, palette.masonry(1));
             sink.put(x, top + 2, z, palette.brick_wall);
+        } else if castle {
+            sink.put(x, top + 1, z, palette.fence);
+            sink.put(x, top + 2, z, palette.slab);
+        }
+        if castle && r_banner(x, z) {
+            sink.put(x, top + 3, z, Block::RED_BANNER.default_state);
         }
     } else {
         sink.put(x, top + 1, z, palette.path);
@@ -421,6 +469,14 @@ fn place_curtain(
             sink.put(x, top + 2, z, Block::LANTERN.default_state);
         }
     }
+}
+
+fn r_banner(x: i32, z: i32) -> bool {
+    (x + z * 3) % 13 == 0
+}
+
+fn outer_wall_face(plan: &TownPlan, x: i32, z: i32) -> bool {
+    wall_is_outer(plan, x, z)
 }
 
 fn wall_is_outer(plan: &TownPlan, x: i32, z: i32) -> bool {
@@ -484,6 +540,140 @@ fn place_tower(
     let _ = plan;
 }
 
+fn place_shaped_tower(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    spec: TowerSpec,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let floor = ridge_floor(plan, spec.bounds());
+    foundation(sink, x, floor, ground, z, palette);
+    let top = floor + spec.height;
+    let rim = spec.on_rim(x, z);
+    let dx = x - spec.cx;
+    let dz = z - spec.cz;
+    let dist = isqrt(dx, dz);
+    if rim {
+        for y in floor..=top {
+            let block = if y <= floor + 1 {
+                palette.cobble
+            } else if y == floor + 4 || y == floor + 8 {
+                palette.andesite
+            } else {
+                palette.masonry(((x.wrapping_mul(5) + y) as u8) & 15)
+            };
+            sink.put(x, y, z, block);
+        }
+        if (x + z) % 3 == 0 {
+            sink.put(
+                x,
+                floor + spec.height / 3,
+                z,
+                Block::IRON_BARS.default_state,
+            );
+            sink.put(
+                x,
+                floor + spec.height * 2 / 3,
+                z,
+                Block::IRON_BARS.default_state,
+            );
+        }
+        if spec.inner && spec.radius >= 3 && (x + z) % 5 == 0 {
+            sink.put(x, floor + 6, z, Block::GLASS_PANE.default_state);
+        }
+    } else {
+        clear_above(sink, x, floor + 1, top + spec.radius + 4, z);
+        sink.put(x, floor, z, palette.planks);
+        sink.put(x, floor + spec.height / 2, z, palette.planks);
+        if matches!(spec.roof, RoofKind::Crenellated) {
+            sink.put(x, top, z, palette.path);
+        }
+        if dist == 0 {
+            sink.put(x, floor + 1, z, Block::LANTERN.default_state);
+        }
+    }
+    place_mass_roof(sink, spec, x, z, top, palette);
+    if rim && matches!(spec.roof, RoofKind::Crenellated) && ((x + z) & 1) == 0 {
+        sink.put(x, top + 1, z, palette.masonry(2));
+        sink.put(x, top + 2, z, palette.brick_wall);
+    }
+    if rim && spec.radius >= 4 && (dx.abs() + dz.abs() == spec.radius) {
+        sink.put(x, top + 3, z, Block::RED_BANNER.default_state);
+    }
+}
+
+fn place_mass_roof(
+    sink: &mut impl BlockSink,
+    spec: TowerSpec,
+    x: i32,
+    z: i32,
+    top: i32,
+    palette: &Palette,
+) {
+    let dx = x - spec.cx;
+    let dz = z - spec.cz;
+    let dist = isqrt(dx, dz);
+    let out = if dx.abs() >= dz.abs() {
+        if dx < 0 { Dir::West } else { Dir::East }
+    } else if dz < 0 {
+        Dir::North
+    } else {
+        Dir::South
+    };
+    match spec.roof {
+        RoofKind::Crenellated => {}
+        RoofKind::Cone => {
+            let rise = (spec.radius - dist).max(0);
+            sink.put(x, top + 1 + rise, z, stair_state(palette.roof, out));
+            if dist <= 1 {
+                sink.put(x, top + spec.radius + 1, z, palette.roof_slab);
+            }
+        }
+        RoofKind::Spire => {
+            let rise = (spec.radius - dist).max(0) * 2;
+            sink.put(x, top + 1 + rise, z, stair_state(palette.roof, out));
+            if dist == 0 {
+                for y in top + spec.radius * 2..=top + spec.radius * 2 + 6 {
+                    sink.put(x, y, z, palette.bricks);
+                }
+                sink.put(
+                    x,
+                    top + spec.radius * 2 + 7,
+                    z,
+                    Block::LANTERN.default_state,
+                );
+            }
+        }
+        RoofKind::Hip => {
+            let rise = (spec.radius - dist).clamp(0, 8);
+            sink.put(x, top + 1 + rise, z, stair_state(palette.roof, out));
+            if dist <= 1 {
+                sink.put(x, top + 2 + rise, z, palette.roof_slab);
+            }
+        }
+        RoofKind::Gable { along_x } => {
+            let ridge = if along_x { spec.cz } else { spec.cx };
+            let d = if along_x {
+                (z - ridge).abs()
+            } else {
+                (x - ridge).abs()
+            };
+            let roof_y = top + 1 + (spec.radius - d).clamp(0, 8);
+            let dir = if along_x {
+                if z < ridge { Dir::North } else { Dir::South }
+            } else if x < ridge {
+                Dir::West
+            } else {
+                Dir::East
+            };
+            sink.put(x, roof_y, z, stair_state(palette.roof, dir));
+        }
+    }
+}
+
 fn place_gate(
     sink: &mut impl BlockSink,
     plan: &TownPlan,
@@ -519,51 +709,72 @@ fn place_gatehouse(
 ) {
     let r = plan.castle.gatehouse;
     let floor = ridge_floor(plan, r);
-    let edge = r.on_edge(x, z);
     foundation(sink, x, floor, ground, z, palette);
     let (cx, cz) = r.center();
     let passage = match plan.castle.gate_dir {
         Dir::North | Dir::South => (x - cx).abs() <= 2,
         Dir::East | Dir::West => (z - cz).abs() <= 2,
     };
-    if passage && !edge {
+    if passage {
         sink.put(x, floor, z, palette.path);
-        clear_above(sink, x, floor + 1, floor + 4, z);
+        clear_above(sink, x, floor + 1, floor + 5, z);
         sink.put(x, floor + 1, z, Block::IRON_BARS.default_state);
         sink.put(x, floor + 2, z, Block::IRON_BARS.default_state);
         sink.put(x, floor + 3, z, Block::IRON_BARS.default_state);
-        for y in floor + 5..=floor + 13 {
+        sink.put(x, floor + 4, z, Block::IRON_BARS.default_state);
+        for y in floor + 6..=floor + 12 {
             sink.put(x, y, z, palette.masonry(2));
         }
-        sink.put(x, floor + 14, z, palette.brick_wall);
+        sink.put(x, floor + 13, z, palette.brick_wall);
+        if (x - cx).abs() + (z - cz).abs() == 0 {
+            sink.put(
+                x,
+                floor.max(plan.heights.sea_level),
+                z,
+                Block::SPRUCE_PLANKS.default_state,
+            );
+        }
         return;
     }
-    for y in floor..=floor + 13 {
+    for y in floor..=floor + 12 {
         sink.put(x, y, z, palette.masonry(((x + y) as u8) & 15));
     }
     if ((x + z) & 1) == 0 {
-        sink.put(x, floor + 14, z, palette.masonry(1));
-        sink.put(x, floor + 15, z, palette.brick_wall);
-    }
-    if r.is_corner(x, z) {
-        sink.put(x, floor + 16, z, Block::RED_BANNER.default_state);
+        sink.put(x, floor + 13, z, palette.masonry(1));
+        sink.put(x, floor + 14, z, palette.brick_wall);
     }
 }
 
 fn place_barbican(
     sink: &mut impl BlockSink,
+    plan: &TownPlan,
     x: i32,
     floor: i32,
     ground: i32,
     z: i32,
     palette: &Palette,
 ) {
-    foundation(sink, x, floor, ground, z, palette);
-    for y in floor..=floor + 7 {
-        sink.put(x, y, z, palette.masonry(3));
-    }
-    if ((x + z) & 1) == 0 {
-        sink.put(x, floor + 8, z, palette.brick_wall);
+    let spec = TowerSpec {
+        cx: plan.castle.barbican.center().0,
+        cz: plan.castle.barbican.center().1,
+        radius: 5,
+        height: 10,
+        shape: TowerShape::DShape {
+            flat: plan.castle.gate_dir.opposite(),
+        },
+        roof: RoofKind::Crenellated,
+        inner: false,
+    };
+    if spec.contains(x, z) {
+        place_shaped_tower(sink, plan, spec, x, ground, z, palette);
+    } else {
+        foundation(sink, x, floor, ground, z, palette);
+        for y in floor..=floor + 7 {
+            sink.put(x, y, z, palette.masonry(3));
+        }
+        if ((x + z) & 1) == 0 {
+            sink.put(x, floor + 8, z, palette.brick_wall);
+        }
     }
 }
 
@@ -576,15 +787,16 @@ fn place_keep(
     z: i32,
     palette: &Palette,
 ) {
+    if let Some(mass) = plan.castle.keep_mass_at(x, z) {
+        place_shaped_tower(sink, plan, mass.spec, x, ground, z, palette);
+        return;
+    }
     let r = plan.castle.keep;
     let floor = ridge_floor(plan, r);
     foundation(sink, x, floor, ground, z, palette);
     let edge = r.on_edge(x, z);
-    let inner_edge = r.deflate(1).on_edge(x, z);
-    let floors = 4;
-    let storey = 5;
-    let top = floor + floors * storey;
-    if edge || inner_edge {
+    let top = floor + 16;
+    if edge {
         for y in floor..=top {
             sink.put(
                 x,
@@ -593,43 +805,10 @@ fn place_keep(
                 palette.masonry(((x.wrapping_mul(3) + y) as u8) & 15),
             );
         }
-        if edge && ((x + z) & 1) == 0 {
-            sink.put(x, top + 1, z, palette.masonry(2));
-            sink.put(x, top + 2, z, palette.brick_wall);
-        }
-        if !r.is_corner(x, z) && (x + z) % 3 == 0 {
-            sink.put(x, floor + 7, z, Block::IRON_BARS.default_state);
-            sink.put(x, floor + 12, z, Block::IRON_BARS.default_state);
-        }
-        if r.is_corner(x, z) {
-            sink.put(x, top + 3, z, Block::RED_BANNER.default_state);
-        }
         return;
     }
-    clear_above(sink, x, floor + 1, top + 8, z);
+    clear_above(sink, x, floor + 1, top, z);
     sink.put(x, floor, z, palette.planks);
-    for s in 1..floors {
-        sink.put(x, floor + s * storey, z, palette.planks);
-    }
-    if (x + z) % 15 == 0 {
-        sink.put(x, floor + 1, z, Block::LANTERN.default_state);
-    }
-    let dx = (x - r.min_x).min(r.max_x - x);
-    let dz = (z - r.min_z).min(r.max_z - z);
-    let rise = dx.min(dz).min(8);
-    let roof_y = top + rise;
-    let (cx, cz) = r.center();
-    let roof_dir = if dz <= dx {
-        if z < cz { Dir::North } else { Dir::South }
-    } else if x < cx {
-        Dir::West
-    } else {
-        Dir::East
-    };
-    sink.put(x, roof_y, z, stair_state(palette.roof, roof_dir));
-    if dx.min(dz) >= 6 {
-        sink.put(x, roof_y + 1, z, palette.roof_slab);
-    }
 }
 
 fn place_hall(
@@ -666,13 +845,37 @@ fn place_chapel(
 ) {
     let r = plan.castle.chapel;
     let floor = ridge_floor(plan, r);
-    place_gabled(sink, r, x, floor, ground, z, palette, 8, true);
-    let (cx, cz) = r.center();
-    if x == cx && z == cz {
-        for y in floor + 8..=floor + 16 {
+    if r.contains(x, z) {
+        place_gabled(sink, r, x, floor, ground, z, palette, 8, true);
+    } else {
+        foundation(sink, x, floor, ground, z, palette);
+        for y in floor..=floor + 7 {
             sink.put(x, y, z, palette.bricks);
         }
-        sink.put(x, floor + 17, z, Block::LANTERN.default_state);
+        let (cx, cz) = r.center();
+        let dist = isqrt(x - cx, z - cz);
+        sink.put(
+            x,
+            floor + 8 + (4 - dist).max(0),
+            z,
+            stair_state(palette.roof, Dir::South),
+        );
+    }
+    let (cx, _cz) = r.center();
+    let steeple = (x - cx).abs() <= 1 && (z - r.min_z).abs() <= 1;
+    if steeple {
+        for y in floor + 8..=floor + 20 {
+            sink.put(x, y, z, palette.bricks);
+        }
+        if x == cx && z == r.min_z {
+            sink.put(
+                x,
+                floor + 21,
+                z,
+                stair_state(palette.brick_stairs, Dir::South),
+            );
+            sink.put(x, floor + 22, z, Block::LANTERN.default_state);
+        }
     }
 }
 
