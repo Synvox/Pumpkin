@@ -1,0 +1,27 @@
+[package]
+name = "pumpkin-kingdoms"
+version.workspace = true
+description = "Medieval kingdoms world-gen plugin for this Pumpkin fork."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "pumpkin_kingdoms"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kingdoms-pregen"
+path = "src/bin/pregen.rs"
+
+[dependencies]
+pumpkin-core.workspace = true
+pumpkin-data = { workspace = true, features = ["default"] }
+pumpkin-util.workspace = true
+pumpkin-world.workspace = true
+
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

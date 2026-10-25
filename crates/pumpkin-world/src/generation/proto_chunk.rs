@@ -1250,6 +1250,7 @@ impl ProtoChunk {
         cache: &mut T,
         block_registry: &dyn WorldPortalExt,
         random_config: &GlobalRandomConfig,
+        extensions: Option<&super::hooks::WorldGenExtensions>,
     ) {
         let (center_x, center_z, min_y, generation_min_y, generation_height) = {
             let chunk = cache.get_center_chunk();
@@ -1329,6 +1330,10 @@ impl ProtoChunk {
         }
 
         cache.get_center_chunk_mut().stage = StagedChunkEnum::Features;
+
+        if let Some(extensions) = extensions {
+            extensions.decorate(cache, random_config.seed);
+        }
     }
 
     fn generate_structure_step<T: GenerationCache>(
@@ -1546,6 +1551,17 @@ impl ProtoChunk {
         generator: &super::generator::VanillaGenerator,
         height_sampler: &mut dyn crate::generation::structure::structures::HeightSampler,
     ) -> bool {
+        if !generator.extensions.allow_structure_start(
+            &crate::generation::hooks::StructureStartFilterContext::new(
+                generator.random_config.seed,
+                self.x,
+                self.z,
+                entry.structure,
+            ),
+        ) {
+            return false;
+        }
+
         if entry.structure == StructureKeys::Monument {
             let mut sampler = MultiNoiseSampler::generate(&generator.base_router.multi_noise);
             let center_x = chunk_pos::get_center_x(self.x);

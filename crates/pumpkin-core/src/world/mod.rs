@@ -7267,6 +7267,31 @@ impl World {
         }
     }
 
+    /// Samples approximate terrain surface height at `(block_x, block_z)`
+    /// without generating a chunk.
+    ///
+    /// See [`pumpkin_world::level::Level::sample_surface_height`].
+    #[must_use]
+    pub fn sample_surface_height(&self, block_x: i32, block_z: i32) -> Option<i32> {
+        self.level.sample_surface_height(block_x, block_z)
+    }
+
+    /// Registers a chunk decorator on this world's generator.
+    pub fn register_chunk_decorator(
+        &self,
+        decorator: Arc<dyn pumpkin_world::generation::hooks::ChunkDecorator>,
+    ) {
+        self.level.register_chunk_decorator(decorator);
+    }
+
+    /// Registers a structure-start filter on this world's generator.
+    pub fn register_structure_start_filter(
+        &self,
+        filter: Arc<dyn pumpkin_world::generation::hooks::StructureStartFilter>,
+    ) {
+        self.level.register_structure_start_filter(filter);
+    }
+
     pub fn unload_chunk(&self, chunk_pos: Vector2<i32>) {
         let mut unload_event =
             crate::plugin::api::events::world::chunk_unload::ChunkUnloadEvent::new(chunk_pos);
@@ -7481,6 +7506,11 @@ impl WorldPortalExt for WorldPortal {
         chunk_z: i32,
     ) {
         natural_spawner::spawn_mobs_for_chunk_generation(&self.0, cache, biome, chunk_x, chunk_z);
+    }
+
+    fn on_chunk_populated(&self, chunk_x: i32, chunk_z: i32) {
+        self.0
+            .populate_chunk(pumpkin_util::math::vector2::Vector2::new(chunk_x, chunk_z));
     }
 
     fn spawn_structure_entities(&self, entities: Vec<NbtCompound>) {
