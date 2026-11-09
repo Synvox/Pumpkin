@@ -75,10 +75,24 @@ fn strip_feature_vegetation(
     z: i32,
     surface: i32,
 ) {
-    if !plan.strips_trees(x, z) {
+    let kind = column_kind(plan, x, z);
+    let wet_use = matches!(
+        kind,
+        CellKind::Harbor
+            | CellKind::Dock
+            | CellKind::Ship
+            | CellKind::Boat
+            | CellKind::Breakwater
+            | CellKind::Bridge
+            | CellKind::MillRace
+            | CellKind::Sluice
+            | CellKind::WaterWheel
+    );
+    let flowing = !plan.heights.is_dry(x, z);
+    if !plan.strips_trees(x, z) && !wet_use && !flowing {
         return;
     }
-    if keeps_planned_timber(column_kind(plan, x, z)) {
+    if plan.strips_trees(x, z) && keeps_planned_timber(kind) {
         return;
     }
     let planned = plan.heights.height(x, z).max(plan.heights.sea_level);
@@ -88,6 +102,12 @@ fn strip_feature_vegetation(
     let air = Block::AIR.default_state;
     for y in planned.saturating_sub(4)..=top {
         let id = Block::from_state_id(ctx.get_block_state(x, y, z)).id;
+        if (wet_use || flowing) && !plan.strips_trees(x, z) {
+            if id == Block::LILY_PAD.id {
+                ctx.set_block_state(x, y, z, air);
+            }
+            continue;
+        }
         if is_vanilla_tree_part(id) {
             ctx.set_block_state(x, y, z, air);
         }
@@ -122,6 +142,8 @@ fn keeps_planned_timber(kind: CellKind) -> bool {
             | CellKind::SiegeLadder
             | CellKind::Burnt
             | CellKind::Eave
+            | CellKind::WaterWheel
+            | CellKind::Sluice
     )
 }
 
@@ -235,19 +257,25 @@ pub fn stamp_column(
     }
     if matches!(
         kind,
-        CellKind::Harbor | CellKind::Dock | CellKind::Ship | CellKind::Boat | CellKind::Breakwater
+        CellKind::Harbor
+            | CellKind::Dock
+            | CellKind::Ship
+            | CellKind::Boat
+            | CellKind::Breakwater
+            | CellKind::Bridge
+            | CellKind::MillRace
+            | CellKind::Sluice
+            | CellKind::WaterWheel
     ) {
         let planned = plan.heights.height(x, z);
         let sea = plan.heights.sea_level;
-        if planned <= sea + 1 {
-            if ground > sea + 2 {
-                clear_above(sink, x, sea.min(planned), ground + 8, z);
-                ground = planned.min(sea).max(sink.floor_min() + 3);
-            }
-            // Lily pads sit on the water block; clear from sea so they cannot
-            // survive as green squares on the basin.
-            clear_above(sink, x, sea, sea + 24, z);
+        if planned <= sea + 1 && ground > sea + 2 {
+            clear_above(sink, x, sea.min(planned), ground + 8, z);
+            ground = planned.min(sea).max(sink.floor_min() + 3);
         }
+        // Lily pads sit on the water block, including highland rivers.
+        let water_y = planned.min(sea);
+        clear_above(sink, x, water_y, water_y + 24, z);
     }
     if plan.strips_trees(x, z) {
         let sea = plan.heights.sea_level;
@@ -259,6 +287,10 @@ pub fn stamp_column(
                     | CellKind::Ship
                     | CellKind::Boat
                     | CellKind::Breakwater
+                    | CellKind::Bridge
+                    | CellKind::MillRace
+                    | CellKind::Sluice
+                    | CellKind::WaterWheel
             )
         {
             clear_above(sink, x, sea.saturating_sub(4), sea.max(ground) + 24, z);
@@ -457,6 +489,10 @@ pub fn stamp_column(
             place_breakwater(sink, x, ground, z, plan.heights.sea_level, &palette);
         }
         CellKind::SiegeTrench => place_siege_trench(sink, x, ground, z, &palette),
+        CellKind::WaterWheel => place_water_wheel(sink, plan, x, ground, z, &palette),
+        CellKind::MillRace => place_mill_race(sink, x, ground, z, plan.heights.sea_level, &palette),
+        CellKind::Sluice => place_sluice(sink, x, ground, z, plan.heights.sea_level, &palette),
+        CellKind::Retaining => place_retaining(sink, plan, x, ground, z, &palette),
     }
     apply_column_damage(sink, plan, x, z, kind, floor, ground, &palette);
     for mill in plan
@@ -509,6 +545,9 @@ fn occupy_raises(kind: CellKind) -> bool {
             | CellKind::Boat
             | CellKind::Breakwater
             | CellKind::SiegeTrench
+            | CellKind::WaterWheel
+            | CellKind::MillRace
+            | CellKind::Sluice
     )
 }
 
@@ -2443,17 +2482,20 @@ fn place_rose_window(sink: &mut impl BlockSink, x: i32, floor: i32, z: i32, cz: 
         if d2 > radius * radius {
             continue;
         }
-        // 12 petals: 4 cardinals plus 8 at ~30°/60° (|2a|==|b|).
-        let spoke = dy == 0 || dz == 0 || dy.abs() * 2 == dz.abs() || dz.abs() * 2 == dy.abs();
-        let ring = d2 >= radius * radius - 8 || (14..=18).contains(&d2) || d2 <= 2;
-        let petal = !spoke && !ring && (dy.abs() == 3 || dz.abs() == 3);
+        // Thick outer ring, inner oculus ring, 12 spokes between them.
+        let outer = d2 >= (radius - 1) * (radius - 1);
+        let oculus_ring = (4..=8).contains(&d2);
+        let oculus = d2 <= 3;
+        let spoke = !oculus
+            && !outer
+            && (dy == 0 || dz == 0 || dy.abs() * 2 == dz.abs() || dz.abs() * 2 == dy.abs());
         sink.put(
             x,
             y,
             z,
-            if ring || spoke || petal {
+            if outer || oculus_ring || spoke {
                 Block::CALCITE.default_state
-            } else if dz > 0 {
+            } else if oculus || dz > 0 {
                 Block::PURPLE_STAINED_GLASS.default_state
             } else {
                 Block::YELLOW_STAINED_GLASS.default_state
@@ -2605,6 +2647,7 @@ fn place_house(
                 palette.infill(((x + y) as u8) & 7)
             } else if lot.kind == BuildingKind::Blacksmith
                 || lot.kind == BuildingKind::Barn
+                || lot.kind == BuildingKind::Watermill
                 || lot.kind == BuildingKind::Monastery
                 || lot.kind == BuildingKind::Cathedral
             {
@@ -3357,6 +3400,10 @@ fn near_extractive(plan: &TownPlan, x: i32, z: i32) -> bool {
                     | CellKind::Crane
                     | CellKind::Breakwater
                     | CellKind::SiegeTrench
+                    | CellKind::WaterWheel
+                    | CellKind::MillRace
+                    | CellKind::Sluice
+                    | CellKind::Retaining
             ) {
                 return true;
             }
@@ -3927,6 +3974,85 @@ fn place_tourney_stand(
         sink.put(x, ground + 5, z, Block::OAK_FENCE.default_state);
         sink.put(x, ground + 6, z, Block::RED_BANNER.default_state);
     }
+}
+
+fn place_water_wheel(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let sea = plan.heights.sea_level;
+    let water_y = plan.heights.height(x, z).min(sea).max(ground.min(sea));
+    sink.put(x, water_y, z, Block::WATER.default_state);
+    let blob = blob_of(plan, x, z, CellKind::WaterWheel);
+    let (cx, cz) = blob.center();
+    let along_x = blob.width() >= blob.depth();
+    let da = if along_x { x - cx } else { z - cz };
+    let hub = water_y + 2;
+    for dy in -4..=4 {
+        let d2 = da * da + dy * dy;
+        if d2 > 16 {
+            continue;
+        }
+        let y = hub + dy;
+        let block = if d2 >= 9 || (da == 0 && dy == 0) {
+            palette.log
+        } else if da == 0 || dy == 0 {
+            palette.fence
+        } else {
+            continue;
+        };
+        sink.put(x, y, z, block);
+    }
+}
+
+fn place_mill_race(
+    sink: &mut impl BlockSink,
+    x: i32,
+    ground: i32,
+    z: i32,
+    sea: i32,
+    palette: &Palette,
+) {
+    let water_y = sea.min(ground + 1);
+    sink.put(x, water_y - 1, z, palette.cobble);
+    sink.put(x, water_y, z, Block::WATER.default_state);
+    clear_above(sink, x, water_y + 1, water_y + 8, z);
+}
+
+fn place_sluice(
+    sink: &mut impl BlockSink,
+    x: i32,
+    ground: i32,
+    z: i32,
+    sea: i32,
+    palette: &Palette,
+) {
+    place_mill_race(sink, x, ground, z, sea, palette);
+    let water_y = sea.min(ground + 1);
+    sink.put(x, water_y + 1, z, Block::OAK_TRAPDOOR.default_state);
+    sink.put(x, water_y + 2, z, palette.fence);
+}
+
+fn place_retaining(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let planned = plan.heights.height(x, z).max(ground);
+    sink.put(x, ground, z, palette.cobble);
+    for y in ground + 1..=planned.min(ground + 4) {
+        sink.put(x, y, z, palette.cobble);
+    }
+    sink.put(x, ground + 1, z, palette.cobble);
+    terrace_edge(sink, plan, x, ground, z, palette);
+    clear_above(sink, x, ground + 5, ground + 10, z);
 }
 
 fn place_bridge(

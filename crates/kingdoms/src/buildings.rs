@@ -23,6 +23,8 @@ pub enum BuildingKind {
     Cathedral,
     BellTower,
     TownHall,
+    /// Riverside mill house with a water wheel (not a windmill).
+    Watermill,
 }
 
 impl BuildingKind {
@@ -46,6 +48,7 @@ impl BuildingKind {
             Self::Cathedral => (32, 22),
             Self::BellTower => (5, 5),
             Self::TownHall => (14, 12),
+            Self::Watermill => (7, 6),
         }
     }
 
@@ -53,7 +56,12 @@ impl BuildingKind {
     #[must_use]
     pub const fn stories(self) -> i32 {
         match self {
-            Self::Cottage | Self::Stall | Self::Barn | Self::Windmill | Self::Monastery => 1,
+            Self::Cottage
+            | Self::Stall
+            | Self::Barn
+            | Self::Windmill
+            | Self::Watermill
+            | Self::Monastery => 1,
             Self::Longhouse | Self::Blacksmith | Self::Cathedral => 1,
             Self::Tavern | Self::Church => 2,
             Self::Timber
@@ -83,6 +91,7 @@ impl BuildingKind {
             Self::Cathedral => 16,
             Self::BellTower => 18,
             Self::TownHall => 16,
+            Self::Watermill => 8,
         }
     }
 

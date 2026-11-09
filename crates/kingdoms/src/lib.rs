@@ -77,7 +77,7 @@ pub mod watertight;
 pub mod wfc;
 
 pub use chat::ShoutKind;
-pub use damage::{DamageState, damage_state, set_damage_state};
+pub use damage::{DamageState, damage_state, note_capture, set_damage_state, step_repair};
 pub use director::{
     BattleState, RaidId, battle_state, join_kingdom, query_battle_state, set_target_town,
     start_raid, stop_raid,

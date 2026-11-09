@@ -384,7 +384,9 @@ pub fn furnish_house(
         BuildingKind::Barn => furnish_barn(sink, rect, x, floor, z, roof_y),
         BuildingKind::Tavern => furnish_tavern(sink, rect, x, floor, z, roof_y, stories, palette),
         BuildingKind::Stall => {}
-        BuildingKind::Windmill => furnish_windmill_room(sink, rect, x, floor, z, roof_y),
+        BuildingKind::Windmill | BuildingKind::Watermill => {
+            furnish_windmill_room(sink, rect, x, floor, z, roof_y);
+        }
         _ => furnish_dwelling(sink, rect, x, floor, z, roof_y, stories, palette),
     }
 }
