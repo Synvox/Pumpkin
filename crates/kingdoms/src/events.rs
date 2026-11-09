@@ -121,14 +121,19 @@ impl EventHandler<EntityDamageByEntityEvent> for FriendlyFireHandler {
                 if is_allied(&a, &b) {
                     event.cancelled = true;
                     event.damage = 0.0;
-                } else if (is_kingdoms_tagged(victim.get_entity())
-                    || is_kingdoms_tagged(damager.get_entity()))
-                    && damager_id % 17 == 0
-                {
-                    tracing::info!(
-                        "kingdoms combat attacker={damager_id} victim={victim_id} damage={}",
-                        event.damage
-                    );
+                } else {
+                    if let Some(player) = damager.get_player() {
+                        director::lock().note_hit(victim_id, player.gameprofile.id.to_string());
+                    }
+                    if (is_kingdoms_tagged(victim.get_entity())
+                        || is_kingdoms_tagged(damager.get_entity()))
+                        && damager_id % 17 == 0
+                    {
+                        tracing::info!(
+                            "kingdoms combat attacker={damager_id} victim={victim_id} damage={}",
+                            event.damage
+                        );
+                    }
                 }
                 return;
             }

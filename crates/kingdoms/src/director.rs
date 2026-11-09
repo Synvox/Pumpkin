@@ -87,20 +87,34 @@ const REPAIR_PERIOD: u32 = 40;
 const REPAIR_PLACE_PERIOD: u32 = 10;
 const REPAIR_REACH: f64 = 2.5;
 const REPAIR_QUEUE_CAP: usize = 24;
+/// Columns inspected for missing blocks per repair pass.
+const REPAIR_SCAN_COLUMNS: usize = 1;
 
 const COMBAT_LOG_CAP: usize = 512;
 const RESPAWN_PERIOD: u32 = 200;
 /// Force-load tickets and garrison before the first soldier spawns (~4 s).
 const WARM_TICKS: u32 = 80;
 /// Tickets applied per director tick during warmup.
-const TICKETS_PER_TICK: usize = 12;
-/// Soldiers (raiders, extras, garrison) spawned per director tick.
-const SPAWNS_PER_TICK: usize = 8;
+const TICKETS_PER_TICK: usize = 4;
+/// Soldiers (raiders, extras, garrison) spawned per town per director tick.
+const SPAWNS_PER_TICK: usize = 3;
+/// Cap across every town so three live fronts cannot spawn 9 bodies at once.
+const SPAWNS_PER_WORLD_TICK: u32 = 4;
+/// Scoreboard rout/rally tag writes per town per tick.
+const ROUT_TAGS_PER_TICK: usize = 8;
+/// Leftover raid bodies despawned per town per tick.
+const DESPAWNS_PER_TICK: usize = 12;
+/// Nearby players credited on a capture or successful defense.
+const CREDIT_RANGE: f64 = 64.0;
+/// Minimum ticks between any soldier/captain line on the whole director.
+const GLOBAL_CHAT_GAP: u32 = 40;
 /// After a flip, skip the opposite hold so leftover garrison cannot retake instantly.
 const HOLD_LOCKOUT_TICKS: u32 = 400;
 
 static WORST_MSPT_CENTS: AtomicU32 = AtomicU32::new(0);
 static WORST_DIRECTOR_CENTS: AtomicU32 = AtomicU32::new(0);
+static SPAWNS_THIS_TICK: AtomicU32 = AtomicU32::new(0);
+static REPAIR_SCANS_THIS_TICK: AtomicU32 = AtomicU32::new(0);
 
 fn post_y_cache() -> &'static Mutex<HashMap<(i32, i32), i32>> {
     static CACHE: OnceLock<Mutex<HashMap<(i32, i32), i32>>> = OnceLock::new();
@@ -210,6 +224,15 @@ pub enum CombatKind {
     WarClock,
 }
 
+/// Named commander the Sails director can drive per kingdom.
+#[derive(Clone, Debug)]
+pub struct Hero {
+    pub kingdom: String,
+    pub name: String,
+    pub title: String,
+    pub line: String,
+}
+
 pub struct Director {
     pub tick: u32,
     next_raid_id: u32,
@@ -223,6 +246,12 @@ pub struct Director {
     scores: HashMap<String, i32>,
     last_clock_tick: u32,
     last_shout: crate::chat::ShoutLog,
+    player_stats: HashMap<String, siege::PlayerStats>,
+    last_hit: HashMap<i32, String>,
+    heroes: HashMap<String, Hero>,
+    persist_dirty: bool,
+    last_any_shout: u32,
+    clock_filling: bool,
 }
 
 struct TownWar {
@@ -254,6 +283,9 @@ struct TownWar {
     ticket_cursor: usize,
     hold_lockout: u32,
     repair_until: u32,
+    pending_despawn: Vec<i32>,
+    pending_unticket: Vec<Vector2<i32>>,
+    repair_scan_cursor: usize,
 }
 
 struct Wired {
@@ -298,6 +330,12 @@ impl Director {
             scores: HashMap::new(),
             last_clock_tick: 0,
             last_shout: HashMap::new(),
+            player_stats: HashMap::new(),
+            last_hit: HashMap::new(),
+            heroes: HashMap::new(),
+            persist_dirty: false,
+            last_any_shout: 0,
+            clock_filling: false,
         }
     }
 
@@ -313,6 +351,7 @@ impl Director {
             self.player_kingdoms.insert(uuid, KingdomId::new(&name));
         }
         self.scores = saved.scores;
+        self.player_stats = saved.stats;
         if saved.clock_tick > 0 {
             self.tick = saved.clock_tick;
         }
@@ -356,10 +395,13 @@ impl Director {
             clock_tick: self.tick,
             next_raid_id: self.next_raid_id,
             last_clock_tick: self.last_clock_tick,
+            stats: self.player_stats.clone(),
         };
-        if let Err(err) = siege::save_state(path, &state) {
-            tracing::warn!(%err, "failed to persist kingdoms ownership");
-        }
+        siege::save_state_async(path.clone(), state);
+    }
+
+    fn mark_dirty(&mut self) {
+        self.persist_dirty = true;
     }
 
     fn add_score(&mut self, name: &str, delta: i32) {
@@ -387,7 +429,7 @@ impl Director {
         if let Some(war) = self.towns.get_mut(town_id) {
             war.owner = owner;
         }
-        self.persist();
+        self.mark_dirty();
     }
 
     #[must_use]
@@ -401,9 +443,11 @@ impl Director {
         let _ = entity.add_scoreboard_tag(&kingdom_tag(&kingdom));
         let world = entity.world.load();
         add_to_team(&world, &kingdom, &player.gameprofile.name);
-        self.player_kingdoms.insert(uuid, kingdom.clone());
-        self.persist();
-        kit_player(player, &kingdom);
+        self.player_kingdoms.insert(uuid.clone(), kingdom.clone());
+        let rank = self.player_stats.entry(uuid.clone()).or_default().rank();
+        kit_player(player, &kingdom, rank, true);
+        maybe_give_banner(player, &kingdom, self.player_stats.get_mut(&uuid));
+        self.mark_dirty();
         set_keep_respawn(player, &world, &kingdom, &self.towns);
         tracing::info!(
             player = %player.gameprofile.name,
@@ -736,8 +780,16 @@ impl Director {
         }
     }
 
+    pub fn note_hit(&mut self, victim: i32, attacker_uuid: String) {
+        if self.last_hit.len() > 512 {
+            self.last_hit.clear();
+        }
+        self.last_hit.insert(victim, attacker_uuid);
+    }
+
     pub fn note_death(&mut self, entity_id: i32) {
         let tick = self.tick;
+        let killer = self.last_hit.remove(&entity_id);
         let mut event = None;
         for war in self.towns.values_mut() {
             if let Some(wired) = war.wired.remove(&entity_id) {
@@ -765,6 +817,10 @@ impl Director {
             }
         }
         if let Some((kind, town, n)) = event {
+            if let Some(uuid) = killer {
+                self.player_stats.entry(uuid).or_default().kills += 1;
+                self.mark_dirty();
+            }
             self.push_event(CombatEvent {
                 tick,
                 kind: CombatKind::Kill,
@@ -823,17 +879,39 @@ impl Director {
         crate::http::notify_combat(&event);
         if let Some(kind) = shout_kind(event.kind) {
             let town = shout_town(&event.note);
+            let kingdom = self.towns.get(town).map(|w| w.kingdom.as_str().to_owned());
+            let hero = kingdom.as_deref().and_then(|k| self.heroes.get(k).cloned());
+            let speaker = hero
+                .as_ref()
+                .map(|h| h.name.as_str())
+                .filter(|n| !n.is_empty())
+                .unwrap_or("captain");
+            let spoken = hero.as_ref().and_then(|h| {
+                let line = h.line.trim();
+                if line.is_empty() {
+                    None
+                } else {
+                    Some(line.to_owned())
+                }
+            });
             let worlds: Vec<Arc<World>> = self.worlds.iter().filter_map(Weak::upgrade).collect();
-            for world in worlds {
-                chat::try_shout(
-                    &world,
-                    event.tick,
-                    town,
-                    kind,
-                    event.x,
-                    event.z,
-                    &mut self.last_shout,
-                );
+            let gap_ok = event.tick.saturating_sub(self.last_any_shout) >= GLOBAL_CHAT_GAP;
+            if gap_ok {
+                for world in worlds {
+                    if chat::try_shout_as(
+                        &world,
+                        event.tick,
+                        town,
+                        kind,
+                        event.x,
+                        event.z,
+                        &mut self.last_shout,
+                        speaker,
+                        spoken.as_deref(),
+                    ) {
+                        self.last_any_shout = event.tick;
+                    }
+                }
             }
         }
         if self.events.len() >= COMBAT_LOG_CAP {
@@ -891,6 +969,9 @@ impl TownWar {
             ticket_cursor: 0,
             hold_lockout: 0,
             repair_until: 0,
+            pending_despawn: Vec::new(),
+            pending_unticket: Vec::new(),
+            repair_scan_cursor: 0,
         }
     }
 
@@ -1121,14 +1202,49 @@ fn dyed_leather(item: &'static Item, rgb: i32) -> ItemStack {
     stack
 }
 
-fn kit_player(player: &Player, kingdom: &KingdomId) {
+fn kit_armor(rank: siege::Rank) -> [(EquipmentSlot, &'static Item); 4] {
+    match rank {
+        siege::Rank::Levy | siege::Rank::Freeman => [
+            (EquipmentSlot::HEAD, &Item::LEATHER_HELMET),
+            (EquipmentSlot::CHEST, &Item::LEATHER_CHESTPLATE),
+            (EquipmentSlot::LEGS, &Item::LEATHER_LEGGINGS),
+            (EquipmentSlot::FEET, &Item::LEATHER_BOOTS),
+        ],
+        siege::Rank::Sergeant => [
+            (EquipmentSlot::HEAD, &Item::LEATHER_HELMET),
+            (EquipmentSlot::CHEST, &Item::CHAINMAIL_CHESTPLATE),
+            (EquipmentSlot::LEGS, &Item::LEATHER_LEGGINGS),
+            (EquipmentSlot::FEET, &Item::LEATHER_BOOTS),
+        ],
+        siege::Rank::Knight | siege::Rank::Banneret => [
+            (EquipmentSlot::HEAD, &Item::IRON_HELMET),
+            (EquipmentSlot::CHEST, &Item::IRON_CHESTPLATE),
+            (EquipmentSlot::LEGS, &Item::IRON_LEGGINGS),
+            (EquipmentSlot::FEET, &Item::IRON_BOOTS),
+        ],
+    }
+}
+
+fn kit_weapon(rank: siege::Rank) -> Option<&'static Item> {
+    match rank {
+        siege::Rank::Levy => None,
+        siege::Rank::Freeman => Some(&Item::STONE_SWORD),
+        siege::Rank::Sergeant | siege::Rank::Knight | siege::Rank::Banneret => {
+            Some(&Item::IRON_SWORD)
+        }
+    }
+}
+
+fn kingdom_banner(kingdom: &KingdomId) -> &'static Item {
+    match kingdom.as_str() {
+        "raven" => &Item::BLUE_BANNER,
+        _ => &Item::GREEN_BANNER,
+    }
+}
+
+fn kit_player(player: &Player, kingdom: &KingdomId, rank: siege::Rank, give_rewards: bool) {
     let rgb = kingdom_dye(kingdom);
-    let pieces = [
-        (EquipmentSlot::HEAD, &Item::LEATHER_HELMET),
-        (EquipmentSlot::CHEST, &Item::LEATHER_CHESTPLATE),
-        (EquipmentSlot::LEGS, &Item::LEATHER_LEGGINGS),
-        (EquipmentSlot::FEET, &Item::LEATHER_BOOTS),
-    ];
+    let pieces = kit_armor(rank);
     let mut changes = Vec::with_capacity(pieces.len());
     {
         let mut eq = player
@@ -1137,12 +1253,37 @@ fn kit_player(player: &Player, kingdom: &KingdomId) {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (slot, item) in pieces {
-            let stack = dyed_leather(item, rgb);
+            let stack = if item.id == Item::LEATHER_HELMET.id
+                || item.id == Item::LEATHER_CHESTPLATE.id
+                || item.id == Item::LEATHER_LEGGINGS.id
+                || item.id == Item::LEATHER_BOOTS.id
+            {
+                dyed_leather(item, rgb)
+            } else {
+                ItemStack::new(1, item)
+            };
             eq.put(&slot, stack.clone());
             changes.push((slot, stack));
         }
     }
     player.living_entity.send_equipment_changes(&changes);
+    if give_rewards && let Some(weapon) = kit_weapon(rank) {
+        let mut stack = ItemStack::new(1, weapon);
+        let _ = player.inventory.insert_stack_anywhere(&mut stack);
+    }
+}
+
+fn maybe_give_banner(player: &Player, kingdom: &KingdomId, stats: Option<&mut siege::PlayerStats>) {
+    let Some(stats) = stats else {
+        return;
+    };
+    if stats.rank() != siege::Rank::Banneret || stats.banner_given {
+        return;
+    }
+    let mut stack = ItemStack::new(1, kingdom_banner(kingdom));
+    if player.inventory.insert_stack_anywhere(&mut stack) {
+        stats.banner_given = true;
+    }
 }
 
 fn set_keep_respawn(
@@ -1171,15 +1312,22 @@ fn set_keep_respawn(
 /// Re-apply team colour, leather, and keep spawn after a reconnect.
 pub fn restore_player(player: &Player) {
     let uuid = player.gameprofile.id.to_string();
-    let kingdom = lock().player_kingdom(&uuid).cloned();
-    let Some(kingdom) = kingdom else {
-        return;
+    let (kingdom, rank) = {
+        let dir = lock();
+        let Some(kingdom) = dir.player_kingdom(&uuid).cloned() else {
+            return;
+        };
+        let rank = dir
+            .player_stats
+            .get(&uuid)
+            .map_or(siege::Rank::Levy, siege::PlayerStats::rank);
+        (kingdom, rank)
     };
     let entity = player.get_entity();
     let _ = entity.add_scoreboard_tag(&kingdom_tag(&kingdom));
     let world = entity.world.load();
     add_to_team(&world, &kingdom, &player.gameprofile.name);
-    kit_player(player, &kingdom);
+    kit_player(player, &kingdom, rank, false);
     let dir = lock();
     set_keep_respawn(player, &world, &kingdom, &dir.towns);
 }
@@ -1191,6 +1339,8 @@ pub fn tick_world(world: &Arc<World>) {
     }
     let t0 = Instant::now();
     let seed = world.level.seed.0;
+    SPAWNS_THIS_TICK.store(0, Ordering::Relaxed);
+    REPAIR_SCANS_THIS_TICK.store(0, Ordering::Relaxed);
     let mut dir = lock();
     dir.tick = dir.tick.wrapping_add(1);
     dir.path_budget.reset();
@@ -1221,10 +1371,12 @@ pub fn tick_world(world: &Arc<World>) {
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
     let dir = lock();
     let raid_on = dir.towns.values().any(|w| w.raid.is_some());
-    let persist_now = tick.is_multiple_of(200);
+    let persist_now = dir.persist_dirty || tick.is_multiple_of(200);
     drop(dir);
     if persist_now {
-        lock().persist();
+        let mut dir = lock();
+        dir.persist();
+        dir.persist_dirty = false;
     }
     let (tps, mspt) = world
         .server
@@ -1369,6 +1521,7 @@ fn nearby_cached_towns(seed: u64, world: &World) -> Vec<TownInfo> {
 }
 
 fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
+    drain_pending_work(world, town_id);
     sync_front_lod(world, town_id, tick);
     let materialized = {
         let dir = lock();
@@ -1497,6 +1650,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     let mut pending_despawn: Vec<i32> = Vec::new();
     let mut dump_plots = false;
     let mut should_close_gates = false;
+    let mut credit_defense: Option<(ScenePost, KingdomId)> = None;
     {
         let mut dir = lock();
         {
@@ -1656,18 +1810,26 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 });
                 tracing::info!(town = town_id, "raid defeated");
                 dump_plots = true;
+                credit_defense = Some((war.scene.keep(), war.kingdom.clone()));
             }
         }
         for event in pending_events {
             dir.push_event(event);
         }
     }
-    if !pending_release.is_empty() {
-        apply_force_tickets(world, &pending_release, false);
+    if !pending_release.is_empty() || !pending_despawn.is_empty() {
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.pending_unticket.append(&mut pending_release);
+            war.pending_despawn.append(&mut pending_despawn);
+        }
     }
-    despawn_entities(world, &pending_despawn);
-    if dump_plots {
+    drain_pending_work(world, town_id);
+    if dump_plots && !soaking() {
         dump_live_plots(Some(town_id));
+    }
+    if let Some((keep, kingdom)) = credit_defense {
+        credit_nearby(keep, Some(kingdom.as_str()), 0, 1);
     }
     if should_close_gates {
         let gates = {
@@ -2073,9 +2235,29 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     if spawn_soldiers {
         spawn_soldiers_this_tick(world, town_id, tick);
     }
+    maybe_soldier_chatter(world, town_id, tick);
 
     if tick.is_multiple_of(RESPAWN_PERIOD) {
         crate::populate::respawn_missing(world, town_id);
+    }
+}
+
+fn take_spawn_slots(want: u32) -> u32 {
+    if want == 0 {
+        return 0;
+    }
+    loop {
+        let used = SPAWNS_THIS_TICK.load(Ordering::Relaxed);
+        if used >= SPAWNS_PER_WORLD_TICK {
+            return 0;
+        }
+        let take = want.min(SPAWNS_PER_WORLD_TICK - used);
+        if SPAWNS_THIS_TICK
+            .compare_exchange(used, used + take, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return take;
+        }
     }
 }
 
@@ -2083,7 +2265,18 @@ fn spawn_soldiers_this_tick(world: &Arc<World>, town_id: &str, tick: u32) {
     if lock().live_body_count() >= body_budget() {
         return;
     }
-    spawn_extra_defenders(world, town_id, SPAWNS_PER_TICK as u16);
+    let extra = lock()
+        .towns
+        .get(town_id)
+        .and_then(|w| w.raid.as_ref())
+        .map_or(0, |r| r.extra_left);
+    if extra > 0 {
+        let n = take_spawn_slots(SPAWNS_PER_TICK as u32);
+        if n > 0 {
+            spawn_extra_defenders(world, town_id, n as u16);
+        }
+        return;
+    }
     spawn_wave_batch(world, town_id, tick);
 }
 
@@ -2138,6 +2331,9 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
             && !rams.is_empty()
     };
     if spawn_ram {
+        if take_spawn_slots(1) == 0 {
+            return;
+        }
         let origin = rams[0];
         let y = f64::from(standing_y(world, origin));
         let ram = crate::ram::spawn_ram(
@@ -2151,6 +2347,11 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
                 raid.ram_spawned = true;
             }
         }
+        return;
+    }
+    let slots = take_spawn_slots(SPAWNS_PER_TICK as u32) as usize;
+    if slots == 0 {
+        return;
     }
     let batch: Vec<(usize, WaveMember)> = {
         let mut dir = lock();
@@ -2160,7 +2361,7 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         let Some(raid) = &mut war.raid else {
             return;
         };
-        let n = SPAWNS_PER_TICK.min(raid.pending_members.len());
+        let n = slots.min(raid.pending_members.len());
         let start = raid.spawn_cursor as usize;
         raid.pending_members
             .drain(..n)
@@ -2443,7 +2644,6 @@ fn tick_raid_warmup(world: &Arc<World>, town_id: &str, tick: u32) {
     if remaining == 0 {
         tracing::info!(town = town_id, tick, "kingdoms raid chunks warming done");
     }
-    spawn_garrison_if_needed(world, town_id, SPAWNS_PER_TICK as u16);
 }
 
 fn apply_force_tickets(world: &World, chunks: &[Vector2<i32>], add: bool) {
@@ -2556,7 +2756,7 @@ fn maybe_refill_repair(world: &World, town_id: &str, tick: u32, alarm: bool) {
     if alarm || !tick.is_multiple_of(REPAIR_PERIOD) {
         return;
     }
-    let (scene, threatened, queued) = {
+    let (scene, threatened, queued, cursor, busy, locked) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
             return;
@@ -2565,9 +2765,15 @@ fn maybe_refill_repair(world: &World, town_id: &str, tick: u32, alarm: bool) {
             war.scene.clone(),
             war.threatened.map(|p| (p.x, p.z)),
             war.repair_jobs.len() + war.repair_assigned.len(),
+            war.repair_scan_cursor,
+            !war.pending_despawn.is_empty() || !war.pending_unticket.is_empty(),
+            tick < war.hold_lockout,
         )
     };
-    if queued >= 8 {
+    if busy || locked || queued >= 8 {
+        return;
+    }
+    if REPAIR_SCANS_THIS_TICK.fetch_add(1, Ordering::Relaxed) >= 1 {
         return;
     }
     let Some((_, cx, cz)) = parse_town_id(town_id) else {
@@ -2579,18 +2785,29 @@ fn maybe_refill_repair(world: &World, town_id: &str, tick: u32, alarm: bool) {
         return;
     };
     let cols = repair::repair_columns(&scene, threatened);
-    let jobs = repair::collect_jobs(world, &plan, &cols, REPAIR_QUEUE_CAP);
-    if jobs.is_empty() {
+    if cols.is_empty() {
         return;
     }
+    let start = cursor % cols.len();
+    let slice: Vec<_> = cols
+        .iter()
+        .cycle()
+        .skip(start)
+        .take(REPAIR_SCAN_COLUMNS)
+        .copied()
+        .collect();
+    let jobs = repair::collect_jobs(world, &plan, &slice, REPAIR_QUEUE_CAP);
     let mut dir = lock();
     if let Some(war) = dir.towns.get_mut(town_id) {
-        war.repair_jobs = jobs.into_iter().collect();
-        tracing::info!(
-            town = town_id,
-            queued = war.repair_jobs.len(),
-            "kingdoms builders queued repair jobs"
-        );
+        war.repair_scan_cursor = start.saturating_add(REPAIR_SCAN_COLUMNS);
+        if !jobs.is_empty() {
+            war.repair_jobs = jobs.into_iter().collect();
+            tracing::info!(
+                town = town_id,
+                queued = war.repair_jobs.len(),
+                "kingdoms builders queued repair jobs"
+            );
+        }
     }
 }
 
@@ -2671,7 +2888,7 @@ fn spawn_retake_batch(
     }
     let post = camp;
     let y = standing_y(world, post);
-    let batch = n.min(SPAWNS_PER_TICK as u16);
+    let batch = n.min(take_spawn_slots(SPAWNS_PER_TICK as u32) as u16);
     let mut spawned_ids = Vec::new();
     for i in 0..batch {
         let index = cursor + i;
@@ -2753,6 +2970,131 @@ fn despawn_entities(world: &World, ids: &[i32]) {
     }
     if n > 0 {
         tracing::info!(despawned = n, "kingdoms leftover soldiers despawned");
+    }
+}
+
+fn drain_pending_work(world: &Arc<World>, town_id: &str) {
+    let (despawn, tickets) = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        let n = DESPAWNS_PER_TICK.min(war.pending_despawn.len());
+        let despawn: Vec<i32> = war.pending_despawn.drain(..n).collect();
+        let t = TICKETS_PER_TICK.min(war.pending_unticket.len());
+        let tickets: Vec<Vector2<i32>> = war.pending_unticket.drain(..t).collect();
+        (despawn, tickets)
+    };
+    despawn_entities(world, &despawn);
+    apply_force_tickets(world, &tickets, false);
+}
+
+fn credit_nearby(keep: ScenePost, kingdom: Option<&str>, captures: u32, defenses: u32) {
+    let worlds = lock().attached_worlds();
+    let mut ranked_up: Vec<(Arc<Player>, KingdomId, siege::Rank)> = Vec::new();
+    {
+        let mut dir = lock();
+        for world in &worlds {
+            for player in world.players.load().iter() {
+                let pos = player.living_entity.entity.pos.load();
+                if (pos.x - f64::from(keep.x)).hypot(pos.z - f64::from(keep.z)) > CREDIT_RANGE {
+                    continue;
+                }
+                let uuid = player.gameprofile.id.to_string();
+                let Some(pk) = dir.player_kingdoms.get(&uuid).cloned() else {
+                    continue;
+                };
+                if let Some(want) = kingdom
+                    && pk.as_str() != want
+                {
+                    continue;
+                }
+                let (before, after) = {
+                    let stats = dir.player_stats.entry(uuid).or_default();
+                    let before = stats.rank();
+                    stats.captures = stats.captures.saturating_add(captures);
+                    stats.defenses = stats.defenses.saturating_add(defenses);
+                    (before, stats.rank())
+                };
+                dir.persist_dirty = true;
+                if after != before {
+                    ranked_up.push((Arc::clone(player), pk, after));
+                }
+            }
+        }
+    }
+    for (player, kingdom, rank) in ranked_up {
+        kit_player(&player, &kingdom, rank, true);
+        let uuid = player.gameprofile.id.to_string();
+        let mut dir = lock();
+        maybe_give_banner(&player, &kingdom, dir.player_stats.get_mut(&uuid));
+    }
+}
+
+fn maybe_soldier_chatter(world: &World, town_id: &str, tick: u32) {
+    let (alarm, gate_breached, occupy, captain_down, keep, kingdom) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        if tick.saturating_sub(dir.last_any_shout) < GLOBAL_CHAT_GAP {
+            return;
+        }
+        (
+            war.alarm,
+            war.gate_breached,
+            war.occupy_hold,
+            war.captain_down,
+            war.scene.keep(),
+            war.kingdom.clone(),
+        )
+    };
+    if !alarm {
+        return;
+    }
+    let hash = town_id
+        .bytes()
+        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(u32::from(b)));
+    if tick % 80 != hash % 80 {
+        return;
+    }
+    let kind = if captain_down {
+        ShoutKind::Fallen
+    } else if occupy > 0 {
+        ShoutKind::Charge
+    } else if gate_breached {
+        ShoutKind::Hold
+    } else {
+        ShoutKind::Rally
+    };
+    let mut dir = lock();
+    let hero = dir.heroes.get(kingdom.as_str()).cloned();
+    let speaker = hero
+        .as_ref()
+        .map(|h| h.name.as_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("soldier")
+        .to_owned();
+    let spoken = hero.as_ref().and_then(|h| {
+        let line = h.line.trim();
+        if line.is_empty() {
+            None
+        } else {
+            Some(line.to_owned())
+        }
+    });
+    if chat::try_shout_as(
+        world,
+        tick,
+        town_id,
+        kind,
+        f64::from(keep.x),
+        f64::from(keep.z),
+        &mut dir.last_shout,
+        &speaker,
+        spoken.as_deref(),
+    ) {
+        dir.last_any_shout = tick;
     }
 }
 
@@ -2883,24 +3225,32 @@ fn apply_morale(
         // Once the gate is down the assault commits to the keep. A captain
         // death must not empty the courtyard before the hold finishes.
         if breached && is_pillager {
-            if has_tag(base, TAG_ROUTED) && base.remove_scoreboard_tag(TAG_ROUTED) {
+            if rallied_n < ROUT_TAGS_PER_TICK as u32
+                && has_tag(base, TAG_ROUTED)
+                && base.remove_scoreboard_tag(TAG_ROUTED)
+            {
                 rallied_n += 1;
             }
             continue;
         }
         if captain_down && !captain && !has_tag(base, TAG_ROUTED) {
-            let _ = base.add_scoreboard_tag(TAG_ROUTED);
-            routed_n += 1;
+            if routed_n < ROUT_TAGS_PER_TICK as u32 {
+                let _ = base.add_scoreboard_tag(TAG_ROUTED);
+                routed_n += 1;
+            }
             continue;
         }
         if crate::morale::should_rout(friends, foes) && !captain {
-            if base.add_scoreboard_tag(TAG_ROUTED) {
+            if routed_n < ROUT_TAGS_PER_TICK as u32 && base.add_scoreboard_tag(TAG_ROUTED) {
                 routed_n += 1;
             }
             continue;
         }
         if captain && !has_tag(base, TAG_ROUTED) {
             for (other, other_f) in snapshots {
+                if rallied_n >= ROUT_TAGS_PER_TICK as u32 {
+                    break;
+                }
                 if other_f != faction {
                     continue;
                 }
@@ -2917,7 +3267,7 @@ fn apply_morale(
             }
         }
     }
-    if captain_down {
+    if captain_down && routed_n < ROUT_TAGS_PER_TICK as u32 {
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
             war.captain_down = false;
@@ -3063,62 +3413,67 @@ fn maybe_war_clock(world: &Arc<World>, tick: u32) {
     if crate::http::external_director_connected() {
         return;
     }
-    ensure_border_towns(world);
     let period = war_clock_period();
     let fronts = war_clock_fronts();
     {
         let dir = lock();
-        if tick.saturating_sub(dir.last_clock_tick) < period {
-            return;
-        }
         let active = dir.towns.values().filter(|w| w.raid.is_some()).count();
         if active >= fronts {
             return;
         }
-    }
-    let mut started = 0u32;
-    for _ in 0..fronts {
-        let Some((town_id, side)) = pick_clock_front(tick, fronts) else {
-            break;
-        };
-        let spec = RaidSpec::new(war_clock_size())
-            .with_extra_defenders(war_clock_defenders())
-            .with_side(side);
-        match start_raid(world, &town_id, spec) {
-            Ok(id) => {
-                started += 1;
-                let mut dir = lock();
-                dir.push_event(CombatEvent {
-                    tick,
-                    kind: CombatKind::WarClock,
-                    actor: id.0 as i32,
-                    other: None,
-                    x: 0.0,
-                    z: 0.0,
-                    note: format!(
-                        "war clock raid {} side {} on {town_id}",
-                        id.0,
-                        side.as_str()
-                    ),
-                });
-                drop(dir);
-                tracing::info!(
-                    raid = id.0,
-                    town = town_id.as_str(),
-                    side = side.as_str(),
-                    "kingdoms war clock started raid"
-                );
-            }
-            Err(err) => {
-                tracing::debug!(town = town_id.as_str(), %err, "war clock skipped");
-                break;
-            }
+        if !dir.clock_filling && tick.saturating_sub(dir.last_clock_tick) < period {
+            return;
         }
     }
-    if started > 0 {
+    ensure_border_towns(world);
+    let Some((town_id, side)) = pick_clock_front(tick, fronts) else {
         let mut dir = lock();
+        dir.clock_filling = false;
         dir.last_clock_tick = tick;
-        dir.persist();
+        dir.mark_dirty();
+        return;
+    };
+    let spec = RaidSpec::new(war_clock_size())
+        .with_extra_defenders(war_clock_defenders())
+        .with_side(side);
+    match start_raid(world, &town_id, spec) {
+        Ok(id) => {
+            let mut dir = lock();
+            dir.clock_filling = true;
+            dir.push_event(CombatEvent {
+                tick,
+                kind: CombatKind::WarClock,
+                actor: id.0 as i32,
+                other: None,
+                x: 0.0,
+                z: 0.0,
+                note: format!(
+                    "war clock raid {} side {} on {town_id}",
+                    id.0,
+                    side.as_str()
+                ),
+            });
+            let active = dir.towns.values().filter(|w| w.raid.is_some()).count();
+            if active >= fronts {
+                dir.clock_filling = false;
+                dir.last_clock_tick = tick;
+            }
+            dir.mark_dirty();
+            drop(dir);
+            tracing::info!(
+                raid = id.0,
+                town = town_id.as_str(),
+                side = side.as_str(),
+                "kingdoms war clock started raid"
+            );
+        }
+        Err(err) => {
+            tracing::debug!(town = town_id.as_str(), %err, "war clock skipped");
+            let mut dir = lock();
+            dir.clock_filling = false;
+            dir.last_clock_tick = tick;
+            dir.mark_dirty();
+        }
     }
 }
 
@@ -3293,7 +3648,7 @@ fn apply_capture(
     occupier: TownOwner,
     delta: u32,
 ) {
-    let (captured, retaken, kingdom, keep, need, leftover, _hold) = {
+    let (captured, retaken, kingdom, keep, need, _leftover, _hold) = {
         let mut dir = lock();
         let Some(war) = dir.towns.get_mut(town_id) else {
             return;
@@ -3338,7 +3693,7 @@ fn apply_capture(
                 war.occupy_hold
             );
         }
-        let leftover = if update.captured || update.retaken {
+        if update.captured || update.retaken {
             let mut ids = Vec::new();
             if let Some(raid) = war.raid.take() {
                 ids.extend(raid.living);
@@ -3347,37 +3702,22 @@ fn apply_capture(
             if let Some(ram) = war.ram.take() {
                 ids.extend(ram.parts);
             }
+            war.pending_despawn.extend(ids);
+            war.pending_unticket.append(&mut war.ticketed);
             war.alarm = false;
             war.hold_lockout = tick.saturating_add(HOLD_LOCKOUT_TICKS);
             war.repair_until = tick.saturating_add(HOLD_LOCKOUT_TICKS + REPAIR_WINDOW_TICKS);
-            ids
-        } else {
-            Vec::new()
-        };
+        }
         (
             update.captured,
             update.retaken,
             war.kingdom.clone(),
             war.scene.keep(),
             occupy_need,
-            leftover,
+            Vec::<i32>::new(),
             war.occupy_hold,
         )
     };
-    if captured || retaken {
-        let tickets = {
-            let mut dir = lock();
-            dir.towns
-                .get_mut(town_id)
-                .map(|w| std::mem::take(&mut w.ticketed))
-                .unwrap_or_default()
-        };
-        let worlds = lock().attached_worlds();
-        for world in worlds {
-            despawn_entities(&world, &leftover);
-            apply_force_tickets(&world, &tickets, false);
-        }
-    }
     if captured {
         let owner_name = occupier.as_str().to_owned();
         let mut dir = lock();
@@ -3395,6 +3735,7 @@ fn apply_capture(
             ),
         });
         drop(dir);
+        credit_nearby(keep, Some(&owner_name), 1, 0);
         tracing::info!(
             "kingdoms town captured town={town_id} raiders_in_keep={raiders_in_keep} need={need} hold={HOLD_TICKS} score={owner_name}"
         );
@@ -3413,6 +3754,7 @@ fn apply_capture(
             note: format!("{town_id} retaken by {}", kingdom.as_str()),
         });
         drop(dir);
+        credit_nearby(keep, Some(kingdom.as_str()), 1, 0);
         tracing::info!(
             "kingdoms town retaken town={town_id} defenders_in_keep={defenders_in_keep} owner={}",
             kingdom.as_str()
@@ -3838,6 +4180,10 @@ fn spawn_extra_defenders(world: &Arc<World>, town_id: &str, max: u16) {
     }
 }
 
+#[expect(
+    dead_code,
+    reason = "warmup only applies tickets; extras spawn after warm_until"
+)]
 fn spawn_garrison_if_needed(world: &Arc<World>, town_id: &str, max: u16) -> u16 {
     if max == 0 {
         return 0;
@@ -3923,6 +4269,182 @@ pub fn battle_state(town_id: &str) -> Option<BattleState> {
 #[must_use]
 pub fn war_front() -> WarFront {
     lock().war_front()
+}
+
+/// Active battles for `/kingdom fronts`.
+#[must_use]
+pub fn format_fronts() -> String {
+    let front = war_front();
+    let mut lines: Vec<String> = front
+        .towns
+        .iter()
+        .filter(|t| t.raid_active)
+        .map(|t| {
+            format!(
+                "{} side={} owner={} home={} live={} raiders={} defenders={} hold={}/{}",
+                t.id,
+                t.raid_side.as_deref().unwrap_or("-"),
+                t.owner,
+                t.kingdom,
+                t.live,
+                t.raiders,
+                t.defenders,
+                t.occupy_hold,
+                t.occupy_need
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        "no active fronts".to_owned()
+    } else {
+        lines.sort();
+        lines.join(" | ")
+    }
+}
+
+/// Persisted rank line for `/war stats` / `/kingdom stats`.
+#[must_use]
+pub fn format_player_stats(uuid: &str, name: &str) -> String {
+    let dir = lock();
+    let kingdom = dir
+        .player_kingdom(uuid)
+        .map_or_else(|| "none".to_owned(), |k| k.as_str().to_owned());
+    let stats = dir.player_stats.get(uuid).cloned().unwrap_or_default();
+    format!(
+        "{name} kingdom={kingdom} rank={} renown={} kills={} captures={} defenses={}",
+        stats.rank().as_str(),
+        stats.renown(),
+        stats.kills,
+        stats.captures,
+        stats.defenses
+    )
+}
+
+/// Teleport a player to a friendly rally and materialise the front if it is abstract.
+pub fn deploy_player(player: &Player, town_arg: Option<&str>) -> Result<String, String> {
+    let uuid = player.gameprofile.id.to_string();
+    let world = Arc::clone(&player.get_entity().world.load());
+    let pos = player.get_entity().pos.load();
+    let (kingdom, town_id, post, live) = {
+        let dir = lock();
+        let Some(kingdom) = dir.player_kingdom(&uuid).cloned() else {
+            return Err("join a kingdom first (/kingdom join alder|raven)".to_owned());
+        };
+        let town_id = if let Some(arg) = town_arg {
+            resolve_town_id(&world, pos, arg).ok_or_else(|| format!("unknown town {arg}"))?
+        } else {
+            pick_deploy_front(&dir, &kingdom).ok_or_else(|| "no active fronts".to_owned())?
+        };
+        let Some(war) = dir.towns.get(&town_id) else {
+            return Err(format!("town {town_id} is not cached yet"));
+        };
+        if war.raid.is_none() {
+            return Err(format!("no battle at {town_id}"));
+        }
+        let keep = war.scene.keep();
+        let friendly = war.owner.as_str() == kingdom.as_str() || war.kingdom == kingdom;
+        let post = if friendly {
+            keep
+        } else {
+            war.raid
+                .as_ref()
+                .map(|r| r.camp)
+                .or_else(|| war.scene.raid_camps().first().copied())
+                .or_else(|| war.scene.road_approach())
+                .unwrap_or(keep)
+        };
+        let live = war.raid.as_ref().is_some_and(|r| r.materialized);
+        (kingdom, town_id, post, live)
+    };
+    if !live {
+        let tick = lock().tick;
+        materialize_raid(&world, &town_id, tick);
+    }
+    let y = standing_y(&world, post);
+    let dest = Vector3::new(
+        f64::from(post.x) + 0.5,
+        f64::from(y),
+        f64::from(post.z) + 0.5,
+    );
+    player.teleport(dest, None, None, world);
+    Ok(format!(
+        "deployed to {town_id} as {} ({})",
+        kingdom.as_str(),
+        if live { "live" } else { "materialising" }
+    ))
+}
+
+fn pick_deploy_front(dir: &Director, kingdom: &KingdomId) -> Option<String> {
+    let mut best: Option<(u8, String)> = None;
+    for (id, war) in &dir.towns {
+        if war.raid.is_none() {
+            continue;
+        }
+        let live = war.raid.as_ref().is_some_and(|r| r.materialized);
+        let allied = war.kingdom == *kingdom || war.owner.as_str() == kingdom.as_str();
+        let rank = match (live, allied) {
+            (true, true) => 0u8,
+            (true, false) => 1,
+            (false, true) => 2,
+            (false, false) => 3,
+        };
+        if best.as_ref().is_none_or(|(r, _)| rank < *r) {
+            best = Some((rank, id.clone()));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// Upsert a named hero/commander for a kingdom.
+pub fn set_hero(kingdom: &str, name: &str, title: &str, line: &str) -> Hero {
+    let hero = Hero {
+        kingdom: KingdomId::new(kingdom).as_str().to_owned(),
+        name: name.trim().to_owned(),
+        title: title.trim().to_owned(),
+        line: line.trim().to_owned(),
+    };
+    let mut dir = lock();
+    dir.heroes.insert(hero.kingdom.clone(), hero.clone());
+    hero
+}
+
+#[must_use]
+pub fn all_heroes() -> Vec<Hero> {
+    let mut heroes: Vec<Hero> = lock().heroes.values().cloned().collect();
+    heroes.sort_by(|a, b| a.kingdom.cmp(&b.kingdom));
+    heroes
+}
+
+/// Broadcast a line as the kingdom's named hero.
+pub fn shout_hero(kingdom: &str, text: &str) -> Result<Hero, String> {
+    let key = KingdomId::new(kingdom).as_str().to_owned();
+    let mut dir = lock();
+    let Some(hero) = dir.heroes.get_mut(&key) else {
+        return Err(format!("no hero for {kingdom}"));
+    };
+    let spoken = text.trim();
+    if !spoken.is_empty() {
+        spoken.clone_into(&mut hero.line);
+    }
+    let hero = hero.clone();
+    let worlds = dir.attached_worlds();
+    drop(dir);
+    let line = if spoken.is_empty() {
+        hero.line.as_str()
+    } else {
+        spoken
+    };
+    let title = if hero.title.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", hero.title)
+    };
+    let msg =
+        TextComponent::text(format!("<{}{title}> {line}", hero.name)).color_named(NamedColor::Gold);
+    for world in worlds {
+        world.broadcast_system_message(&msg, false);
+    }
+    Ok(hero)
 }
 
 /// Console `/war` summary: scores, clock, and each cached town.
@@ -4043,6 +4565,33 @@ mod tests {
         assert_eq!(clock_side(&raven, 2), RaidSide::Alder);
         assert_eq!(REPAIR_WINDOW_TICKS, 400);
         assert_eq!(HOLD_LOCKOUT_TICKS + REPAIR_WINDOW_TICKS, 800);
+    }
+
+    #[test]
+    fn spawn_and_rout_caps_are_spread() {
+        assert_eq!(SPAWNS_PER_TICK, 3);
+        assert_eq!(SPAWNS_PER_WORLD_TICK, 4);
+        assert_eq!(ROUT_TAGS_PER_TICK, 8);
+        assert_eq!(DESPAWNS_PER_TICK, 12);
+        assert_eq!(REPAIR_SCAN_COLUMNS, 1);
+        assert_eq!(TICKETS_PER_TICK, 4);
+    }
+
+    #[test]
+    fn kit_tiers_follow_renown() {
+        assert_eq!(kit_weapon(siege::Rank::Levy), None);
+        assert_eq!(kit_weapon(siege::Rank::Freeman), Some(&Item::STONE_SWORD));
+        assert_eq!(kit_weapon(siege::Rank::Knight), Some(&Item::IRON_SWORD));
+        let levy = kit_armor(siege::Rank::Levy);
+        assert_eq!(levy[1].1.id, Item::LEATHER_CHESTPLATE.id);
+        let sergeant = kit_armor(siege::Rank::Sergeant);
+        assert_eq!(sergeant[1].1.id, Item::CHAINMAIL_CHESTPLATE.id);
+        let knight = kit_armor(siege::Rank::Banneret);
+        assert_eq!(knight[1].1.id, Item::IRON_CHESTPLATE.id);
+        assert_eq!(
+            kingdom_banner(&KingdomId::new("raven")).id,
+            Item::BLUE_BANNER.id
+        );
     }
 
     #[test]
