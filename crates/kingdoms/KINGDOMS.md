@@ -362,6 +362,25 @@ Plots: `/opt/cursor/artifacts/soak-r9.log`, `soak-r9.csv`, `soak-r9-summary.json
 | r8 30 min soak (before) | **256** live / 836 entities | **p50 34.9 / p95 49.4 / max 71** after join | p50 **0.26** / p95 **1.48** (max 902 dual-capture) | 14 | 36 captures; raid-start 554 / rout 708 / dual-capture 902 |
 | r9 30 min soak | **266** live / 942 entities | **p50 39.7 / p95 53.1 / max 73** after join | p50 **0.64** / p95 **1.66** (max **1163** on a live-ticket tick) | 12 | 1 live + 3 abstract; **38 captures** (alder 11 / raven 18 / pillager 9); tickets 0→86; RSS 88→848 MiB; **16 director ticks ≥ 50 ms** (log); soldier shouts 197; pumpkin-core untouched |
 
+Round 9b (same branch, r8 config: 1 bot, 3 fronts, 30 min) re-soaked this branch against master `6166fc32` in parallel. Capture bookkeeping is one flip per tick; raid tickets are 1/tick with async chunk fetch (no `mark_chunks_as_newly_watched` on the director tick); approach/deploy pre-tickets a 256-block ring. Both soaks ran on the same machine with a live-test server, so MSPT is higher than the single-server r8 34.9 and is only comparable to each other.
+
+| | branch (this PR) | master `6166fc32` |
+| --- | ---: | ---: |
+| MSPT p50 / p95 / max | 44.04 / 61.49 / 79.04 | 44.51 / 64.24 / 88.23 |
+| director_ms p50 / p95 / max | **0.39 / 0.62 / 2.07** | 0.46 / 0.73 / 4.07 |
+| director ticks ≥ 50 ms | **0** | **0** |
+| captures | 30 | 29 |
+| `Can't keep up` | 37 | 43 |
+| tickets max | 85 | 86 |
+| live bodies max | 247 | 258 |
+| soldier shouts | 187 | 89 |
+
+This branch is not slower than master on the same config. The r8→r9 p50 34.9→39.7 was the 3-bot r9 soak, not rank/chat/spreading. Dual-capture 760 ms and first-contact 1163 ms did not recur (`director_max` 2.07).
+
+`kingdoms-raid-bot --fight` joined alder, listed `/kingdom fronts`, deployed to the threatened gate (`TELEPORT 1504.5, 80, 597.5`, not the keep roof), melee-hit pillagers (entity 104) and witches, and ranked up: `You are now a freeman (renown 10).` then `/war stats` `rank=freeman renown=17 kills=17`. Freeman kit is leather plus a stone sword (`kit_player` on that event). Soldier chat on the same run: `The gate is down. Through the breach!` / `To the walls. Hold the line.` Two abstract towns flipped in the same second with `director_ms=0.71` (capture queue). Gaps: levy still has no weapon until freeman; keep respawn sometimes dumps the bot at world spawn `(10.5, 75)` after `inWall`; inventory packets were not dumped so the stone sword is inferred from the rank-up kit path.
+
+Plots: `/opt/cursor/artifacts/soak-r9b-branch.csv`, `soak-r8-master.csv`, `raid-bot-fight.log`, `raid-bot-fight-live.txt`.
+
 ### Commands
 
 | Command | |
@@ -370,7 +389,7 @@ Plots: `/opt/cursor/artifacts/soak-r9.log`, `soak-r9.csv`, `soak-r9-summary.json
 | `/kingdom info` | town, kingdom, owner, battle counts, gate breach |
 | `/kingdom join <kingdom>` | `alder` or `raven`. Rank kit, name tag, friendly fire off, respawn at the keep |
 | `/kingdom fronts` | active battles (side, owner, live, counts) |
-| `/kingdom deploy [town]` | teleport to a friendly rally near a live front; abstract fronts materialise on a staggered warmup |
+| `/kingdom deploy [town]` | teleport to the threatened gate (live surface Y, not the keep roof); abstract fronts materialise on a staggered warmup |
 | `/kingdom stats` | your rank, renown, kills, captures, defenses |
 | `/raid start <town> [size] [defenders]` | start a pillager raid. Optional `defenders` is how many kingdom combatants to field (extras spawn at the threatened gate). |
 | `/raid retake <town> [size]` | kingdom counter-raid to retake a pillager-owned town |

@@ -166,7 +166,7 @@ impl EventHandler<EntityDeathEvent> for DeathHandler {
     ) -> PluginFuture<'a, ()> {
         let id = event.entity_id;
         Box::pin(async move {
-            director::lock().note_death(id);
+            director::note_entity_death(id);
         })
     }
 }

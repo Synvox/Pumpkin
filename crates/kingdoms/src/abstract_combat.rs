@@ -6,6 +6,8 @@
 
 /// Players closer than this (blocks) force a front to materialise.
 pub const PLAYER_LIVE_RANGE: f64 = 128.0;
+/// Start force-loading the battle line before the front goes live.
+pub const PLAYER_APPROACH_RANGE: f64 = 256.0;
 /// How often an abstract front steps.
 pub const ABSTRACT_PERIOD: u32 = 20;
 /// Ticks of marching before courtyard combat starts.
