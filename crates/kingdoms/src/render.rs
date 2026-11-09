@@ -121,7 +121,7 @@ fn write_scene_renders(
         }
         seen.push(scene.kind);
         let pad = match scene.kind {
-            SceneKind::Harbour => 4,
+            SceneKind::Harbour | SceneKind::Riverside => 4,
             SceneKind::PillagerCamp
             | SceneKind::Farmstead
             | SceneKind::Hamlet

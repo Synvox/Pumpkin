@@ -128,6 +128,45 @@ impl HeightGrid {
         }
     }
 
+    /// Synthetic hillside with a 6-block-wide river along `river_z`.
+    #[must_use]
+    pub fn synthetic_river(
+        min_x: i32,
+        min_z: i32,
+        max_x: i32,
+        max_z: i32,
+        step: i32,
+        base: i32,
+        rise_x: i32,
+        rise_z: i32,
+        river_z: i32,
+    ) -> Self {
+        let step = step.max(1);
+        let nx = ((max_x - min_x) / step) + 1;
+        let nz = ((max_z - min_z) / step) + 1;
+        let mut heights = Vec::with_capacity((nx * nz) as usize);
+        for iz in 0..nz {
+            for ix in 0..nx {
+                let z = min_z + iz * step;
+                let y = if (z - river_z).abs() <= 8 {
+                    59
+                } else {
+                    base + ix * rise_x / nx.max(1) + iz * rise_z / nz.max(1)
+                };
+                heights.push(y);
+            }
+        }
+        Self {
+            min_x,
+            min_z,
+            step,
+            nx,
+            nz,
+            heights,
+            sea_level: 63,
+        }
+    }
+
     /// Synthetic coast: columns west of `shore_x` sit below sea level.
     #[must_use]
     pub fn synthetic_coast(

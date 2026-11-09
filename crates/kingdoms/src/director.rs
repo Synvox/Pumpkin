@@ -387,6 +387,7 @@ impl Director {
             self.next_raid_id = saved.next_raid_id;
         }
         self.last_clock_tick = saved.last_clock_tick;
+        crate::damage::restore(&saved.damage);
         self.ownership_path = Some(path);
         tracing::info!(
             tick = self.tick,
@@ -423,6 +424,7 @@ impl Director {
             clock_tick: self.tick,
             next_raid_id: self.next_raid_id,
             last_clock_tick: self.last_clock_tick,
+            damage: crate::damage::snapshot(),
             stats: self.player_stats.clone(),
         };
         siege::save_state_async(path.clone(), state);
@@ -3956,6 +3958,7 @@ fn maybe_war_clock(world: &Arc<World>, tick: u32) {
             return;
         }
     }
+    heal_repaired_towns(tick);
     ensure_border_towns(world);
     let Some((town_id, side)) = pick_clock_front(tick, fronts) else {
         let mut dir = lock();
@@ -4006,6 +4009,25 @@ fn maybe_war_clock(world: &Arc<World>, tick: u32) {
             dir.mark_dirty();
         }
     }
+}
+
+fn heal_repaired_towns(tick: u32) {
+    let ids: Vec<String> = {
+        let dir = lock();
+        dir.towns
+            .values()
+            .filter(|war| war.raid.is_none() && tick >= war.repair_until)
+            .filter(|war| crate::damage::damage_state(&war.info_id).is_damaged())
+            .map(|war| war.info_id.clone())
+            .collect()
+    };
+    if ids.is_empty() {
+        return;
+    }
+    for id in ids {
+        crate::damage::set_damage_state(&id, crate::damage::DamageState::Intact);
+    }
+    lock().mark_dirty();
 }
 
 fn pick_clock_front(tick: u32, fronts: usize) -> Option<(String, RaidSide)> {
@@ -4306,6 +4328,7 @@ fn commit_capture(flip: PendingFlip) {
         let tick = dir.tick;
         dir.add_score(&owner_name, 1);
         dir.persist_owner(&flip.town_id, flip.occupier.clone());
+        crate::damage::set_damage_state(&flip.town_id, crate::damage::DamageState::Scarred);
         dir.push_event(CombatEvent {
             tick,
             kind: CombatKind::Capture,
