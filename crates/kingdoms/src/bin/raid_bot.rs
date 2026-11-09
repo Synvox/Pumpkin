@@ -4,29 +4,40 @@
 //! ticket) is watching. This bot is the player: join, walk to `--x --y --z`,
 //! answer keep-alives, and stay until Ctrl-C or `--seconds`.
 //!
+//! With `--fight` it joins a kingdom, runs `/kingdom fronts` and
+//! `/kingdom deploy`, then melee-attacks nearby pillagers until a rank-up.
+//!
 //! The server must have `online_mode = false`, `encryption = false`. Compression
 //! can stay on; the bot enables it if the login handshake asks.
 //!
 //!   kingdoms-raid-bot --host 127.0.0.1:25565 --x 1349 --y 80 --z 693 --seconds 180
+//!   kingdoms-raid-bot --fight --name alder1 --x 1349 --y 80 --z 693 --seconds 600
 
 #![allow(
     clippy::print_stdout,
     clippy::print_stderr,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
 )]
 
+use std::collections::HashMap;
 use std::env;
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use bytes::Bytes;
+use pumpkin_data::entity::EntityType;
 use pumpkin_data::packet::CURRENT_MC_VERSION;
 use pumpkin_protocol::java::client::config::{CFinishConfig, CKnownPacks};
 use pumpkin_protocol::java::client::login::{CLoginSuccess, CSetCompression};
-use pumpkin_protocol::java::client::play::{CKeepAlive, CLogin, CPlayerPosition};
+use pumpkin_protocol::java::client::play::{
+    CDamageEvent, CEntityPositionSync, CKeepAlive, CLogin, CPlayerPosition, CRemoveEntities,
+    CSetHealth, CSpawnEntity, CSystemChatMessage,
+};
 use pumpkin_protocol::java::packet_decoder::TCPNetworkDecoder;
 use pumpkin_protocol::java::packet_encoder::TCPNetworkEncoder;
 use pumpkin_protocol::java::server::config::{
@@ -35,10 +46,11 @@ use pumpkin_protocol::java::server::config::{
 use pumpkin_protocol::java::server::handshake::SHandShake;
 use pumpkin_protocol::java::server::login::{SLoginAcknowledged, SLoginStart};
 use pumpkin_protocol::java::server::play::{
-    SChatCommand, SConfirmTeleport, SKeepAlive, SPlayerLoaded, SPlayerPosition,
+    SAttack, SChatCommand, SClientCommand, SConfirmTeleport, SKeepAlive, SPlayerLoaded,
+    SPlayerPosition, SPlayerPositionRotation, SSwingArm,
 };
 use pumpkin_protocol::packet::MultiVersionJavaPacket;
-use pumpkin_protocol::ser::NetworkWriteExt;
+use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
 use pumpkin_protocol::{ClientPacket, ConnectionState, RawPacket, ServerPacket, VarInt};
 use pumpkin_util::math::vector3::Vector3;
 use tokio::io::{BufReader, BufWriter};
@@ -46,6 +58,28 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::time::{Instant, timeout};
 use uuid::Uuid;
+
+const MELEE_RANGE: f64 = 3.5;
+const WALK_STEP: f64 = 0.28;
+const DISCOVER_RANGE: f64 = 96.0;
+
+fn entity_id(ty: &EntityType) -> i32 {
+    i32::from(ty.id)
+}
+
+fn is_hostile_kind(kind: i32) -> bool {
+    kind == entity_id(&EntityType::PILLAGER)
+        || kind == entity_id(&EntityType::VINDICATOR)
+        || kind == entity_id(&EntityType::EVOKER)
+        || kind == entity_id(&EntityType::RAVAGER)
+        || kind == entity_id(&EntityType::WITCH)
+        || kind == entity_id(&EntityType::ILLUSIONER)
+        || kind == entity_id(&EntityType::VEX)
+}
+
+fn is_soldier_kind(kind: i32) -> bool {
+    kind == entity_id(&EntityType::VILLAGER) || kind == entity_id(&EntityType::IRON_GOLEM)
+}
 
 struct Args {
     host: SocketAddr,
@@ -55,6 +89,8 @@ struct Args {
     z: f64,
     seconds: u64,
     command: Option<String>,
+    fight: bool,
+    kingdom: String,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -65,6 +101,8 @@ fn parse_args() -> Result<Args, String> {
     let mut z = 0.0;
     let mut seconds = 180u64;
     let mut command = None;
+    let mut fight = false;
+    let mut kingdom = "alder".to_owned();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut next = |flag: &str| args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -80,9 +118,11 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--seconds: {e}"))?;
             }
             "--command" => command = Some(next("--command")?),
+            "--fight" => fight = true,
+            "--kingdom" => kingdom = next("--kingdom")?,
             "-h" | "--help" => {
                 println!(
-                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command \"kingdom join alder\"]"
+                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command \"kingdom join alder\"] [--fight --kingdom alder]"
                 );
                 std::process::exit(0);
             }
@@ -98,7 +138,14 @@ fn parse_args() -> Result<Args, String> {
         z,
         seconds,
         command,
+        fight,
+        kingdom,
     })
+}
+
+struct SeenMob {
+    kind: i32,
+    pos: Vector3<f64>,
 }
 
 struct Bot {
@@ -108,6 +155,18 @@ struct Bot {
     position: Vector3<f64>,
     yaw: f32,
     pitch: f32,
+    hostiles: HashMap<i32, SeenMob>,
+    soldiers: HashMap<i32, SeenMob>,
+    unknown: HashMap<i32, SeenMob>,
+    chat: Vec<String>,
+    last_rank: String,
+    last_stats: String,
+    dead: bool,
+    needs_deploy: bool,
+    self_id: i32,
+    spawn_log: u32,
+    pkt_log: u32,
+    pkt_ids: HashMap<i32, u32>,
 }
 
 impl Bot {
@@ -153,6 +212,18 @@ impl Bot {
             position: Vector3::new(0.0, 0.0, 0.0),
             yaw: 0.0,
             pitch: 0.0,
+            hostiles: HashMap::new(),
+            soldiers: HashMap::new(),
+            unknown: HashMap::new(),
+            chat: Vec::new(),
+            last_rank: "levy".to_owned(),
+            last_stats: String::new(),
+            dead: false,
+            needs_deploy: false,
+            self_id: -1,
+            spawn_log: 0,
+            pkt_log: 0,
+            pkt_ids: HashMap::new(),
         };
 
         bot.send_packet(&SHandShake {
@@ -220,22 +291,22 @@ impl Bot {
             let pkt = bot.next_packet().await?;
             if pkt.id == play_login_id {
                 saw_play_login = true;
-            } else if pkt.id == player_pos_id {
-                let mut slice = &pkt.payload[..];
-                let pos_pkt = CPlayerPosition::read(&mut slice, &CURRENT_MC_VERSION)
-                    .map_err(|err| format!("CPlayerPosition: {err}"))?;
-                bot.position = pos_pkt.position;
-                bot.yaw = pos_pkt.yaw;
-                bot.pitch = pos_pkt.pitch;
-                bot.send_packet(&SConfirmTeleport {
-                    teleport_id: pos_pkt.teleport_id,
-                    position: pos_pkt.position,
-                    yaw: pos_pkt.yaw,
-                    pitch: pos_pkt.pitch,
-                })
-                .await?;
-                bot.send_packet(&SPlayerLoaded).await?;
-                saw_initial_pos = true;
+                if pkt.payload.len() >= 4 {
+                    bot.self_id = i32::from_be_bytes([
+                        pkt.payload[0],
+                        pkt.payload[1],
+                        pkt.payload[2],
+                        pkt.payload[3],
+                    ]);
+                    println!("SELF id={}", bot.self_id);
+                }
+            }
+            if saw_play_login {
+                bot.handle_play_packet(&pkt).await?;
+                if pkt.id == player_pos_id {
+                    let _ = bot.send_packet(&SPlayerLoaded).await;
+                    saw_initial_pos = true;
+                }
             }
         }
         Ok(bot)
@@ -250,9 +321,165 @@ impl Bot {
         .await
     }
 
+    async fn look_and_move(
+        &mut self,
+        position: Vector3<f64>,
+        yaw: f32,
+        pitch: f32,
+    ) -> Result<(), String> {
+        self.position = position;
+        self.yaw = yaw;
+        self.pitch = pitch;
+        self.send_packet(&SPlayerPositionRotation {
+            position,
+            yaw,
+            pitch,
+            collision: 1,
+        })
+        .await
+    }
+
+    async fn chat_command(&mut self, command: &str) -> Result<(), String> {
+        println!("CMD /{command}");
+        self.send_packet(&SChatCommand { command }).await
+    }
+
+    async fn attack(&mut self, entity_id: i32) -> Result<(), String> {
+        self.send_packet(&SSwingArm { hand: VarInt(0) }).await?;
+        self.send_packet(&SAttack {
+            entity_id: VarInt(entity_id),
+        })
+        .await
+    }
+
+    fn note_chat(&mut self, raw: &str) {
+        let text = raw.trim();
+        if text.is_empty() {
+            return;
+        }
+        println!("CHAT {text}");
+        self.chat.push(text.to_owned());
+        if text.contains("rank=") {
+            text.clone_into(&mut self.last_stats);
+            if let Some(rank) = text.split("rank=").nth(1).and_then(|s| s.split(' ').next())
+                && rank != self.last_rank
+            {
+                println!("RANK-UP {rank} stats={text}");
+                rank.clone_into(&mut self.last_rank);
+            }
+        }
+        if text.contains("You are now a ") {
+            println!("RANK-UP-EVENT {text}");
+        }
+    }
+
+    fn note_spawn(&mut self, id: i32, kind: i32, pos: Vector3<f64>) {
+        let mob = SeenMob { kind, pos };
+        if is_hostile_kind(kind) {
+            if self.spawn_log < 80 {
+                println!(
+                    "SPAWN-HOSTILE id={id} kind={kind} pos={:.1},{:.1},{:.1}",
+                    pos.x, pos.y, pos.z
+                );
+                self.spawn_log += 1;
+            }
+            self.hostiles.insert(id, mob);
+            self.soldiers.remove(&id);
+            self.unknown.remove(&id);
+        } else if is_soldier_kind(kind) {
+            if self.spawn_log < 80 {
+                println!(
+                    "SPAWN-SOLDIER id={id} kind={kind} pos={:.1},{:.1},{:.1}",
+                    pos.x, pos.y, pos.z
+                );
+                self.spawn_log += 1;
+            }
+            self.soldiers.insert(id, mob);
+            self.hostiles.remove(&id);
+            self.unknown.remove(&id);
+        }
+    }
+
+    fn note_move(&mut self, id: i32, pos: Vector3<f64>) {
+        if let Some(mob) = self.hostiles.get_mut(&id) {
+            mob.pos = pos;
+            return;
+        }
+        if let Some(mob) = self.soldiers.get_mut(&id) {
+            mob.pos = pos;
+            return;
+        }
+        if let Some(mob) = self.unknown.get_mut(&id) {
+            mob.pos = pos;
+            return;
+        }
+        let dist = (pos.x - self.position.x).hypot(pos.z - self.position.z);
+        if dist <= DISCOVER_RANGE {
+            if self.spawn_log < 40 {
+                println!("SYNC-NEW id={id} dist={dist:.1}");
+                self.spawn_log += 1;
+            }
+            self.unknown.insert(id, SeenMob { kind: -1, pos });
+        }
+    }
+
+    fn note_remove(&mut self, ids: &[i32]) {
+        for id in ids {
+            self.hostiles.remove(id);
+            self.soldiers.remove(id);
+            self.unknown.remove(id);
+        }
+    }
+
+    fn nearest_target(
+        &self,
+        include_soldiers: bool,
+        include_unknown: bool,
+    ) -> Option<(i32, Vector3<f64>, f64)> {
+        let mut best = None;
+        let pick = |best: &mut Option<(i32, Vector3<f64>, f64)>, map: &HashMap<i32, SeenMob>| {
+            for (id, mob) in map {
+                let dx = mob.pos.x - self.position.x;
+                let dz = mob.pos.z - self.position.z;
+                let dist = dx.hypot(dz);
+                if dist > DISCOVER_RANGE {
+                    continue;
+                }
+                if best.as_ref().is_none_or(|(_, _, d)| dist < *d) {
+                    *best = Some((*id, mob.pos, dist));
+                }
+            }
+        };
+        pick(&mut best, &self.hostiles);
+        if include_soldiers {
+            pick(&mut best, &self.soldiers);
+        }
+        if include_unknown && best.is_none() {
+            pick(&mut best, &self.unknown);
+        }
+        best
+    }
+
     async fn handle_play_packet(&mut self, pkt: &RawPacket) -> Result<(), String> {
+        if self.pkt_log < 250 {
+            *self.pkt_ids.entry(pkt.id).or_insert(0) += 1;
+            self.pkt_log += 1;
+            if self.pkt_log == 250 {
+                let spawn_id = CSpawnEntity::to_id(CURRENT_MC_VERSION);
+                let sync_id = CEntityPositionSync::to_id(CURRENT_MC_VERSION);
+                println!(
+                    "PKTS spawn_id={spawn_id} sync_id={sync_id} counts={:?}",
+                    self.pkt_ids
+                );
+            }
+        }
         let keep_id = CKeepAlive::to_id(CURRENT_MC_VERSION);
         let pos_id = CPlayerPosition::to_id(CURRENT_MC_VERSION);
+        let spawn_id = CSpawnEntity::to_id(CURRENT_MC_VERSION);
+        let chat_id = CSystemChatMessage::to_id(CURRENT_MC_VERSION);
+        let remove_id = CRemoveEntities::to_id(CURRENT_MC_VERSION);
+        let sync_id = CEntityPositionSync::to_id(CURRENT_MC_VERSION);
+        let health_id = CSetHealth::to_id(CURRENT_MC_VERSION);
         if pkt.id == keep_id {
             let mut slice = &pkt.payload[..];
             let keep = CKeepAlive::read(&mut slice, &CURRENT_MC_VERSION)
@@ -275,9 +502,346 @@ impl Bot {
                 pitch: pos_pkt.pitch,
             })
             .await?;
+            println!(
+                "TELEPORT {}, {}, {}",
+                self.position.x, self.position.y, self.position.z
+            );
+        } else if pkt.id == spawn_id {
+            match CSpawnEntity::read_packet_data(Cursor::new(&pkt.payload[..]), &CURRENT_MC_VERSION)
+            {
+                Ok(spawn) => self.note_spawn(spawn.entity_id.0, spawn.r#type.0, spawn.position),
+                Err(_) => {
+                    if let Some((id, kind, pos)) = read_spawn_head(&pkt.payload) {
+                        self.note_spawn(id, kind, pos);
+                    }
+                }
+            }
+        } else if pkt.id == chat_id {
+            self.note_chat(&extract_text(&pkt.payload));
+        } else if pkt.id == remove_id {
+            self.note_remove(&read_var_int_list(&pkt.payload));
+        } else if pkt.id == sync_id
+            && let Some((id, pos)) = read_entity_sync(&pkt.payload)
+        {
+            self.note_move(id, pos);
+        } else if pkt.id == CDamageEvent::to_id(CURRENT_MC_VERSION) {
+            let mut slice = &pkt.payload[..];
+            if let (Ok(victim), Ok(_ty), Ok(cause), Ok(_direct)) = (
+                slice.get_var_int(),
+                slice.get_var_int(),
+                slice.get_var_int(),
+                slice.get_var_int(),
+            ) && victim.0 == self.self_id
+                && cause.0 > 0
+            {
+                let attacker = cause.0 - 1;
+                if attacker != self.self_id && attacker > 0 {
+                    if self.spawn_log < 80 {
+                        println!("ATTACKER id={attacker}");
+                        self.spawn_log += 1;
+                    }
+                    if !self.hostiles.contains_key(&attacker) {
+                        self.hostiles.insert(
+                            attacker,
+                            SeenMob {
+                                kind: -2,
+                                pos: Vector3::new(
+                                    self.position.x + 1.5,
+                                    self.position.y,
+                                    self.position.z,
+                                ),
+                            },
+                        );
+                    }
+                }
+            }
+        } else if pkt.id == health_id {
+            let mut slice = &pkt.payload[..];
+            match CSetHealth::read(&mut slice, &CURRENT_MC_VERSION) {
+                Ok(health) => {
+                    if health.health <= 0.0 && !self.dead {
+                        self.dead = true;
+                        self.hostiles.clear();
+                        self.soldiers.clear();
+                        self.unknown.clear();
+                        println!("DIED health={}", health.health);
+                        self.send_packet(&SClientCommand {
+                            action_id: VarInt(SClientCommand::PERFORM_RESPAWN),
+                        })
+                        .await?;
+                    } else if health.health > 0.0 {
+                        if self.dead {
+                            println!("RESPAWNED health={}", health.health);
+                            self.needs_deploy = true;
+                        }
+                        self.dead = false;
+                    }
+                }
+                Err(err) => eprintln!("health decode: {err}"),
+            }
         }
         Ok(())
     }
+
+    async fn pump(&mut self, wait: Duration) -> Result<(), String> {
+        let until = Instant::now() + wait;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(());
+            }
+            match timeout(
+                left.min(Duration::from_millis(50)),
+                self.reader.get_raw_packet(),
+            )
+            .await
+            {
+                Ok(Ok(pkt)) => self.handle_play_packet(&pkt).await?,
+                Ok(Err(err)) => return Err(format!("disconnected: {err}")),
+                Err(_) => {}
+            }
+        }
+    }
+}
+
+fn extract_text(payload: &[u8]) -> String {
+    let mut out = String::new();
+    let mut run = Vec::new();
+    for &byte in payload {
+        if (32..127).contains(&byte) {
+            run.push(byte);
+        } else if !run.is_empty() {
+            if run.len() >= 4
+                && let Ok(piece) = std::str::from_utf8(&run)
+            {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(piece);
+            }
+            run.clear();
+        }
+    }
+    if run.len() >= 4
+        && let Ok(piece) = std::str::from_utf8(&run)
+    {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(piece);
+    }
+    out
+}
+
+fn read_var_int_list(payload: &[u8]) -> Vec<i32> {
+    let mut slice = payload;
+    let Ok(count) = slice.get_var_int() else {
+        return Vec::new();
+    };
+    let n = count.0.max(0) as usize;
+    let mut ids = Vec::with_capacity(n.min(256));
+    for _ in 0..n.min(256) {
+        let Ok(id) = slice.get_var_int() else {
+            break;
+        };
+        ids.push(id.0);
+    }
+    ids
+}
+
+fn read_entity_sync(payload: &[u8]) -> Option<(i32, Vector3<f64>)> {
+    let mut slice = payload;
+    let id = slice.get_var_int().ok()?.0;
+    let _path = slice.get_var_int().ok()?;
+    let x = slice.get_f64_be().ok()?;
+    let y = slice.get_f64_be().ok()?;
+    let z = slice.get_f64_be().ok()?;
+    Some((id, Vector3::new(x, y, z)))
+}
+
+fn read_spawn_head(payload: &[u8]) -> Option<(i32, i32, Vector3<f64>)> {
+    let mut slice = payload;
+    let id = slice.get_var_int().ok()?.0;
+    let _uuid = slice.get_uuid().ok()?;
+    let kind = slice.get_var_int().ok()?.0;
+    let x = slice.get_f64_be().ok()?;
+    let y = slice.get_f64_be().ok()?;
+    let z = slice.get_f64_be().ok()?;
+    Some((id, kind, Vector3::new(x, y, z)))
+}
+
+fn yaw_toward(from: Vector3<f64>, to: Vector3<f64>) -> f32 {
+    let dx = to.x - from.x;
+    let dz = to.z - from.z;
+    dx.atan2(dz).to_degrees() as f32
+}
+
+async fn recover_stand(bot: &mut Bot, stand: Vector3<f64>) -> Result<(), String> {
+    let dist = (bot.position.x - stand.x).hypot(bot.position.z - stand.z);
+    if bot.position.y < stand.y - 1.0 && dist < 12.0 {
+        println!("UNSTICK y={:.1} -> {}", bot.position.y, stand.y);
+        bot.move_to(Vector3::new(bot.position.x, stand.y, bot.position.z))
+            .await?;
+        bot.pump(Duration::from_millis(100)).await?;
+        return Ok(());
+    }
+    let dy = (bot.position.y - stand.y).abs();
+    if dy > 8.0 || dist > 160.0 {
+        println!(
+            "RECOVER from {:.1},{:.1},{:.1} to {}, {}, {}",
+            bot.position.x, bot.position.y, bot.position.z, stand.x, stand.y, stand.z
+        );
+        bot.move_to(stand).await?;
+        bot.pump(Duration::from_millis(250)).await?;
+    }
+    Ok(())
+}
+
+async fn fight_loop(
+    bot: &mut Bot,
+    kingdom: &str,
+    seconds: u64,
+    stand: Vector3<f64>,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    recover_stand(bot, stand).await?;
+    bot.chat_command(&format!("kingdom join {kingdom}")).await?;
+    bot.pump(Duration::from_secs(1)).await?;
+    recover_stand(bot, stand).await?;
+    bot.chat_command("kingdom stats").await?;
+    bot.pump(Duration::from_secs(1)).await?;
+
+    let mut fronts_ok = false;
+    for attempt in 0..24 {
+        bot.chat_command("kingdom fronts").await?;
+        bot.pump(Duration::from_secs(3)).await?;
+        if bot.chat.iter().rev().take(8).any(|line| {
+            line.contains("raid_active") || line.contains("live=") || line.contains("side=")
+        }) {
+            fronts_ok = true;
+            println!("FRONTS-OK attempt={attempt}");
+            break;
+        }
+        println!("FRONTS-WAIT attempt={attempt}");
+        bot.pump(Duration::from_secs(5)).await?;
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    if !fronts_ok {
+        println!("FRONTS-MISSING continuing to deploy anyway");
+    }
+
+    bot.chat_command("kingdom deploy").await?;
+    bot.pump(Duration::from_secs(1)).await?;
+    bot.chat_command("war stats").await?;
+    bot.pump(Duration::from_millis(500)).await?;
+
+    let mut last_attack = Instant::now() - Duration::from_secs(1);
+    let mut last_stats = Instant::now();
+    let mut last_deploy = Instant::now();
+    let mut saw_hostile = Instant::now();
+    let patrol = Vector3::new(stand.x + 24.0, stand.y, stand.z - 40.0);
+    while Instant::now() < deadline {
+        bot.pump(Duration::from_millis(50)).await?;
+        if bot.dead {
+            bot.pump(Duration::from_millis(200)).await?;
+            continue;
+        }
+        if bot.needs_deploy && last_deploy.elapsed() >= Duration::from_secs(2) {
+            println!("REDEPLOY after death");
+            bot.needs_deploy = false;
+            bot.chat_command("kingdom deploy").await?;
+            bot.pump(Duration::from_secs(1)).await?;
+            last_deploy = Instant::now();
+            continue;
+        }
+        if let Some((id, pos, dist)) = bot.nearest_target(false, false) {
+            saw_hostile = Instant::now();
+            let yaw = yaw_toward(bot.position, pos);
+            if dist > MELEE_RANGE {
+                let dx = pos.x - bot.position.x;
+                let dz = pos.z - bot.position.z;
+                let len = dx.hypot(dz).max(0.001);
+                let step = WALK_STEP.min(dist - 1.5).max(0.0);
+                let next = Vector3::new(
+                    bot.position.x + dx / len * step,
+                    bot.position.y,
+                    bot.position.z + dz / len * step,
+                );
+                bot.look_and_move(next, yaw, 0.0).await?;
+            } else {
+                bot.look_and_move(bot.position, yaw, 20.0).await?;
+                if last_attack.elapsed() >= Duration::from_millis(550)
+                    && id != bot.self_id
+                    && dist >= 0.2
+                {
+                    bot.attack(id).await?;
+                    last_attack = Instant::now();
+                    let kind = bot
+                        .hostiles
+                        .get(&id)
+                        .or_else(|| bot.soldiers.get(&id))
+                        .or_else(|| bot.unknown.get(&id))
+                        .map_or(0, |m| m.kind);
+                    println!(
+                        "ATTACK id={id} kind={kind} dist={dist:.1} hostiles={} soldiers={} unknown={}",
+                        bot.hostiles.len(),
+                        bot.soldiers.len(),
+                        bot.unknown.len()
+                    );
+                }
+            }
+        } else if Instant::now().saturating_duration_since(saw_hostile) > Duration::from_secs(4) {
+            let dest = if (bot.position.x - patrol.x).hypot(bot.position.z - patrol.z) < 4.0 {
+                stand
+            } else {
+                patrol
+            };
+            let dx = dest.x - bot.position.x;
+            let dz = dest.z - bot.position.z;
+            let len = dx.hypot(dz).max(0.001);
+            let step = WALK_STEP * 2.0;
+            let next = Vector3::new(
+                bot.position.x + dx / len * step,
+                bot.position.y,
+                bot.position.z + dz / len * step,
+            );
+            bot.move_to(next).await?;
+        } else {
+            bot.move_to(bot.position).await?;
+        }
+        if last_stats.elapsed() >= Duration::from_secs(15) {
+            bot.chat_command("war stats").await?;
+            last_stats = Instant::now();
+            println!(
+                "SEEN hostiles={} soldiers={} unknown={} pos={:.1},{:.1},{:.1}",
+                bot.hostiles.len(),
+                bot.soldiers.len(),
+                bot.unknown.len(),
+                bot.position.x,
+                bot.position.y,
+                bot.position.z
+            );
+            if bot.last_rank != "levy" {
+                println!("DONE rank={} stats={}", bot.last_rank, bot.last_stats);
+                bot.chat_command("kingdom stats").await?;
+                bot.pump(Duration::from_secs(1)).await?;
+                return Ok(());
+            }
+        }
+    }
+    bot.chat_command("war stats").await?;
+    bot.pump(Duration::from_secs(1)).await?;
+    println!(
+        "TIMEOUT rank={} stats={} hostiles={} soldiers={} unknown={}",
+        bot.last_rank,
+        bot.last_stats,
+        bot.hostiles.len(),
+        bot.soldiers.len(),
+        bot.unknown.len()
+    );
+    Ok(())
 }
 
 #[tokio::main]
@@ -310,13 +874,19 @@ async fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     println!("standing; holding for {}s", args.seconds);
-    if let Some(cmd) = args.command.as_deref() {
-        let packet = SChatCommand { command: cmd };
-        if let Err(err) = bot.send_packet(&packet).await {
-            eprintln!("command failed: {err}");
+    if let Some(cmd) = args.command.as_deref()
+        && let Err(err) = bot.chat_command(cmd).await
+    {
+        eprintln!("command failed: {err}");
+        return ExitCode::from(1);
+    }
+    if args.fight {
+        if let Err(err) = fight_loop(&mut bot, &args.kingdom, args.seconds, stand).await {
+            eprintln!("{err}");
             return ExitCode::from(1);
         }
-        println!("sent /{cmd}");
+        println!("done");
+        return ExitCode::SUCCESS;
     }
 
     let deadline = Instant::now() + Duration::from_secs(args.seconds);

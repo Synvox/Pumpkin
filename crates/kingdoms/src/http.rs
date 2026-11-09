@@ -211,6 +211,8 @@ fn router(state: AppState) -> Router {
         .route("/state", get(get_state))
         .route("/war", get(get_war))
         .route("/lines", get(get_lines).post(post_lines))
+        .route("/heroes", get(get_heroes).post(post_heroes))
+        .route("/heroes/{kingdom}/shout", post(post_hero_shout))
         .route("/towns/{id}", get(get_town))
         .route("/raids", post(post_raid))
         .route("/raids/{id}/stop", post(stop_raid))
@@ -318,7 +320,7 @@ async fn post_lines(State(state): State<AppState>, headers: HeaderMap, body: Byt
     let Some(kind) = ShoutKind::parse(&body.event) else {
         return (
             StatusCode::BAD_REQUEST,
-            "event must be gate_breached, rally, retreat, or victory",
+            "event must be gate_breached, rally, retreat, victory, charge, hold, or fallen",
         )
             .into_response();
     };
@@ -328,6 +330,95 @@ async fn post_lines(State(state): State<AppState>, headers: HeaderMap, body: Byt
         "event": kind.as_str(),
         "text": chat::line(kind),
     }))
+}
+
+fn hero_json(hero: &director::Hero) -> Value {
+    json!({
+        "kingdom": hero.kingdom,
+        "name": hero.name,
+        "title": hero.title,
+        "line": hero.line,
+    })
+}
+
+async fn get_heroes(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(err) = gate_observe(&headers, &state) {
+        return err;
+    }
+    json_ok(json!({
+        "heroes": director::all_heroes().iter().map(hero_json).collect::<Vec<_>>(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct HeroBody {
+    kingdom: String,
+    name: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    line: String,
+    #[serde(default)]
+    text: String,
+}
+
+async fn post_heroes(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Some(err) = gate_observe(&headers, &state) {
+        return err;
+    }
+    if body.len() > MAX_BODY {
+        return too_large();
+    }
+    let body: HeroBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, format!("invalid json: {err}")).into_response();
+        }
+    };
+    if body.kingdom.trim().is_empty() || body.name.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "kingdom and name are required").into_response();
+    }
+    let line = if body.line.trim().is_empty() {
+        body.text.as_str()
+    } else {
+        body.line.as_str()
+    };
+    let hero = director::set_hero(&body.kingdom, &body.name, &body.title, line);
+    json_ok(hero_json(&hero))
+}
+
+#[derive(Deserialize)]
+struct HeroShoutBody {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    message: String,
+}
+
+async fn post_hero_shout(
+    State(state): State<AppState>,
+    Path(kingdom): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(err) = gate(&headers, &state, body.len()) {
+        return err;
+    }
+    let body: HeroShoutBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, format!("invalid json: {err}")).into_response();
+        }
+    };
+    let text = if body.text.trim().is_empty() {
+        body.message.as_str()
+    } else {
+        body.text.as_str()
+    };
+    match director::shout_hero(&kingdom, text) {
+        Ok(hero) => json_ok(json!({ "ok": true, "hero": hero_json(&hero) })),
+        Err(err) => (StatusCode::NOT_FOUND, err).into_response(),
+    }
 }
 
 async fn get_town(
@@ -487,6 +578,7 @@ fn war_json() -> Value {
             "live": t.live,
         })).collect::<Vec<_>>(),
         "fronts": front.fronts,
+        "heroes": director::all_heroes().iter().map(hero_json).collect::<Vec<_>>(),
     })
 }
 
@@ -685,6 +777,21 @@ mod tests {
         assert!(v.get("scores").is_some());
         assert!(v.get("clock").is_some());
         assert!(v.get("towns").is_some());
+        assert!(v.get("heroes").is_some());
+    }
+
+    #[test]
+    fn hero_json_lists_name_and_kingdom() {
+        let hero = director::Hero {
+            kingdom: "alder".to_owned(),
+            name: "Sir Aldric".to_owned(),
+            title: "marshal".to_owned(),
+            line: "Hold the gate.".to_owned(),
+        };
+        let v = hero_json(&hero);
+        assert_eq!(v["kingdom"], "alder");
+        assert_eq!(v["name"], "Sir Aldric");
+        assert_eq!(v["title"], "marshal");
     }
 
     #[test]

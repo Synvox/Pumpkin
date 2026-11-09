@@ -19,7 +19,7 @@ const LOCATE_DESC: &str = "Reports the nearest planned kingdoms town.";
 const LOCATE_PERM: &str = "kingdoms:command.locatetown";
 
 const KINGDOM_NAME: &str = "kingdom";
-const KINGDOM_DESC: &str = "Kingdom info and join.";
+const KINGDOM_DESC: &str = "Kingdom info, join, fronts, deploy, and stats.";
 const KINGDOM_PERM: &str = "kingdoms:command.kingdom";
 
 const RAID_NAME: &str = "raid";
@@ -262,6 +262,77 @@ impl CommandExecutor for WarExecutor {
     }
 }
 
+struct WarStatsExecutor;
+
+impl CommandExecutor for WarStatsExecutor {
+    fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
+        let Some(player) = context.as_player() else {
+            context.source.send_feedback(
+                TextComponent::text("Only players have war stats").color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        };
+        let line = director::format_player_stats(
+            &player.gameprofile.id.to_string(),
+            &player.gameprofile.name,
+        );
+        context.source.send_feedback(
+            TextComponent::text(line).color_named(NamedColor::Gold),
+            false,
+        );
+        Ok(1)
+    }
+}
+
+struct KingdomFrontsExecutor;
+
+impl CommandExecutor for KingdomFrontsExecutor {
+    fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
+        context.source.send_feedback(
+            TextComponent::text(director::format_fronts()).color_named(NamedColor::Gold),
+            false,
+        );
+        Ok(1)
+    }
+}
+
+struct KingdomDeployExecutor {
+    has_town: bool,
+}
+
+impl CommandExecutor for KingdomDeployExecutor {
+    fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
+        let Some(player) = context.as_player() else {
+            context.source.send_feedback(
+                TextComponent::text("Only players can deploy").color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        };
+        let town = if self.has_town {
+            Some(StringArgumentType::get(context, "town")?)
+        } else {
+            None
+        };
+        match director::deploy_player(&player, town) {
+            Ok(msg) => {
+                context.source.send_feedback(
+                    TextComponent::text(msg).color_named(NamedColor::Green),
+                    true,
+                );
+                Ok(1)
+            }
+            Err(err) => {
+                context
+                    .source
+                    .send_feedback(TextComponent::text(err).color_named(NamedColor::Red), false);
+                Ok(0)
+            }
+        }
+    }
+}
+
 struct RaidStopExecutor;
 
 impl CommandExecutor for RaidStopExecutor {
@@ -295,7 +366,7 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
     permissions.register_permission_or_panic(Permission::new(
         WAR_PERM,
         WAR_DESC,
-        PermissionDefault::Op(PermissionLvl::Two),
+        PermissionDefault::Allow,
     ));
 
     dispatcher.register(
@@ -310,7 +381,17 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
             .then(literal("info").executes(KingdomInfoExecutor))
             .then(literal("join").then(
                 argument("kingdom", StringArgumentType::SingleWord).executes(KingdomJoinExecutor),
-            )),
+            ))
+            .then(literal("fronts").executes(KingdomFrontsExecutor))
+            .then(
+                literal("deploy")
+                    .executes(KingdomDeployExecutor { has_town: false })
+                    .then(
+                        argument("town", StringArgumentType::QuotablePhrase)
+                            .executes(KingdomDeployExecutor { has_town: true }),
+                    ),
+            )
+            .then(literal("stats").executes(WarStatsExecutor)),
     );
 
     dispatcher.register(
@@ -355,6 +436,7 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
     dispatcher.register(
         command(WAR_NAME, WAR_DESC)
             .requires(WAR_PERM)
-            .executes(WarExecutor),
+            .executes(WarExecutor)
+            .then(literal("stats").executes(WarStatsExecutor)),
     );
 }
