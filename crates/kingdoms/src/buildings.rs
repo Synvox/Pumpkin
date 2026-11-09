@@ -68,7 +68,7 @@ impl BuildingKind {
             Self::Timber | Self::Tavern => 8,
             Self::Townhouse => 11,
             Self::Church => 8,
-            Self::Windmill => 12,
+            Self::Windmill => 18,
             Self::Monastery => 9,
             Self::Watchtower => 14,
             Self::Outpost => 12,

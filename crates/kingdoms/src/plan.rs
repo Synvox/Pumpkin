@@ -190,7 +190,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &mut roads,
     );
 
-    let mut lots = place_lots(&mut occ, &grid, town_rect, market, &mut rng, seed);
+    let mut lots = place_lots(&mut occ, &grid, town_rect, market, &mut rng, seed, palette);
     place_farms(&mut occ, &grid, town_rect, castle_rect, &mut rng);
     let mut scenes = place_scenes(
         &mut occ,
@@ -200,6 +200,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &mut lots,
         seed,
         &mut rng,
+        palette,
     );
     scenes.push(Scene {
         kind: SceneKind::Plaza,
@@ -841,25 +842,10 @@ fn place_lots(
     market: Rect,
     rng: &mut TownRng,
     seed: u64,
+    palette: PaletteKind,
 ) -> Vec<Lot> {
     let mut lots = Vec::new();
-    let kinds = [
-        BuildingKind::Church,
-        BuildingKind::Tavern,
-        BuildingKind::Blacksmith,
-        BuildingKind::Townhouse,
-        BuildingKind::Timber,
-        BuildingKind::Timber,
-        BuildingKind::Townhouse,
-        BuildingKind::Longhouse,
-        BuildingKind::Cottage,
-        BuildingKind::Cottage,
-        BuildingKind::Cottage,
-        BuildingKind::Windmill,
-        BuildingKind::Barn,
-        BuildingKind::Stall,
-        BuildingKind::Stall,
-    ];
+    let kinds = lot_kinds(palette);
     let mut id = 1u16;
     for z in (town.min_z + 6..town.max_z - 6).step_by(9) {
         for x in (town.min_x + 6..town.max_x - 6).step_by(8) {
@@ -868,7 +854,7 @@ fn place_lots(
             if market.inflate(3).contains(jx, jz) {
                 continue;
             }
-            let Some(&kind) = rng.choose(&kinds) else {
+            let Some(&kind) = rng.choose(kinds) else {
                 continue;
             };
             let (mut w, mut d) = kind.size();
@@ -897,6 +883,59 @@ fn place_lots(
         }
     }
     lots
+}
+
+fn lot_kinds(palette: PaletteKind) -> &'static [BuildingKind] {
+    match palette {
+        PaletteKind::Oak => &[
+            BuildingKind::Church,
+            BuildingKind::Tavern,
+            BuildingKind::Blacksmith,
+            BuildingKind::Townhouse,
+            BuildingKind::Timber,
+            BuildingKind::Timber,
+            BuildingKind::Townhouse,
+            BuildingKind::Longhouse,
+            BuildingKind::Cottage,
+            BuildingKind::Cottage,
+            BuildingKind::Cottage,
+            BuildingKind::Windmill,
+            BuildingKind::Barn,
+            BuildingKind::Stall,
+            BuildingKind::Stall,
+        ],
+        PaletteKind::Spruce => &[
+            BuildingKind::Church,
+            BuildingKind::Tavern,
+            BuildingKind::Blacksmith,
+            BuildingKind::Longhouse,
+            BuildingKind::Longhouse,
+            BuildingKind::Timber,
+            BuildingKind::Townhouse,
+            BuildingKind::Longhouse,
+            BuildingKind::Cottage,
+            BuildingKind::Cottage,
+            BuildingKind::Windmill,
+            BuildingKind::Barn,
+            BuildingKind::Stall,
+            BuildingKind::Stall,
+        ],
+        PaletteKind::Sandstone => &[
+            BuildingKind::Church,
+            BuildingKind::Tavern,
+            BuildingKind::Blacksmith,
+            BuildingKind::Townhouse,
+            BuildingKind::Townhouse,
+            BuildingKind::Townhouse,
+            BuildingKind::Cottage,
+            BuildingKind::Cottage,
+            BuildingKind::Cottage,
+            BuildingKind::Windmill,
+            BuildingKind::Barn,
+            BuildingKind::Stall,
+            BuildingKind::Stall,
+        ],
+    }
 }
 
 fn paint_eaves(occ: &mut Occupancy, rect: Rect) {

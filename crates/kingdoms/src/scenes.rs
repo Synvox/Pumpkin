@@ -9,6 +9,7 @@ use crate::buildings::{BuildingKind, Lot};
 use crate::cells::{CellKind, Occupancy};
 use crate::geom::{Dir, Rect};
 use crate::height::HeightGrid;
+use crate::palette::PaletteKind;
 use crate::rng::TownRng;
 
 /// What a hinterland rect is for.
@@ -27,6 +28,7 @@ pub enum SceneKind {
     Plaza,
     Cathedral,
     MountainFortress,
+    Mine,
 }
 
 impl SceneKind {
@@ -39,7 +41,7 @@ impl SceneKind {
             Self::Orchard => "Orchard",
             Self::Pasture => "Pasture",
             Self::Watchtower => "Watchtower",
-            Self::Ruin => "Ruined fort",
+            Self::Ruin => "Ruined village",
             Self::Monastery => "Monastery",
             Self::PillagerCamp => "Pillager camp",
             Self::Graveyard => "Graveyard",
@@ -47,6 +49,7 @@ impl SceneKind {
             Self::Plaza => "Plaza",
             Self::Cathedral => "Cathedral",
             Self::MountainFortress => "Mountain fortress",
+            Self::Mine => "Mine",
         }
     }
 }
@@ -68,6 +71,7 @@ pub fn place_scenes(
     lots: &mut Vec<Lot>,
     seed: u64,
     rng: &mut TownRng,
+    palette: PaletteKind,
 ) -> Vec<Scene> {
     let mut scenes = Vec::new();
     let search = occ.bounds;
@@ -94,6 +98,7 @@ pub fn place_scenes(
         lots,
         seed,
         rng,
+        palette,
         &mut scenes,
     );
     place_watchtower(
@@ -132,6 +137,7 @@ pub fn place_scenes(
         &mut scenes,
     );
     place_hero(occ, grid, castle, town, search, rng, &mut scenes);
+    place_mine(occ, grid, search, town, keep_out, rng, &mut scenes);
     paint_wind_sails(occ, lots);
     paint_forge_yards(occ, lots);
     scenes
@@ -280,6 +286,7 @@ fn place_hamlet(
     lots: &mut Vec<Lot>,
     seed: u64,
     rng: &mut TownRng,
+    palette: PaletteKind,
     scenes: &mut Vec<Scene>,
 ) {
     let Some(yard) = find_site_near_road(occ, grid, search, town, keep_out, 28, 22, rng) else {
@@ -299,17 +306,40 @@ fn place_hamlet(
             yard.min_x + 20,
             yard.min_z + 9,
         ),
-        Rect::new(
-            yard.min_x + 2,
-            yard.min_z + 12,
-            yard.min_x + 11,
-            yard.min_z + 19,
-        ),
+        match palette {
+            PaletteKind::Spruce => Rect::new(
+                yard.min_x + 2,
+                yard.min_z + 11,
+                yard.min_x + 19,
+                yard.min_z + 18,
+            ),
+            PaletteKind::Sandstone => Rect::new(
+                yard.min_x + 2,
+                yard.min_z + 12,
+                yard.min_x + 10,
+                yard.min_z + 19,
+            ),
+            PaletteKind::Oak => Rect::new(
+                yard.min_x + 2,
+                yard.min_z + 12,
+                yard.min_x + 11,
+                yard.min_z + 19,
+            ),
+        },
     ];
     let mut any = false;
     for (i, rect) in cottages.into_iter().enumerate() {
         let facing = [Dir::South, Dir::East, Dir::North][i];
-        if try_lot(occ, grid, lots, seed, BuildingKind::Cottage, rect, facing).is_some() {
+        let kind = if i == 2 {
+            match palette {
+                PaletteKind::Spruce => BuildingKind::Longhouse,
+                PaletteKind::Sandstone => BuildingKind::Townhouse,
+                PaletteKind::Oak => BuildingKind::Cottage,
+            }
+        } else {
+            BuildingKind::Cottage
+        };
+        if try_lot(occ, grid, lots, seed, kind, rect, facing).is_some() {
             any = true;
         }
     }
@@ -340,7 +370,7 @@ fn place_watchtower(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
-    let Some(rect) = find_peak_site(occ, grid, search, town, keep_out, 7, 7, rng) else {
+    let Some(rect) = find_peak_site(occ, grid, search, town, keep_out, 7, 7, 0, rng) else {
         return;
     };
     if try_lot(
@@ -370,13 +400,55 @@ fn place_ruin(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
-    let Some(rect) = find_site(occ, grid, search, town, keep_out, 16, 14, true, rng) else {
+    let Some(yard) = find_site(occ, grid, search, town, keep_out, 26, 20, true, rng)
+        .or_else(|| find_site(occ, grid, search, town, keep_out, 20, 16, true, rng))
+    else {
         return;
     };
-    occ.fill(rect, CellKind::Ruin, false);
+    occ.fill(yard, CellKind::Green, false);
+    let houses = [
+        Rect::new(
+            yard.min_x + 2,
+            yard.min_z + 2,
+            yard.min_x + 8,
+            yard.min_z + 7,
+        ),
+        Rect::new(
+            yard.min_x + 12,
+            yard.min_z + 3,
+            yard.min_x + 18,
+            yard.min_z + 8,
+        ),
+        Rect::new(
+            yard.min_x + 3,
+            yard.min_z + 11,
+            yard.min_x + 10,
+            yard.min_z + 16,
+        ),
+        Rect::new(
+            yard.max_x - 9,
+            yard.max_z - 8,
+            yard.max_x - 3,
+            yard.max_z - 3,
+        ),
+    ];
+    for house in houses {
+        if yard.contains(house.min_x, house.min_z) && yard.contains(house.max_x, house.max_z) {
+            occ.fill(house, CellKind::Ruin, true);
+        }
+    }
+    let (cx, cz) = yard.center();
+    occ.set(cx, cz, CellKind::Fountain, true);
+    for dz in -1i32..=1 {
+        for dx in -1i32..=1 {
+            if dx.abs() + dz.abs() == 1 && occ.kind(cx + dx, cz + dz) == CellKind::Green {
+                occ.set(cx + dx, cz + dz, CellKind::Plaza, true);
+            }
+        }
+    }
     scenes.push(Scene {
         kind: SceneKind::Ruin,
-        rect,
+        rect: yard,
     });
 }
 
@@ -782,7 +854,7 @@ fn paint_wind_sails(occ: &mut Occupancy, lots: &[Lot]) {
             continue;
         }
         let (cx, cz) = lot.rect.center();
-        for dist in 3..=7 {
+        for dist in 5..=10 {
             for (sx, sz) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
                 let x = cx + sx * dist;
                 let z = cz + sz * dist;
@@ -807,23 +879,8 @@ fn place_hero(
     scenes: &mut Vec<Scene>,
 ) {
     let keep = castle.inflate(10);
-    let town_h = grid.mean(town.min_x, town.min_z, town.max_x, town.max_z);
-    let peak = find_peak_site(occ, grid, search, town, keep, 28, 24, rng);
-    let peak_high = peak.is_some_and(|yard| {
-        grid.mean(yard.min_x, yard.min_z, yard.max_x, yard.max_z) >= town_h + 12
-    });
-    if peak_high {
-        if let Some(yard) = peak {
-            paint_mountain_fortress(occ, yard, scenes);
-        }
-        return;
-    }
     place_cathedral_district(occ, grid, town, keep, search, rng, scenes);
-    if !scenes
-        .iter()
-        .any(|scene| scene.kind == SceneKind::Cathedral)
-        && let Some(yard) = peak
-    {
+    if let Some(yard) = find_peak_site(occ, grid, search, town, keep, 28, 24, 0, rng) {
         paint_mountain_fortress(occ, yard, scenes);
     }
 }
@@ -994,6 +1051,57 @@ fn paint_mountain_fortress(occ: &mut Occupancy, yard: Rect, scenes: &mut Vec<Sce
     }
     scenes.push(Scene {
         kind: SceneKind::MountainFortress,
+        rect: yard,
+    });
+}
+
+fn place_mine(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let Some(yard) = find_peak_site(occ, grid, search, town, keep_out, 16, 14, 10, rng) else {
+        return;
+    };
+    occ.fill(yard, CellKind::Green, false);
+    let (cx, cz) = yard.center();
+    occ.fill(
+        Rect::new(cx - 2, cz - 2, cx + 2, cz + 2),
+        CellKind::MineHead,
+        true,
+    );
+    let rail_z = yard.min_z + 2;
+    for x in (yard.min_x + 1)..yard.max_x {
+        if occ.kind(x, rail_z) == CellKind::Green {
+            occ.set(x, rail_z, CellKind::MineRail, true);
+        }
+    }
+    occ.fill(
+        Rect::new(
+            yard.min_x + 1,
+            yard.max_z - 4,
+            yard.min_x + 5,
+            yard.max_z - 1,
+        ),
+        CellKind::MineSpoil,
+        true,
+    );
+    occ.fill(
+        Rect::new(
+            yard.max_x - 5,
+            yard.max_z - 4,
+            yard.max_x - 1,
+            yard.max_z - 1,
+        ),
+        CellKind::MineSpoil,
+        true,
+    );
+    scenes.push(Scene {
+        kind: SceneKind::Mine,
         rect: yard,
     });
 }
@@ -1187,6 +1295,7 @@ fn find_peak_site(
     keep_out: Rect,
     w: i32,
     d: i32,
+    gap: i32,
     rng: &mut TownRng,
 ) -> Option<Rect> {
     let mut best = None;
@@ -1198,6 +1307,9 @@ fn find_peak_site(
             let rect = Rect::new(x, z, x + w - 1, z + d - 1);
             x += 8;
             if town.inflate(12).intersects(rect) || keep_out.intersects(rect) {
+                continue;
+            }
+            if gap > 0 && !occ.is_free(rect.inflate(gap)) {
                 continue;
             }
             if !site_ok(occ, grid, rect, 12) {
@@ -1410,6 +1522,111 @@ mod tests {
                 || kinds.contains(&SceneKind::Monastery)
                 || kinds.contains(&SceneKind::PillagerCamp),
             "expected a round-7 scene, got {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn round9_heroes_mines_ruins_and_biome_lots() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let oak = build_plan(20_261_025, origin, grid.clone(), PaletteKind::Oak);
+        let kinds: Vec<_> = oak.scenes.iter().map(|s| s.kind).collect();
+        assert!(
+            kinds.contains(&SceneKind::Cathedral) && kinds.contains(&SceneKind::MountainFortress),
+            "cathedral and fortress should both place when sites exist, got {kinds:?}"
+        );
+        assert!(kinds.contains(&SceneKind::Mine), "missing mine: {kinds:?}");
+        if let Some(ruin) = oak.scenes.iter().find(|s| s.kind == SceneKind::Ruin) {
+            let mut houses = 0;
+            for z in ruin.rect.min_z..=ruin.rect.max_z {
+                for x in ruin.rect.min_x..=ruin.rect.max_x {
+                    if oak.occ.kind(x, z) == CellKind::Ruin {
+                        houses += 1;
+                    }
+                }
+            }
+            assert!(houses >= 40, "ruined village houses {houses}");
+        }
+        if let Some(mine) = oak.scenes.iter().find(|s| s.kind == SceneKind::Mine) {
+            let mut head = 0;
+            let mut rail = 0;
+            let mut spoil = 0;
+            for z in mine.rect.min_z..=mine.rect.max_z {
+                for x in mine.rect.min_x..=mine.rect.max_x {
+                    match oak.occ.kind(x, z) {
+                        CellKind::MineHead => head += 1,
+                        CellKind::MineRail => rail += 1,
+                        CellKind::MineSpoil => spoil += 1,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(head >= 16, "mine headframe {head}");
+            assert!(rail >= 6, "mine rail {rail}");
+            assert!(spoil >= 8, "mine spoil {spoil}");
+        }
+        let mills: Vec<_> = oak
+            .lots
+            .iter()
+            .filter(|lot| lot.kind == BuildingKind::Windmill)
+            .collect();
+        if let Some(mill) = mills.first() {
+            let (cx, cz) = mill.rect.center();
+            let mut far = 0;
+            for z in oak.occ.bounds.min_z..=oak.occ.bounds.max_z {
+                for x in oak.occ.bounds.min_x..=oak.occ.bounds.max_x {
+                    if oak.occ.kind(x, z) != CellKind::WindSail {
+                        continue;
+                    }
+                    let dist = (x - cx).abs().max((z - cz).abs());
+                    if dist >= 8 {
+                        far += 1;
+                    }
+                }
+            }
+            assert!(
+                far >= 8,
+                "sails should reach well outside the tower, far={far}"
+            );
+        }
+        let spruce = build_plan(7, origin, grid.clone(), PaletteKind::Spruce);
+        let spruce_long = spruce
+            .lots
+            .iter()
+            .filter(|lot| lot.kind == BuildingKind::Longhouse)
+            .count();
+        let oak_long = oak
+            .lots
+            .iter()
+            .filter(|lot| lot.kind == BuildingKind::Longhouse)
+            .count();
+        assert!(
+            spruce_long >= oak_long,
+            "taiga should prefer longhouses, spruce={spruce_long} oak={oak_long}"
+        );
+        let desert = build_plan(314_159, origin, grid, PaletteKind::Sandstone);
+        assert!(
+            desert
+                .lots
+                .iter()
+                .all(|lot| lot.kind != BuildingKind::Longhouse && lot.kind != BuildingKind::Timber),
+            "desert towns should not place timber-frame longhouses"
+        );
+        assert!(
+            desert
+                .lots
+                .iter()
+                .any(|lot| lot.kind == BuildingKind::Townhouse),
+            "desert towns should keep sandstone townhouses"
         );
     }
 }

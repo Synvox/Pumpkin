@@ -514,11 +514,15 @@ fn furnish_windmill_room(
 ) {
     let (cx, cz) = rect.center();
     if x == cx && z == cz {
-        sink.put(x, floor + 1, z, Block::HAY_BLOCK.default_state);
         for y in floor + 2..roof_y {
             if (y - floor) % 4 != 0 {
                 sink.put(x, y, z, Block::LADDER.default_state);
             }
+        }
+    } else if (x - cx).abs() + (z - cz).abs() == 1 {
+        sink.put(x, floor, z, Block::SMOOTH_STONE.default_state);
+        if x == cx + 1 {
+            sink.put(x, floor + 1, z, Block::GRINDSTONE.default_state);
         }
     } else if (x + z) % 3 == 0 {
         sink.put(x, floor + 1, z, Block::BARREL.default_state);
