@@ -7,7 +7,7 @@ use pumpkin_data::{Block, BlockState};
 use crate::buildings::BuildingKind;
 use crate::castle::RoofKind;
 use crate::cells::CellKind;
-use crate::geom::Rect;
+use crate::geom::{Dir, Rect};
 use crate::interior::keep_storey_label;
 use crate::palette::PaletteKind;
 use crate::plan::TownPlan;
@@ -111,8 +111,30 @@ fn write_scene_renders(
             |_, _, _| true,
             Some("Castle town · farms, roads, hinterland"),
             false,
+            0,
         ),
     )?;
+    let mega = megacity_bounds(plan);
+    let mega_span = (mega.width() + mega.depth()).max(1);
+    let mega_tile = (1800 / mega_span).clamp(2, 5);
+    for (rot, name) in [(0u8, "se"), (1u8, "sw"), (2u8, "nw")] {
+        save(
+            &out_dir.join(format!("{stem}-showcase-{name}.png")),
+            &render_iso_view(
+                volume,
+                mega.min_x,
+                mega.min_z,
+                mega.max_x,
+                mega.max_z,
+                mega_tile,
+                1,
+                |_, _, _| true,
+                Some("Megacity · castle, cathedral, market, harbour, mills"),
+                false,
+                rot,
+            ),
+        )?;
+    }
 
     let mut seen = Vec::new();
     for scene in &plan.scenes {
@@ -139,6 +161,8 @@ fn write_scene_renders(
         let mut rect = scene.rect;
         if scene.kind == SceneKind::Harbour {
             rect = harbour_scene_rect(plan, rect);
+        } else if scene.kind == SceneKind::Vineyard {
+            // Keep the outer terraces in frame.
         } else if rect.width() > 56 || rect.depth() > 56 {
             let (cx, cz) = rect.center();
             rect = Rect::new(cx - 28, cz - 28, cx + 27, cz + 27);
@@ -147,6 +171,12 @@ fn write_scene_renders(
         save(
             &out_dir.join(format!("{stem}-scene-{name}.png")),
             &render_exterior(volume, rect, pad, scene.kind.label()),
+        )?;
+    }
+    if let Some(light) = largest_blob(plan, CellKind::Lighthouse) {
+        save(
+            &out_dir.join(format!("{stem}-scene-lighthouse.png")),
+            &render_exterior(volume, light.inflate(8), 3, "Lighthouse · breakwater tip"),
         )?;
     }
     if let Some(mill) = plan
@@ -177,10 +207,29 @@ fn write_scene_renders(
                 &render_wheel_elevation(volume, wheel, "Water wheel"),
             )?;
         }
+        let river_rot = plan
+            .lots
+            .iter()
+            .filter(|lot| lot.kind == BuildingKind::Watermill)
+            .map(|lot| mill_river_rot(plan, lot.rect, lot.facing))
+            .find(|&rot| rot == 0)
+            .unwrap_or(2);
         save(
             &out_dir.join(format!("{stem}-scene-watermill.png")),
-            &render_exterior(volume, rect, 4, "Watermill · wheel, sluice and race"),
+            &render_exterior_rot(
+                volume,
+                rect,
+                4,
+                "Watermill · wheel from the river",
+                river_rot,
+            ),
         )?;
+        for (rot, name) in [(0u8, "se"), (1u8, "sw"), (2u8, "nw"), (3u8, "ne")] {
+            save(
+                &out_dir.join(format!("{stem}-scene-watermill-{name}.png")),
+                &render_exterior_rot(volume, rect, 4, &format!("Watermill · {name}"), rot),
+            )?;
+        }
     }
     save(
         &out_dir.join(format!("{stem}-scene-market.png")),
@@ -200,7 +249,17 @@ fn write_scene_renders(
     if let Some(hull) = largest_blob(plan, CellKind::Ship) {
         save(
             &out_dir.join(format!("{stem}-scene-harbour-ship.png")),
-            &render_exterior(volume, hull.inflate(12), 3, "Harbour · cog at the quay"),
+            &render_exterior(volume, hull.inflate(6), 2, "Harbour · cog at the quay"),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-scene-harbour-ship-close.png")),
+            &render_exterior_rot(
+                volume,
+                hull.inflate(3),
+                2,
+                "Cog · dark-oak hull, spruce deck, sail",
+                ship_beam_rot(hull),
+            ),
         )?;
     }
     Ok(())
@@ -296,6 +355,76 @@ pub fn overview_bounds(plan: &TownPlan) -> Rect {
         bounds.max_x.min(plan.bounds.max_x),
         bounds.max_z.min(plan.bounds.max_z),
     )
+}
+
+fn megacity_bounds(plan: &TownPlan) -> Rect {
+    let mut bounds = overview_bounds(plan);
+    for kind in [
+        CellKind::Ship,
+        CellKind::Boat,
+        CellKind::Breakwater,
+        CellKind::Lighthouse,
+        CellKind::WaterWheel,
+        CellKind::Quay,
+        CellKind::MillRace,
+    ] {
+        if let Some(blob) = largest_blob(plan, kind) {
+            bounds = union_rect(bounds, blob.inflate(10));
+        }
+    }
+    for lot in &plan.lots {
+        if matches!(lot.kind, BuildingKind::Watermill | BuildingKind::Windmill) {
+            bounds = union_rect(bounds, lot.rect.inflate(12));
+        }
+    }
+    Rect::new(
+        bounds.min_x.max(plan.bounds.min_x),
+        bounds.min_z.max(plan.bounds.min_z),
+        bounds.max_x.min(plan.bounds.max_x),
+        bounds.max_z.min(plan.bounds.max_z),
+    )
+}
+
+fn mill_river_rot(plan: &TownPlan, mill: Rect, facing: Dir) -> u8 {
+    let water = wheel_for_mill(plan, mill).map_or_else(
+        || facing.opposite(),
+        |wheel| {
+            let (wx, wz) = wheel.center();
+            let (mx, mz) = mill.center();
+            if (wx - mx).abs() >= (wz - mz).abs() {
+                if wx >= mx { Dir::East } else { Dir::West }
+            } else if wz >= mz {
+                Dir::South
+            } else {
+                Dir::North
+            }
+        },
+    );
+    match water {
+        Dir::East | Dir::South => 0,
+        Dir::West | Dir::North => 2,
+    }
+}
+
+fn ship_beam_rot(hull: Rect) -> u8 {
+    u8::from(hull.width() < hull.depth())
+}
+
+fn iso_local(
+    rot: u8,
+    x: i32,
+    z: i32,
+    min_x: i32,
+    min_z: i32,
+    max_x: i32,
+    max_z: i32,
+) -> (i32, i32) {
+    match rot % 4 {
+        0 => (x - min_x, z - min_z),
+        1 => (z - min_z, max_x - x),
+        2 => (max_x - x, max_z - z),
+        _ => (max_z - z, x - min_x),
+    }
 }
 
 fn union_rect(a: Rect, b: Rect) -> Rect {
@@ -543,6 +672,7 @@ fn render_room(
         |x, y, _z| x <= cx + 1 && y >= floor - 1 && y <= lid,
         Some(title),
         true,
+        0,
     )
 }
 
@@ -551,9 +681,6 @@ fn harbour_scene_rect(plan: &TownPlan, scene: Rect) -> Rect {
     let mut rect = quay.inflate(14);
     if let Some(hull) = largest_blob(plan, CellKind::Ship) {
         rect = union_rect(rect, hull.inflate(8));
-    }
-    if let Some(light) = largest_blob(plan, CellKind::Lighthouse) {
-        rect = union_rect(rect, light.inflate(6));
     }
     let (sx, sz) = quay.center();
     if rect.width() > 72 {
@@ -704,6 +831,16 @@ fn render_exterior(
     pad: i32,
     title: &str,
 ) -> RgbImage {
+    render_exterior_rot(volume, rect, pad, title, 0)
+}
+
+fn render_exterior_rot(
+    volume: &VolumeSink,
+    rect: crate::geom::Rect,
+    pad: i32,
+    title: &str,
+    rot: u8,
+) -> RgbImage {
     render_iso_view(
         volume,
         rect.min_x - pad,
@@ -715,6 +852,7 @@ fn render_exterior(
         |_, _, _| true,
         Some(title),
         false,
+        rot,
     )
 }
 
@@ -880,6 +1018,18 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     if id == Block::WHITE_WOOL.id {
         return [230, 230, 225];
     }
+    if id == Block::GLOWSTONE.id {
+        return [248, 210, 90];
+    }
+    if id == Block::SEA_LANTERN.id {
+        return [172, 220, 214];
+    }
+    if id == Block::GLASS.id || id == Block::GLASS_PANE.id {
+        return [190, 220, 230];
+    }
+    if id == Block::SWEET_BERRY_BUSH.id {
+        return [62, 118, 40];
+    }
     if id == Block::OAK_LEAVES.id || id == Block::SPRUCE_LEAVES.id || id == Block::JUNGLE_LEAVES.id
     {
         return [48, 116, 40];
@@ -990,6 +1140,7 @@ pub fn render_iso(
         |_, _, _| true,
         None,
         false,
+        0,
     )
 }
 
@@ -1006,7 +1157,7 @@ pub fn render_iso_cut(
     keep: impl Fn(i32, i32, i32) -> bool,
 ) -> RgbImage {
     render_iso_view(
-        volume, min_x, min_z, max_x, max_z, tile, pitch, keep, None, false,
+        volume, min_x, min_z, max_x, max_z, tile, pitch, keep, None, false, 0,
     )
 }
 
@@ -1021,6 +1172,7 @@ fn render_iso_view(
     keep: impl Fn(i32, i32, i32) -> bool,
     title: Option<&str>,
     fill_light: bool,
+    rot: u8,
 ) -> RgbImage {
     let Some((bx0, by0, bz0, bx1, by1, bz1)) =
         occupied_bounds(volume, min_x, max_x, min_z, max_z, &keep)
@@ -1036,8 +1188,13 @@ fn render_iso_view(
     let span_x = max_x - min_x + 1;
     let span_z = max_z - min_z + 1;
     let span_y = max_y - min_y + 1;
+    let (span_lx, span_lz) = if rot % 2 == 1 {
+        (span_z, span_x)
+    } else {
+        (span_x, span_z)
+    };
     let tile = if tile <= 0 {
-        let span = (span_x + span_z).max(1);
+        let span = (span_lx + span_lz).max(1);
         ((1600 - 8) / span).clamp(12, 28)
     } else {
         tile.max(2)
@@ -1045,38 +1202,65 @@ fn render_iso_view(
     let tw = tile;
     let th = (tile / (1 + pitch.max(1))).max(1);
     let label_h = if title.is_some() { 28 } else { 0 };
-    let width = ((span_x + span_z) * tw + 8) as u32;
-    let height = ((span_x + span_z) * th + span_y * tile + 8 + label_h) as u32;
-    let origin_x = span_z * tw + 4;
+    let width = ((span_lx + span_lz) * tw + 8) as u32;
+    let height = ((span_lx + span_lz) * th + span_y * tile + 8 + label_h) as u32;
+    let origin_x = span_lz * tw + 4;
     let origin_y = span_y * tile + 4 + label_h;
     let mut image = ImageBuffer::from_pixel(width.max(1), height.max(1), Rgb([168u8, 198, 230]));
     let light = if fill_light { 1.18 } else { 1.0 };
-    for z in min_z..=max_z {
-        for x in min_x..=max_x {
-            let top_y = volume.top(x, z).map_or(min_y, |(y, _)| y);
-            let draw_min = column_draw_min(volume, x, z, top_y, min_y);
-            for y in draw_min.max(min_y)..=max_y {
-                if !keep(x, y, z) {
-                    continue;
+    let mut paint = |x: i32, z: i32| {
+        let top_y = volume.top(x, z).map_or(min_y, |(y, _)| y);
+        let draw_min = column_draw_min(volume, x, z, top_y, min_y);
+        for y in draw_min.max(min_y)..=max_y {
+            if !keep(x, y, z) {
+                continue;
+            }
+            let Some(state) = volume.get(x, y, z) else {
+                continue;
+            };
+            if state.is_air() {
+                continue;
+            }
+            let rgb = block_rgb(state);
+            let (lx, lz) = iso_local(rot, x, z, min_x, min_z, max_x, max_z);
+            let ly = y - min_y;
+            let sx = origin_x + (lx - lz) * tw;
+            let sy = origin_y + (lx + lz) * th - ly * tile;
+            let occl = if fill_light {
+                0.92
+            } else {
+                occlusion(volume, x, y, z)
+            };
+            draw_cube(&mut image, sx, sy, tw, th, tile, rgb, occl * light);
+        }
+    };
+    match rot % 4 {
+        0 => {
+            for z in min_z..=max_z {
+                for x in min_x..=max_x {
+                    paint(x, z);
                 }
-                let Some(state) = volume.get(x, y, z) else {
-                    continue;
-                };
-                if state.is_air() {
-                    continue;
+            }
+        }
+        1 => {
+            for z in min_z..=max_z {
+                for x in (min_x..=max_x).rev() {
+                    paint(x, z);
                 }
-                let rgb = block_rgb(state);
-                let lx = x - min_x;
-                let lz = z - min_z;
-                let ly = y - min_y;
-                let sx = origin_x + (lx - lz) * tw;
-                let sy = origin_y + (lx + lz) * th - ly * tile;
-                let occl = if fill_light {
-                    0.92
-                } else {
-                    occlusion(volume, x, y, z)
-                };
-                draw_cube(&mut image, sx, sy, tw, th, tile, rgb, occl * light);
+            }
+        }
+        2 => {
+            for z in (min_z..=max_z).rev() {
+                for x in (min_x..=max_x).rev() {
+                    paint(x, z);
+                }
+            }
+        }
+        _ => {
+            for z in (min_z..=max_z).rev() {
+                for x in min_x..=max_x {
+                    paint(x, z);
+                }
             }
         }
     }

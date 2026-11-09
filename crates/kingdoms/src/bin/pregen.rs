@@ -200,8 +200,8 @@ fn render_one(
 }
 
 fn find_variant_seeds() -> Vec<(u64, i32, i32, String)> {
-    // Four towns from the first renders, plus a cell that actually has
-    // coast/lake water so the harbour cog, quay, crane and breakwater show.
+    // Four towns from the first renders, plus seed 1 cell -4,5: harbour
+    // megacity showcase (castle, cathedral, market, harbour, mills).
     vec![
         (20_261_025u64, 0, 0, "plains".to_string()),
         (7, 0, 0, "taiga-hill".to_string()),
