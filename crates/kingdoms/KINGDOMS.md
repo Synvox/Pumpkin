@@ -188,6 +188,8 @@ For an external AI director (e.g. on Sails). Enable with env; bind is localhost 
 | `KINGDOMS_HTTP_WEBHOOK_SECRET` | HMAC-SHA256 key (defaults to the bearer token) |
 | `KINGDOMS_WAR_CLOCK` | `0`/`false` disables the 24/7 loop (default on) |
 | `KINGDOMS_WAR_CLOCK_TICKS` | ticks between auto-raids (default `2400`) |
+| `KINGDOMS_BODY_BUDGET` | live (materialised) soldiers the war clock respects (default `240`) |
+| `KINGDOMS_PROFILE=1` | log director/front/body/ticket/RSS every 100 ticks |
 
 Bodies over 16 KiB return 413. More than 20 requests/second return 429. A successful bearer auth pauses the war clock for 30 s.
 
@@ -220,6 +222,8 @@ Civilians work at a workstation by day (ticks 2000–11000) and go home to a bed
 ### Scale / LOD
 
 On each director tick: spatial buckets (16 blocks) for target acquisition. Idle garrisons still `set_no_ai` stagger; a live raid does not, because skipping AI also skipped walking. Path-search cap 48/tick applies only to **squad leaders** refreshing live `navigator.set_progress`. Everyone else steers on a shared flow field (one BFS per gate/keep, 4-block cells, O(1) lookup). Followers keep cohesion with their leader; within ~16 blocks and LOS they walk straight at the target.
+
+Fronts with no player within 128 blocks of keep, gate, or camp stay **abstract**: virtual raider/defender counts, a 400-tick march, then Lanchester combat on a 20-tick timer. Entities and force-load tickets appear only when a player approaches (and the live body budget has room). `GET /war` reports `live` so the map can tell a materialised fight from a statistical one.
 
 `ThrottledMeleeGoal` (kingdoms, not Pumpkin) path-refreshes on that same cadence instead of vanilla melee's ~4 tick interval.
 
@@ -316,9 +320,20 @@ Round 6 (seed `20261025`, release, LTO off, two `kingdoms-raid-bot`s at gate/kee
 
 Capture: `kingdoms town captured … score=pillager` then webhook `town_captured` / `retaken by alder`. Clock did **not** fire on the flip tick (`repair_until=3951`, clock at 5000). `POST /lines` set rally to `Alder to the gate. Hold fast.`; captains shouted rally / gate_breached / victory to the gate bot. `/war` and `GET /war` showed owner, scores, raid_side, repair_until.
 
-Player-join hitch (investigate only, no pumpkin-core change): `chunker::update_position` on spawn diffs an empty watched section against the full view-distance cylinder (`Cylindrical::changed_chunks`) and, on that same tick, (1) adds view + simulation tickets for every chunk, (2) `enqueue_chunk`s the whole set onto `ChunkSender`, (3) `mark_chunks_as_newly_watched` + `spawn_world_entity_chunks`. `ticker.rs` then logs `Can't keep up` (~8.5–9.0 s / ~175–179 ticks at view distance 16). A tiny isolated hook would be to stagger those first-join tickets the way raid warmup already does (`TICKETS_PER_TICK=12`): cap `loading_chunks` applied per tick on the player's first `watched_section` fill, or start the player at view distance 2 and grow. That lives in `crates/pumpkin-core/src/world/chunker.rs`, not kingdoms.
+Player-join hitch (investigate only, no pumpkin-core change): `chunker::update_position` on spawn diffs an empty watched section against the full view-distance cylinder (`Cylindrical::changed_chunks`) and, on that same tick, (1) adds view + simulation tickets for every chunk, (2) `enqueue_chunk`s the whole set onto `ChunkSender`, (3) `mark_chunks_as_newly_watched` + `spawn_world_entity_chunks`. `ticker.rs` then logs `Can't keep up` (~8.5–9.0 s / ~175–179 ticks at view distance 16).
 
 Plots: `/opt/cursor/artifacts/live-r6.log`, `live-r6-strip.png` (3990×1024), `live-r6-clock-strip.png`, `soak-r6.csv`, `kingdoms-ownership-r6.json`, `webhook-r6.log`.
+
+Round 7 is a performance pass. Remote fronts (no player within 128 blocks of keep/gate/camp) no longer spawn soldiers or force-load towns: they keep virtual counts and resolve Lanchester combat on a 20-tick timer after a 400-tick march. `KINGDOMS_BODY_BUDGET` (default 240) caps live bodies; the war clock still opens up to `KINGDOMS_WAR_CLOCK_FRONTS` raids, but extras stay abstract. Live tickets cover the battle line only (1-chunk ring, 8-step corridor). Camp pillagers inside `plan.bounds` no longer hold the alarm. Join hitch: kingdoms calls `pumpkin_core::world::chunker::set_join_view_grow(1)` so a new player's view cylinder grows one ring per tick (vanilla keeps 0).
+
+| Fight | peak bodies | fight MSPT | director_ms | `Can't keep up` | notes |
+| --- | ---: | ---: | ---: | --- | --- |
+| r6 30 min soak (before) | **747** / 1331 entities | **p50 60.6 / p95 101 / max 290** (join 558) | 20–38 | 3-bot join 43.6 s / 871 ticks | 3 live 100 vs 100 fronts |
+| r7 30 min soak (3 fronts + 1 bot) | **230** live / 556 entities | **p50 34.2 / p95 47.4 / max 65** after join (join sample 522, 40 s first-plan hitch) | p50 **3.5** / p95 92 (PNG dumps whenever `KINGDOMS_PLOT_DIR` is set) | 8 (join 41 s / 819 ticks; later plot dumps 2 s) | 1 live + 3 abstract; tickets 0→87 (no leak); RSS 66→618 MiB; **9 captures, 7 kingdom** (scores alder 4 / raven 3 / pillager 2) |
+
+Target was p50 ≤ 25 / p95 ≤ 45. Director time is 3.5 ms; the leftover ~30 ms is the live player's chunk/entity tick, not 3×100 vs 100. First join still hitches on the first town plan (~40 s director), not the view-distance fill. Three bots were still connected 30 s into that hitch. A later join on the same world took 2.6 s. Kingdom occupy of a pillager town was stuck at `occupy_hold >> 200` until `tick_hold` started treating keep-holds as a capture for any owner.
+
+Plots: `/opt/cursor/artifacts/live-r7.log`, `soak-r7.csv`, `soak-r7-summary.json`, `kingdoms-ownership-r7.json`, `webhook-r7.log`.
 
 ### Commands
 

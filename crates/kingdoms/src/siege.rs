@@ -226,12 +226,39 @@ pub fn tick_hold(
     occupy_need: u32,
     retake_need: u32,
 ) -> HoldUpdate {
+    tick_hold_n(
+        current,
+        raiders_in_keep,
+        defenders_in_keep,
+        occupy_hold,
+        retake_hold,
+        occupy_need,
+        retake_need,
+        1,
+    )
+}
+
+/// Same as [`tick_hold`], adding `delta` ticks (abstract fronts step in batches).
+#[must_use]
+pub fn tick_hold_n(
+    current: &TownOwner,
+    raiders_in_keep: u32,
+    defenders_in_keep: u32,
+    occupy_hold: u32,
+    retake_hold: u32,
+    occupy_need: u32,
+    retake_need: u32,
+    delta: u32,
+) -> HoldUpdate {
     let mut occupy = occupy_hold;
     let mut retake = retake_hold;
     if raiders_in_keep >= occupy_need && defenders_in_keep == 0 {
-        occupy = occupy.saturating_add(1);
+        occupy = occupy.saturating_add(delta);
         retake = 0;
-        if occupy >= HOLD_TICKS && !current.is_pillager() {
+        // Kingdom armies (and pillagers) both flip a town by holding the keep.
+        // Skipping pillager-owned towns here left abstract KvK / retake fronts
+        // stuck at occupy_hold >> HOLD_TICKS.
+        if occupy >= HOLD_TICKS {
             return HoldUpdate {
                 occupy_hold: 0,
                 retake_hold: 0,
@@ -240,7 +267,7 @@ pub fn tick_hold(
             };
         }
     } else if defenders_in_keep >= retake_need && raiders_in_keep == 0 {
-        retake = retake.saturating_add(1);
+        retake = retake.saturating_add(delta);
         occupy = 0;
         if retake >= HOLD_TICKS && current.is_pillager() {
             return HoldUpdate {
@@ -251,8 +278,8 @@ pub fn tick_hold(
             };
         }
     } else {
-        occupy = occupy.saturating_sub(1);
-        retake = retake.saturating_sub(1);
+        occupy = occupy.saturating_sub(delta);
+        retake = retake.saturating_sub(delta);
     }
     HoldUpdate {
         occupy_hold: occupy,
@@ -461,6 +488,24 @@ mod tests {
         }
         assert!(update.retaken);
         assert!(!update.captured);
+    }
+
+    #[test]
+    fn kingdom_army_can_occupy_a_pillager_town() {
+        let owner = TownOwner::Pillager;
+        let mut hold = 0;
+        let mut update = HoldUpdate {
+            occupy_hold: 0,
+            retake_hold: 0,
+            captured: false,
+            retaken: false,
+        };
+        for _ in 0..HOLD_TICKS {
+            update = tick_hold(&owner, 8, 0, hold, 0, 8, 8);
+            hold = update.occupy_hold;
+        }
+        assert!(update.captured);
+        assert!(!update.retaken);
     }
 
     #[test]

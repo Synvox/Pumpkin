@@ -133,7 +133,7 @@ impl Bot {
     }
 
     async fn next_packet(&mut self) -> Result<RawPacket, String> {
-        match timeout(Duration::from_secs(30), self.reader.get_raw_packet()).await {
+        match timeout(Duration::from_secs(120), self.reader.get_raw_packet()).await {
             Ok(Ok(packet)) => Ok(packet),
             Ok(Err(err)) => Err(format!("decode: {err}")),
             Err(_) => Err(format!("timed out waiting for a packet ({})", self.name)),

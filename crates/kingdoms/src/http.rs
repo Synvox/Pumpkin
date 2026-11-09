@@ -484,6 +484,7 @@ fn war_json() -> Value {
             "raiders": t.raiders,
             "raid_side": t.raid_side,
             "repair_until": t.repair_until,
+            "live": t.live,
         })).collect::<Vec<_>>(),
         "fronts": front.fronts,
     })
