@@ -1,41 +1,70 @@
-//! Town gameplay points derived from [`TownInfo`].
+//! Town gameplay points from [`TownInfo::spawns`].
 //!
-//! A later agent may add villager beds, workstations, guard posts, rally
-//! points and pillager camps to `TownInfo`. Until then this trait is the
-//! swap point: [`TownInfoScene`] derives posts from keep, gates, towers,
-//! wall polygon and lots.
+//! Hinterland planning writes villager beds, workstations, wall/tower guard
+//! posts, market/keep rallies, gates, and pillager camp spawn/rally columns.
+//! [`TownInfoScene`] is a thin adapter so the director and siege bench keep a
+//! stable `TownScene` trait.
 
-use crate::buildings::BuildingKind;
 use crate::faction::KingdomId;
 use crate::geom::{Rect, dist2};
-use crate::info::{GateInfo, GateKind, TownInfo};
+use crate::info::{GateInfo, SpawnPoint, SpawnRole, TownInfo};
 
 /// A column a defender or civilian should care about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScenePost {
     pub x: i32,
+    /// Planner standing height (`surface + 1`). `0` means “sample live”.
+    pub y: i32,
     pub z: i32,
 }
 
 impl ScenePost {
     #[must_use]
     pub const fn new(x: i32, z: i32) -> Self {
-        Self { x, z }
+        Self { x, y: 0, z }
+    }
+
+    #[must_use]
+    pub const fn with_y(x: i32, y: i32, z: i32) -> Self {
+        Self { x, y, z }
     }
 
     #[must_use]
     pub const fn from_tuple(p: (i32, i32)) -> Self {
-        Self { x: p.0, z: p.1 }
+        Self {
+            x: p.0,
+            y: 0,
+            z: p.1,
+        }
     }
 
     #[must_use]
     pub const fn from_xz(p: [i32; 2]) -> Self {
-        Self { x: p[0], z: p[1] }
+        Self {
+            x: p[0],
+            y: 0,
+            z: p[1],
+        }
+    }
+
+    #[must_use]
+    pub const fn from_spawn(p: SpawnPoint) -> Self {
+        Self {
+            x: p.x,
+            y: p.y,
+            z: p.z,
+        }
     }
 
     #[must_use]
     pub const fn as_tuple(self) -> (i32, i32) {
         (self.x, self.z)
+    }
+
+    /// Planner Y, or `fallback` when this post was built without a spawn.
+    #[must_use]
+    pub const fn height_or(self, fallback: i32) -> i32 {
+        if self.y == 0 { fallback } else { self.y }
     }
 }
 
@@ -75,11 +104,12 @@ pub trait TownScene {
     }
 }
 
-/// Adapter over today's planner snapshot.
+/// Adapter over [`TownInfo::spawns`].
 #[derive(Clone, Debug)]
 pub struct TownInfoScene {
     info: TownInfo,
     kingdom: KingdomId,
+    keep: ScenePost,
     guard_posts: Vec<ScenePost>,
     archer_posts: Vec<ScenePost>,
     civilian_homes: Vec<ScenePost>,
@@ -92,69 +122,40 @@ impl TownInfoScene {
     #[must_use]
     pub fn from_info(info: TownInfo) -> Self {
         let kingdom = KingdomId::for_town(&info);
-        let mut guard_posts = Vec::new();
-        let mut archer_posts = Vec::new();
-        let mut civilian_homes = Vec::new();
-        let mut rally_points = Vec::new();
-
-        for gate in &info.gates {
-            guard_posts.push(ScenePost::new(gate.x, gate.z));
-            // Stand just inside the gate so patrols do not wander into the field.
-            let inner =
-                ScenePost::new(gate.x - gate.facing.dx() * 4, gate.z - gate.facing.dz() * 4);
-            rally_points.push(inner);
+        let keep = first_role(&info, SpawnRole::RallyKeep)
+            .unwrap_or_else(|| ScenePost::from_tuple(info.castle.keep.center()));
+        let mut guard_posts = posts(&info, SpawnRole::Gate);
+        if guard_posts.len() < 4 {
+            guard_posts.extend(posts(&info, SpawnRole::GuardPost));
         }
-
-        for tower in &info.towers {
-            archer_posts.push(ScenePost::from_tuple(tower.center()));
+        let mut archer_posts = posts(&info, SpawnRole::GuardPost);
+        if archer_posts.is_empty() {
+            archer_posts.clone_from(&guard_posts);
         }
-        for tower in &info.castle.towers {
-            archer_posts.push(ScenePost::from_tuple(tower.center()));
-        }
-        // Wall walk samples so archers have more than tower tops.
-        if info.town_wall.len() >= 4 {
-            let step = (info.town_wall.len() / 6).max(1);
-            for (i, xz) in info.town_wall.iter().enumerate() {
-                if i % step == 0 {
-                    archer_posts.push(ScenePost::from_xz(*xz));
-                }
-            }
-        }
-
-        let barracks = info.castle.barracks.center();
-        guard_posts.push(ScenePost::from_tuple(barracks));
-        rally_points.push(ScenePost::from_tuple(info.castle.gatehouse.center()));
-        rally_points.push(ScenePost::from_xz(info.capture_point));
-
-        for b in &info.buildings {
-            match b.kind {
-                BuildingKind::Cottage
-                | BuildingKind::Timber
-                | BuildingKind::Townhouse
-                | BuildingKind::Longhouse
-                | BuildingKind::Tavern => {
-                    civilian_homes.push(ScenePost::from_xz(b.center));
-                }
-                BuildingKind::Church => {
-                    civilian_homes.push(ScenePost::from_xz(b.center));
-                    rally_points.push(ScenePost::from_xz(b.center));
-                }
-                BuildingKind::Blacksmith | BuildingKind::Barn | BuildingKind::Windmill => {
-                    civilian_homes.push(ScenePost::from_xz(b.center));
-                }
-                BuildingKind::Stall => {}
-            }
+        let mut civilian_homes = posts(&info, SpawnRole::VillagerBed);
+        if civilian_homes.is_empty() {
+            civilian_homes = posts(&info, SpawnRole::Workstation);
         }
         if civilian_homes.is_empty() {
             civilian_homes.push(ScenePost::from_tuple(info.market.center()));
         }
-
-        let road_approach = approach_from_roads(&info);
-        let raid_camps = raid_camps_from(&info, road_approach);
+        let mut rally_points = posts(&info, SpawnRole::RallyKeep);
+        rally_points.extend(posts(&info, SpawnRole::RallyMarket));
+        rally_points.extend(posts(&info, SpawnRole::Gate));
+        if rally_points.is_empty() {
+            rally_points.push(keep);
+        }
+        let mut raid_camps = posts(&info, SpawnRole::PillagerSpawn);
+        if raid_camps.is_empty() {
+            raid_camps = posts(&info, SpawnRole::PillagerRally);
+        }
+        let road_approach =
+            first_role(&info, SpawnRole::PillagerRally).or_else(|| raid_camps.first().copied());
 
         Self {
             info,
             kingdom,
+            keep,
             guard_posts,
             archer_posts,
             civilian_homes,
@@ -184,11 +185,12 @@ impl TownScene for TownInfoScene {
     }
 
     fn keep(&self) -> ScenePost {
-        ScenePost::from_tuple(self.info.castle.keep.center())
+        self.keep
     }
 
     fn capture_point(&self) -> ScenePost {
-        ScenePost::from_xz(self.info.capture_point)
+        first_role(&self.info, SpawnRole::RallyMarket)
+            .unwrap_or_else(|| ScenePost::from_xz(self.info.capture_point))
     }
 
     fn gates(&self) -> &[GateInfo] {
@@ -224,56 +226,21 @@ impl TownScene for TownInfoScene {
     }
 }
 
-fn approach_from_roads(info: &TownInfo) -> Option<ScenePost> {
-    let town_gates: Vec<_> = info
-        .gates
+fn posts(info: &TownInfo, role: SpawnRole) -> Vec<ScenePost> {
+    info.spawns
         .iter()
-        .filter(|g| g.kind == GateKind::Town)
         .copied()
-        .collect();
-    let gate = town_gates
-        .first()
-        .copied()
-        .or_else(|| info.gates.first().copied())?;
-    // Prefer a road endpoint that is farther from the keep than the gate — that is the field.
-    let keep = info.castle.keep.center();
-    let mut best: Option<(i64, ScenePost)> = None;
-    for road in &info.roads {
-        for end in [road.from, road.to] {
-            let d_keep = dist2(end[0], end[1], keep.0, keep.1);
-            let d_gate = dist2(end[0], end[1], gate.x, gate.z);
-            if d_keep > d_gate {
-                match best {
-                    Some((best_d, _)) if d_keep <= best_d => {}
-                    _ => best = Some((d_keep, ScenePost::from_xz(end))),
-                }
-            }
-        }
-    }
-    best.map(|(_, p)| p).or_else(|| {
-        Some(ScenePost::new(
-            gate.x + gate.facing.dx() * 80,
-            gate.z + gate.facing.dz() * 80,
-        ))
-    })
+        .filter(|s| s.role == role)
+        .map(ScenePost::from_spawn)
+        .collect()
 }
 
-fn raid_camps_from(info: &TownInfo, approach: Option<ScenePost>) -> Vec<ScenePost> {
-    let mut camps = Vec::new();
-    if let Some(p) = approach {
-        camps.push(p);
-    }
-    for gate in info.gates.iter().filter(|g| g.kind == GateKind::Town) {
-        camps.push(ScenePost::new(
-            gate.x + gate.facing.dx() * 96,
-            gate.z + gate.facing.dz() * 96,
-        ));
-    }
-    if camps.is_empty() {
-        let (cx, cz) = info.bounds.center();
-        camps.push(ScenePost::new(cx, cz + 120));
-    }
-    camps
+fn first_role(info: &TownInfo, role: SpawnRole) -> Option<ScenePost> {
+    info.spawns
+        .iter()
+        .copied()
+        .find(|s| s.role == role)
+        .map(ScenePost::from_spawn)
 }
 
 #[cfg(test)]
@@ -301,13 +268,23 @@ mod tests {
     }
 
     #[test]
-    fn derives_posts_from_existing_towninfo() {
+    fn derives_posts_from_towninfo_spawns() {
         let scene = scene();
         assert!(!scene.gates().is_empty());
         assert!(!scene.guard_posts().is_empty());
         assert!(!scene.archer_posts().is_empty());
         assert!(!scene.civilian_homes().is_empty());
-        assert!(!scene.raid_camps().is_empty());
+        assert!(
+            !scene.raid_camps().is_empty(),
+            "expected pillager camp spawns on the hinterland plan"
+        );
+        assert!(
+            scene
+                .info()
+                .spawns
+                .iter()
+                .any(|s| s.role == SpawnRole::PillagerSpawn || s.role == SpawnRole::PillagerRally)
+        );
         assert_eq!(scene.kingdom().as_str(), "alder");
         let keep = scene.keep();
         let gate = scene.gates()[0];

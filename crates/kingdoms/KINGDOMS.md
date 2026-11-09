@@ -125,7 +125,7 @@ crates/kingdoms/
 
 ## Villagers, factions, and raids
 
-This is the first combat step toward a 24/7 town war. Fork-only: no new AI scheduler in Pumpkin. Kingdoms adds goals on top of vanilla `GoalSelector`, `MeleeAttackGoal`, `BowAttackGoal`, `BreakDoorGoal`, and pillager/vindicator raider goals.
+This is the first combat step toward a 24/7 town war. Fork-only: no new AI scheduler in Pumpkin. Kingdoms adds goals on top of vanilla `GoalSelector`, `BowAttackGoal`, `BreakDoorGoal`, and pillager/vindicator raider goals. Guards use a kingdoms `ThrottledMeleeGoal` instead of vanilla `MeleeAttackGoal` so large fights do not path every 4 ticks.
 
 ### Factions
 
@@ -137,7 +137,7 @@ Each town belongs to **alder** or **raven** (even/odd cell). Villagers spawned i
 
 Vanilla scoreboard teams `k_alder`, `k_raven`, `k_pillager` are created with friendly fire off so `is_allied_to` matches. Damage is also cancelled in `EntityDamageByEntity` because Pumpkin's living-damage path does not check teams.
 
-Scene posts (beds, workstations, camps) are **not** on `TownInfo` yet. `TownScene` / `TownInfoScene` derives guard posts from gates + barracks, archer posts from towers + wall samples, civilian homes from lots, raid camps from the outer road endpoint. Swap the trait when the parallel scene-metadata work lands.
+`TownScene` / `TownInfoScene` reads [`TownInfo::spawns`](src/info.rs): guards at `Gate` (then `GuardPost`), archers on `GuardPost` (towers, wall walks, watchtowers), civilians on `VillagerBed`, rallies on `RallyKeep` / `RallyMarket`, and raids from `PillagerSpawn` tent columns in the hinterland camp (`PillagerRally` if a camp failed to place).
 
 ### Roles
 
@@ -152,7 +152,7 @@ Iron golems keep vanilla melee / monster targeting and also rally.
 
 ### Raids
 
-`/raid start <town> [size]` — town is `here`, `cell_x,cell_z`, or `seed:cx:cz`. Default size 24. Waves of pillagers (crossbow) and vindicators (melee + door break) spawn at a camp outside the walls, captains wear the ominous banner, and they march on the threatened gate. `/raid stop` ends every raid in the process.
+`/raid start <town> [size]` — town is `here` (cell containing the sender), quoted `"0,0"` / `"20261025:0:0"`, or an unquoted word like `here`. Commas and colons need quotes. Default size 24. Waves of pillagers (crossbow) and vindicators (melee + door break) spawn on `PillagerSpawn` tent columns in the hinterland camp, captains wear the ominous banner, and they march on the threatened gate. `/raid stop` ends every raid in the process.
 
 Director API (HTTP later, not in this crate):
 
@@ -169,21 +169,28 @@ let state = pumpkin_kingdoms::battle_state(&town_id);
 
 ### Scale / LOD
 
-On each director tick: spatial buckets (16 blocks) for target acquisition, `set_no_ai` stagger (combat every tick, alert every 2, idle every 8), path-search cap 48/tick. Vanilla `MeleeAttackGoal` still pathfinds on ticks it runs; we cannot throttle that without changing Pumpkin.
+On each director tick: spatial buckets (16 blocks) for target acquisition. Idle garrisons still `set_no_ai` stagger; a live raid does not, because skipping AI also skipped walking. Path-search cap 48/tick applies only to **squad leaders** refreshing live `navigator.set_progress`. Everyone else steers on a shared flow field (one BFS per gate/keep, 4-block cells, O(1) lookup). Followers keep cohesion with their leader; within ~16 blocks and LOS they walk straight at the target.
 
-Headless numbers (goal + steering on a planned town, **not** a full server tick with physics/pathfinder). Debug build, seed `20261025`, 400 ticks:
+`ThrottledMeleeGoal` (kingdoms, not Pumpkin) path-refreshes on that same cadence instead of vanilla melee's ~4 tick interval.
 
-| N vs N | ms/tick | worst ms | defender kills | raider kills | path capped |
-| --- | --- | --- | --- | --- | --- |
-| 50 | 0.44 | 0.57 | 9 | 1 | 2.2k / 21k |
-| 100 | 0.92 | 1.19 | 1 | 0 | 21k / 40k |
-| 200 | 2.14 | 3.34 | 3 | 0 | 81k / 100k |
+Headless numbers (flow-field steering on a planned town, **not** a full server tick with physics/pathfinder). Release build (`CARGO_PROFILE_RELEASE_LTO=off`), seed `20261025`, 800 ticks. JSON: `/opt/cursor/artifacts/siege-bench.json`.
 
-At 200 vs 200 the 48 path-searches/tick cap rejects most steering, so few units close to melee in 400 ticks. 50 vs 50 still scores kills. These numbers are the director/LOD/bucket loop plus a 0.25-block step; vanilla `Navigator` + entity physics on a live world will be slower.
+| N vs N | ms/tick | worst ms | melee engaged | peak melee | path capped |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 50 | 0.026 | 0.066 | 78 | 47 | 0/3102 |
+| 100 | 0.057 | 0.139 | 156 | 93 | 0/6198 |
+| 200 | 0.129 | 0.358 | 314 | 172 | 0/12506 |
+| 400 | 0.319 | 0.916 | 586 | 249 | 5665/24514 |
+
+200 vs 200 stays under ~10 ms/tick of sim AI, with most combatants reaching melee. Path budget is only spent on squad-leader refreshes; 400 vs 400 starts to clip those.
 
 ```bash
-cargo run -p pumpkin-kingdoms --bin kingdoms-siege-bench -- --n 200 --ticks 400 --out-dir kingdoms-siege
+CARGO_PROFILE_RELEASE_LTO=off cargo run --release -p pumpkin-kingdoms --bin kingdoms-siege-bench -- --n 200 --ticks 800 --out-dir /opt/cursor/artifacts
 ```
+
+Plots are ≥1024 px, wall/keep/gates under the dots, legend, start/mid/end frames plus a strip (`siege-{n}-start/mid/end/strip.png`).
+
+Live Pumpkin (release, LTO off, seed `20261025`, no player): `/raid start here 40` spawned 40 raiders at hinterland camp `(1532, 476)` and 35 garrison, forceloaded 170 chunks, civilians rang the bell. Director MSPT stayed ~0.5 ms. Raiders did not walk (`raider_gate_dist` stuck at 109 for 2000+ ticks). Headless sim is the engagement evidence; a real client in the town is still needed for live melee.
 
 ### Commands
 

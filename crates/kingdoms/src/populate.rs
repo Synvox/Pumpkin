@@ -61,12 +61,15 @@ fn populate_chunk(world: &Arc<World>, chunk_x: i32, chunk_z: i32) {
             if slot.home.x >> 4 != chunk_x || slot.home.z >> 4 != chunk_z {
                 continue;
             }
-            let y = world
-                .sample_surface_height(slot.home.x, slot.home.z)
-                .unwrap_or(world.sea_level);
+            let y = slot.home.height_or(
+                world
+                    .sample_surface_height(slot.home.x, slot.home.z)
+                    .unwrap_or(world.sea_level)
+                    + 1,
+            );
             let pos = Vector3::new(
                 f64::from(slot.home.x) + 0.5,
-                f64::from(y) + 1.0,
+                f64::from(y),
                 f64::from(slot.home.z) + 0.5,
             );
             if director::spawn_citizen(world, &town_id, &kingdom, slot.role, slot.is_golem, pos)
@@ -140,12 +143,15 @@ pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
         if already {
             continue;
         }
-        let y = world
-            .sample_surface_height(slot.home.x, slot.home.z)
-            .unwrap_or(world.sea_level);
+        let y = slot.home.height_or(
+            world
+                .sample_surface_height(slot.home.x, slot.home.z)
+                .unwrap_or(world.sea_level)
+                + 1,
+        );
         let pos = Vector3::new(
             f64::from(slot.home.x) + 0.5,
-            f64::from(y) + 1.0,
+            f64::from(y),
             f64::from(slot.home.z) + 0.5,
         );
         let _ = director::spawn_citizen(world, town_id, &kingdom, slot.role, slot.is_golem, pos);

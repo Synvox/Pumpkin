@@ -9,7 +9,7 @@ use pumpkin_core::plugin::{EventHandler, EventPriority, Payload, PluginFuture, T
 use pumpkin_core::server::Server;
 
 use crate::director;
-use crate::faction::is_allied;
+use crate::faction::{is_allied, is_kingdoms_tagged};
 use crate::populate::PopulateCitizens;
 
 pub fn register(server: &Server) {
@@ -110,6 +110,16 @@ impl EventHandler<EntityDamageByEntityEvent> for FriendlyFireHandler {
                 if is_allied(&a, &b) {
                     event.cancelled = true;
                     event.damage = 0.0;
+                } else if is_kingdoms_tagged(victim.get_entity())
+                    || is_kingdoms_tagged(damager.get_entity())
+                {
+                    tracing::info!(
+                        attacker = damager_id,
+                        victim = victim_id,
+                        damage = event.damage,
+                        cause = %event.cause,
+                        "kingdoms combat"
+                    );
                 }
                 return;
             }

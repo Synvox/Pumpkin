@@ -1,6 +1,6 @@
 //! Headless N-vs-N siege benchmark on a planned town.
 //!
-//!   cargo run -p pumpkin-kingdoms --bin kingdoms-siege-bench -- --n 200 --ticks 400 --out-dir /tmp/kingdoms-siege
+//!   cargo run --release -p pumpkin-kingdoms --bin kingdoms-siege-bench -- --n 200 --ticks 800 --out-dir /tmp/kingdoms-siege
 
 #![allow(
     clippy::print_stdout,
@@ -21,7 +21,7 @@ use pumpkin_kingdoms::info::TownInfo;
 use pumpkin_kingdoms::palette::PaletteKind;
 use pumpkin_kingdoms::plan::build_plan;
 use pumpkin_kingdoms::scene::TownInfoScene;
-use pumpkin_kingdoms::sim::{SiegeSim, write_plot};
+use pumpkin_kingdoms::sim::{SiegeSim, write_plot, write_plot_snapshots};
 use pumpkin_kingdoms::town::town_in_cell;
 
 struct Args {
@@ -34,7 +34,7 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut seed = 20_261_025u64;
     let mut n = 200usize;
-    let mut ticks = 400u32;
+    let mut ticks = 800u32;
     let mut out_dir = PathBuf::from("kingdoms-siege");
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -65,7 +65,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "-h" | "--help" => {
                 return Err(
-                    "kingdoms-siege-bench [--seed N] [--n 200] [--ticks 400] [--out-dir DIR]"
+                    "kingdoms-siege-bench [--seed N] [--n 200] [--ticks 800] [--out-dir DIR]"
                         .to_owned(),
                 );
             }
@@ -114,7 +114,7 @@ fn run() -> Result<(), String> {
     );
 
     let sizes = if args.n == 200 {
-        vec![50usize, 100, 200]
+        vec![50usize, 100, 200, 400]
     } else {
         vec![args.n]
     };
@@ -125,7 +125,7 @@ fn run() -> Result<(), String> {
         let mut sim = SiegeSim::from_scene(&scene, *n, *n);
         let report = sim.run(args.ticks, 20);
         println!(
-            "N={n} ticks={} ms/tick={:.3} worst={:.3} defenders_left={} raiders_left={} d_kills={} r_kills={} path_capped={}/{}",
+            "N={n} ticks={} ms/tick={:.3} worst={:.3} defenders_left={} raiders_left={} d_kills={} r_kills={} melee={} peak_melee={} path_capped={}/{}",
             report.ticks,
             report.ms_per_tick,
             report.worst_ms,
@@ -133,16 +133,23 @@ fn run() -> Result<(), String> {
             report.raiders_left,
             report.defender_kills,
             report.raider_kills,
+            report.melee_engaged,
+            report.peak_melee,
             report.path_capped,
             report.path_attempts
         );
         let plot = args.out_dir.join(format!("siege-{n}.png"));
         write_plot(&scene, &report, &plot).map_err(|e| e.to_string())?;
         println!("wrote {}", plot.display());
+        for extra in
+            write_plot_snapshots(&scene, &report, &args.out_dir, *n).map_err(|e| e.to_string())?
+        {
+            println!("wrote {}", extra.display());
+        }
         let comma = if i + 1 == sizes.len() { "" } else { "," };
         writeln!(
             json,
-            "    {{\"n\": {n}, \"ticks\": {}, \"ms_per_tick\": {:.4}, \"worst_ms\": {:.4}, \"defenders_left\": {}, \"raiders_left\": {}, \"defender_kills\": {}, \"raider_kills\": {}, \"path_capped\": {}, \"path_attempts\": {}}}{comma}",
+            "    {{\"n\": {n}, \"ticks\": {}, \"ms_per_tick\": {:.4}, \"worst_ms\": {:.4}, \"defenders_left\": {}, \"raiders_left\": {}, \"defender_kills\": {}, \"raider_kills\": {}, \"melee_engaged\": {}, \"peak_melee\": {}, \"path_capped\": {}, \"path_attempts\": {}}}{comma}",
             report.ticks,
             report.ms_per_tick,
             report.worst_ms,
@@ -150,6 +157,8 @@ fn run() -> Result<(), String> {
             report.raiders_left,
             report.defender_kills,
             report.raider_kills,
+            report.melee_engaged,
+            report.peak_melee,
             report.path_capped,
             report.path_attempts,
         )

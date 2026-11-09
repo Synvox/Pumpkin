@@ -237,7 +237,7 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
             .requires(RAID_PERM)
             .then(
                 literal("start").then(
-                    argument("town", StringArgumentType::SingleWord)
+                    argument("town", StringArgumentType::QuotablePhrase)
                         .executes(RaidStartExecutor { has_size: false })
                         .then(
                             argument("size", IntegerArgumentType::new(1, 400))

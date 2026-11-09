@@ -16,6 +16,7 @@ use pumpkin_core::world::scoreboard::{CollisionRule, NameTagVisibility, Team};
 use pumpkin_data::dimension::Dimension;
 use pumpkin_data::entity::EntityType;
 use pumpkin_util::math::boundingbox::BoundingBox;
+use pumpkin_util::math::vector2::Vector2;
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::text::TextComponent;
 use pumpkin_util::text::color::NamedColor;
@@ -24,6 +25,7 @@ use crate::faction::{
     Faction, KingdomId, TAG_RAIDER, faction_of_entity, is_kingdoms_tagged, kingdom_tag,
     role_from_tags,
 };
+use crate::flow::FlowField;
 use crate::goals::{PostTarget, already_wired, bind_citizen, bind_golem, bind_raider};
 use crate::info::TownInfo;
 use crate::lod::{
@@ -33,9 +35,11 @@ use crate::plan::plan_from_cache;
 use crate::raid::{
     RaidSpec, WAVE_ADVANCE_REMAINING, WAVE_SPACING_TICKS, compose_wave, spawn_offset,
 };
-use crate::roles::VillagerRole;
+use crate::roles::{PopulationSpec, VillagerRole, citizen_slots};
 use crate::scene::{ScenePost, TownInfoScene, TownScene};
 use crate::town::town_containing;
+
+const FORCELOAD_CAP: usize = 256;
 
 const COMBAT_LOG_CAP: usize = 512;
 const RESPAWN_PERIOD: u32 = 200;
@@ -109,6 +113,8 @@ struct TownWar {
     defenders_killed: u32,
     raiders_killed: u32,
     wired: HashMap<i32, Wired>,
+    fields: HashMap<(i32, i32), Arc<FlowField>>,
+    raider_gate_dist: f64,
 }
 
 struct Wired {
@@ -396,6 +402,8 @@ impl Director {
             defenders_killed: 0,
             raiders_killed: 0,
             wired: HashMap::new(),
+            fields: HashMap::new(),
+            raider_gate_dist: f64::INFINITY,
         };
         self.towns.insert(town_id.to_owned(), war);
         self.towns
@@ -417,6 +425,8 @@ impl Director {
                 defenders_killed: 0,
                 raiders_killed: 0,
                 wired: HashMap::new(),
+                fields: HashMap::new(),
+                raider_gate_dist: f64::INFINITY,
             }
         });
     }
@@ -426,6 +436,19 @@ impl Director {
             self.events.pop_front();
         }
         self.events.push_back(event);
+    }
+}
+
+impl TownWar {
+    fn field_toward(&mut self, dest: ScenePost) -> Arc<FlowField> {
+        let key = crate::flow::cache_key(dest);
+        if let Some(field) = self.fields.get(&key) {
+            return Arc::clone(field);
+        }
+        let extras: Vec<ScenePost> = self.scene.raid_camps().to_vec();
+        let field = Arc::new(FlowField::toward(&self.scene, dest, &extras));
+        self.fields.insert(key, Arc::clone(&field));
+        field
     }
 }
 
@@ -447,7 +470,9 @@ fn lookup_town_info(seed: u64, town_id: &str) -> Option<TownInfo> {
 }
 
 fn parse_cell(s: &str) -> Option<(i32, i32)> {
-    let (a, b) = s.split_once(',')?;
+    // Brigadier single-word tokens cannot contain `,`, so `0:0` is the
+    // unquoted form. Quoted `"0,0"` still uses the comma.
+    let (a, b) = s.split_once(',').or_else(|| s.split_once(':'))?;
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
@@ -488,10 +513,7 @@ pub fn post_for_role(mob: &dyn Mob, town_id: &str, role: VillagerRole) -> Option
         VillagerRole::Builder => war.scene.keep(),
     };
     let world = mob.get_entity().world.load();
-    let y = world
-        .sample_surface_height(post.x, post.z)
-        .unwrap_or(world.sea_level);
-    Some(PostTarget::from_post(post, y + 1))
+    Some(PostTarget::from_post(post, standing_y(&world, post)))
 }
 
 #[must_use]
@@ -503,10 +525,7 @@ pub fn keep_if_alarmed(mob: &dyn Mob, town_id: &str) -> Option<PostTarget> {
     }
     let keep = war.scene.keep();
     let world = mob.get_entity().world.load();
-    let y = world
-        .sample_surface_height(keep.x, keep.z)
-        .unwrap_or(world.sea_level);
-    Some(PostTarget::from_post(keep, y + 1))
+    Some(PostTarget::from_post(keep, standing_y(&world, keep)))
 }
 
 #[must_use]
@@ -520,10 +539,16 @@ pub fn raid_march_post(mob: &dyn Mob, town_id: &str) -> Option<PostTarget> {
     let war = dir.towns.get(town_id)?;
     let dest = war.threatened.unwrap_or_else(|| war.scene.keep());
     let world = mob.get_entity().world.load();
-    let y = world
-        .sample_surface_height(dest.x, dest.z)
-        .unwrap_or(world.sea_level);
-    Some(PostTarget::from_post(dest, y + 1))
+    Some(PostTarget::from_post(dest, standing_y(&world, dest)))
+}
+
+fn standing_y(world: &World, post: ScenePost) -> i32 {
+    post.height_or(
+        world
+            .sample_surface_height(post.x, post.z)
+            .unwrap_or(world.sea_level)
+            + 1,
+    )
 }
 
 fn pick_home(mob: &dyn Mob, posts: &[ScenePost], fallback: ScenePost) -> ScenePost {
@@ -618,8 +643,51 @@ pub fn tick_world(world: &Arc<World>) {
     }
 
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
-    if tick.is_multiple_of(200) && ms > 1.0 {
-        tracing::debug!(ms, tick, "kingdoms director tick");
+    if tick.is_multiple_of(100) {
+        let dir = lock();
+        let raid_on = dir.towns.values().any(|w| w.raid.is_some());
+        let (def_k, raid_k, def_n, raid_n, gate_d) = dir.towns.values().fold(
+            (0u32, 0u32, 0u32, 0u32, f64::INFINITY),
+            |(dk, rk, dn, rn, d), w| {
+                (
+                    dk + w.defenders_killed,
+                    rk + w.raiders_killed,
+                    dn + w.wired.values().filter(|e| e.faction.is_kingdom()).count() as u32,
+                    rn + w.raid.as_ref().map_or(0, |r| r.living.len() as u32),
+                    d.min(w.raider_gate_dist),
+                )
+            },
+        );
+        drop(dir);
+        if raid_on {
+            if let Some(server) = world.server.upgrade() {
+                tracing::info!(
+                    tick,
+                    director_ms = ms,
+                    tps = server.get_tps(),
+                    mspt = server.get_mspt(),
+                    defenders = def_n,
+                    raiders = raid_n,
+                    defender_kills = def_k,
+                    raider_kills = raid_k,
+                    raider_gate_dist = gate_d,
+                    "kingdoms raid tick"
+                );
+            } else {
+                tracing::info!(
+                    tick,
+                    director_ms = ms,
+                    defenders = def_n,
+                    raiders = raid_n,
+                    defender_kills = def_k,
+                    raider_kills = raid_k,
+                    raider_gate_dist = gate_d,
+                    "kingdoms raid tick"
+                );
+            }
+        } else if ms > 1.0 {
+            tracing::debug!(ms, tick, "kingdoms director tick");
+        }
     }
 }
 
@@ -641,25 +709,37 @@ fn nearby_cached_towns(seed: u64, world: &World) -> Vec<TownInfo> {
 }
 
 fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
-    let (bounds, kingdom, alarm_before) = {
+    let (bounds, kingdom, alarm_before, camps, gates) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
             return;
         };
-        (war.scene.bounds(), war.kingdom.clone(), war.alarm)
+        (
+            war.scene.bounds(),
+            war.kingdom.clone(),
+            war.alarm,
+            war.scene.raid_camps().to_vec(),
+            war.scene
+                .gates()
+                .iter()
+                .map(|g| ScenePost::new(g.x, g.z))
+                .collect::<Vec<_>>(),
+        )
     };
 
+    let mut min_x = bounds.min_x - 160;
+    let mut min_z = bounds.min_z - 160;
+    let mut max_x = bounds.max_x + 160;
+    let mut max_z = bounds.max_z + 160;
+    for p in camps.iter().chain(gates.iter()) {
+        min_x = min_x.min(p.x - 48);
+        min_z = min_z.min(p.z - 48);
+        max_x = max_x.max(p.x + 48);
+        max_z = max_z.max(p.z + 48);
+    }
     let aabb = BoundingBox::new(
-        Vector3::new(
-            f64::from(bounds.min_x - 160),
-            -64.0,
-            f64::from(bounds.min_z - 160),
-        ),
-        Vector3::new(
-            f64::from(bounds.max_x + 160),
-            320.0,
-            f64::from(bounds.max_z + 160),
-        ),
+        Vector3::new(f64::from(min_x), -64.0, f64::from(min_z)),
+        Vector3::new(f64::from(max_x), 320.0, f64::from(max_z)),
     );
     let entities = world.get_all_at_box(&aabb);
 
@@ -780,6 +860,15 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     },
                 );
             }
+            let gate = war.threatened.unwrap_or_else(|| war.scene.keep());
+            war.raider_gate_dist = snapshots
+                .iter()
+                .filter(|(_, f)| matches!(f, Faction::Pillager))
+                .map(|(e, _)| {
+                    let p = e.get_entity().pos.load();
+                    (p.x - f64::from(gate.x)).hypot(p.z - f64::from(gate.z))
+                })
+                .fold(f64::INFINITY, f64::min);
             if finished {
                 war.raid = None;
                 war.alarm = pillagers_near;
@@ -820,7 +909,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             LodTier::Idle
         };
         let id = entity.get_entity().entity_id;
-        let skip = !tier.should_tick(id, tick);
+        // Cheap flow-field steering still needs the goal tick. Only idle
+        // garrisons get `set_no_ai`; a live raid must actually walk.
+        let skip = !alarm && !tier.should_tick(id, tick);
         mob.get_mob_entity().set_no_ai(skip);
         if skip {
             continue;
@@ -854,12 +945,26 @@ fn spawn_wave(
 ) {
     let count = spec.raiders_in_wave(wave);
     let members = compose_wave(count, wave);
-    let y = world
-        .sample_surface_height(camp.x, camp.z)
-        .unwrap_or(world.sea_level);
+    let spots: Vec<ScenePost> = {
+        let dir = lock();
+        dir.towns.get(town_id).map_or_else(
+            || vec![camp],
+            |w| {
+                let camps = w.scene.raid_camps();
+                if camps.is_empty() {
+                    vec![camp]
+                } else {
+                    camps.to_vec()
+                }
+            },
+        )
+    };
     let mut spawned_ids = Vec::new();
     for (i, member) in members.iter().enumerate() {
-        let pos = spawn_offset(camp, i as u16, y);
+        let post = spots[i % spots.len()];
+        let y = standing_y(world, post);
+        let ring = (i / spots.len().max(1)) as u16;
+        let pos = spawn_offset(post, ring, y);
         let entity = Entity::new(world.clone(), pos, member.entity_type);
         let base: Arc<dyn EntityBase> = if member.entity_type == &EntityType::VINDICATOR {
             pumpkin_core::entity::mob::vindicator::VindicatorEntity::new(entity)
@@ -868,7 +973,7 @@ fn spawn_wave(
             pumpkin_core::entity::mob::pillager::PillagerEntity::new(entity) as Arc<dyn EntityBase>
         };
         if let Some(mob) = base.get_mob() {
-            bind_raider(mob, town_id, member.captain, world, camp);
+            bind_raider(mob, town_id, member.captain, world, post);
             add_pillager_team(world, &base.get_scoreboard_name());
         }
         let id = base.get_entity().entity_id;
@@ -979,7 +1084,144 @@ pub fn rebind_if_needed(entity: &dyn EntityBase) {
 
 /// Public start-raid used by commands and a future HTTP director.
 pub fn start_raid(world: &Arc<World>, town_id: &str, spec: RaidSpec) -> Result<RaidId, String> {
-    lock().start_raid(world, town_id, spec)
+    let id = lock().start_raid(world, town_id, spec)?;
+    prepare_raid_chunks(world, town_id);
+    spawn_garrison_if_needed(world, town_id);
+    Ok(id)
+}
+
+/// Spend one slot of this tick's live navigator budget. Close / follower
+/// steering must not call this.
+pub fn try_take_path_budget() -> bool {
+    lock().path_budget.try_acquire()
+}
+
+/// O(1) flow-field waypoint toward `dest` for this town.
+#[must_use]
+pub fn flow_waypoint(town_id: &str, x: f64, z: f64, dest: PostTarget) -> (f64, f64) {
+    let mut dir = lock();
+    let Some(war) = dir.towns.get_mut(town_id) else {
+        let v = dest.vec();
+        return (v.x, v.z);
+    };
+    let field = war.field_toward(ScenePost::new(dest.x, dest.z));
+    field.waypoint(x, z)
+}
+
+fn prepare_raid_chunks(world: &Arc<World>, town_id: &str) {
+    let Some((chunks, camp, keep)) = raid_chunk_list(town_id) else {
+        return;
+    };
+    {
+        let mut forced = world
+            .forced_chunks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for pos in &chunks {
+            forced.insert(*pos);
+        }
+    }
+    world.level.mark_chunks_as_newly_watched(&chunks);
+    world.update_active_chunks();
+    let loaded_world = Arc::clone(world);
+    let level = Arc::clone(&world.level);
+    let n = chunks.len();
+    world.level.spawn_task(async move {
+        for pos in chunks {
+            level.get_or_fetch_chunk(pos, |_| ()).await;
+        }
+        loaded_world.update_active_chunks();
+        tracing::info!(
+            count = n,
+            camp_x = camp.x,
+            camp_z = camp.z,
+            keep_x = keep.x,
+            keep_z = keep.z,
+            "kingdoms raid chunks loaded"
+        );
+    });
+}
+
+fn raid_chunk_list(town_id: &str) -> Option<(Vec<Vector2<i32>>, ScenePost, ScenePost)> {
+    let dir = lock();
+    let war = dir.towns.get(town_id)?;
+    let keep = war.scene.keep();
+    let camp = war.scene.raid_camps().first().copied().unwrap_or(keep);
+    let mut samples = vec![keep, camp];
+    samples.extend(war.scene.raid_camps().iter().copied());
+    for g in war.scene.gates() {
+        samples.push(ScenePost::new(g.x, g.z));
+    }
+    // Corridor from camp to the threatened gate so marchers tick.
+    let gate = war.threatened.unwrap_or(keep);
+    let steps = 16;
+    for i in 0..=steps {
+        let t = f64::from(i) / f64::from(steps);
+        samples.push(ScenePost::new(
+            camp.x + ((f64::from(gate.x - camp.x) * t) as i32),
+            camp.z + ((f64::from(gate.z - camp.z) * t) as i32),
+        ));
+        samples.push(ScenePost::new(
+            gate.x + ((f64::from(keep.x - gate.x) * t) as i32),
+            gate.z + ((f64::from(keep.z - gate.z) * t) as i32),
+        ));
+    }
+    drop(dir);
+    let mut set = std::collections::BTreeSet::new();
+    for p in samples {
+        let cx = p.x >> 4;
+        let cz = p.z >> 4;
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                set.insert((cx + dx, cz + dz));
+            }
+        }
+    }
+    let mut chunks: Vec<Vector2<i32>> = set.into_iter().map(|(x, z)| Vector2::new(x, z)).collect();
+    chunks.truncate(FORCELOAD_CAP);
+    Some((chunks, camp, keep))
+}
+
+fn spawn_garrison_if_needed(world: &Arc<World>, town_id: &str) {
+    let Some((chunks, _, _)) = raid_chunk_list(town_id) else {
+        return;
+    };
+    let hot: std::collections::HashSet<(i32, i32)> = chunks.iter().map(|c| (c.x, c.y)).collect();
+    let (scene, kingdom, existing) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        let existing = war
+            .wired
+            .values()
+            .filter(|w| w.faction.is_kingdom())
+            .count();
+        (war.scene.clone(), war.kingdom.clone(), existing)
+    };
+    let spec = PopulationSpec::from_scene(&scene);
+    if existing >= spec.total() as usize / 2 {
+        return;
+    }
+    let slots = citizen_slots(&scene, spec);
+    let mut spawned = 0u32;
+    for slot in slots {
+        if !hot.contains(&(slot.home.x >> 4, slot.home.z >> 4)) {
+            continue;
+        }
+        let y = standing_y(world, slot.home);
+        let pos = Vector3::new(
+            f64::from(slot.home.x) + 0.5,
+            f64::from(y),
+            f64::from(slot.home.z) + 0.5,
+        );
+        if spawn_citizen(world, town_id, &kingdom, slot.role, slot.is_golem, pos).is_some() {
+            spawned += 1;
+        }
+    }
+    if spawned > 0 {
+        tracing::info!(town = town_id, spawned, "spawned town garrison for raid");
+    }
 }
 
 pub fn stop_raid(town_id: Option<&str>) -> u32 {

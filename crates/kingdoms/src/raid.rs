@@ -90,7 +90,7 @@ pub fn spawn_offset(camp: ScenePost, index: u16, y: i32) -> Vector3<f64> {
     let r = f64::from(3 + ring * 2);
     Vector3::new(
         f64::from(camp.x) + 0.5 + ang.cos() * r,
-        f64::from(y) + 1.0,
+        f64::from(y),
         f64::from(camp.z) + 0.5 + ang.sin() * r,
     )
 }

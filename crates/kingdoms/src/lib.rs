@@ -43,6 +43,7 @@ pub mod command;
 pub mod director;
 pub mod events;
 pub mod faction;
+pub mod flow;
 pub mod geom;
 pub mod goals;
 pub mod height;

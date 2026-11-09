@@ -1,8 +1,8 @@
 //! Kingdom-specific goals built on Pumpkin's `Goal` trait.
 //!
-//! Combat still uses vanilla [`MeleeAttackGoal`], [`BowAttackGoal`] and
-//! [`RangedCrossbowAttackGoal`]. These goals cover posts, alarm flee, the bell,
-//! and the builder stub.
+//! Melee uses [`ThrottledMeleeGoal`] instead of vanilla `MeleeAttackGoal` so
+//! large fights do not path every 4 ticks. March / post goals follow a shared
+//! flow field; only squad leaders spend the path budget.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use pumpkin_core::entity::ai::goal::avoid_entity::AvoidEntityGoal;
 use pumpkin_core::entity::ai::goal::bow_attack::BowAttackGoal;
 use pumpkin_core::entity::ai::goal::break_door::BreakDoorGoal;
-use pumpkin_core::entity::ai::goal::melee_attack::MeleeAttackGoal;
 use pumpkin_core::entity::ai::goal::{Controls, Goal, GoalReach};
 use pumpkin_core::entity::ai::pathfinder::NavigatorGoal;
 use pumpkin_core::entity::mob::Mob;
@@ -27,7 +26,7 @@ use pumpkin_util::math::vector3::Vector3;
 use crate::faction::{
     TAG_CAPTAIN, TAG_CITIZEN, TAG_GOLEM, TAG_RAIDER, TAG_WIRED, kingdom_tag, role_tag, town_tag,
 };
-use crate::lod::PathBudget;
+use crate::flow::{DIRECT_RANGE, is_squad_leader, should_refresh_path};
 use crate::roles::VillagerRole;
 use crate::scene::ScenePost;
 
@@ -35,6 +34,8 @@ const POST_REACH_SQ: f64 = 6.25;
 const FLEE_SPEED: f64 = 0.85;
 const PATROL_SPEED: f64 = 0.7;
 const MARCH_SPEED: f64 = 1.05;
+const MELEE_SPEED: f64 = 1.1;
+const DIRECT_RANGE_SQ: f64 = DIRECT_RANGE * DIRECT_RANGE;
 
 /// Destination a post-walking goal is heading toward.
 #[derive(Clone, Copy, Debug)]
@@ -68,24 +69,63 @@ fn surface_y(world: &World, x: i32, z: i32) -> i32 {
     world.sample_surface_height(x, z).unwrap_or(world.sea_level)
 }
 
-fn try_path(mob: &dyn Mob, dest: Vector3<f64>, speed: f64, budget: Option<&PathBudget>) -> bool {
-    if let Some(budget) = budget
-        && !budget.try_acquire()
-    {
-        return false;
-    }
-    let pos = mob.get_entity().pos.load();
-    mob.get_mob_entity()
-        .steered()
-        .navigator()
-        .set_progress(NavigatorGoal::new(pos, dest, speed));
-    true
+fn town_id_of(entity: &pumpkin_core::entity::Entity) -> Option<String> {
+    let tags = entity
+        .scoreboard_tags
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tags.iter().find_map(|t| {
+        t.strip_prefix("kingdoms:town:")
+            .map(std::string::ToString::to_string)
+    })
 }
 
 fn dist_sq_xz(pos: Vector3<f64>, dest: Vector3<f64>) -> f64 {
     let dx = pos.x - dest.x;
     let dz = pos.z - dest.z;
     dx * dx + dz * dz
+}
+
+fn is_close(pos: Vector3<f64>, dest: Vector3<f64>) -> bool {
+    dist_sq_xz(pos, dest) <= DIRECT_RANGE_SQ
+}
+
+fn steer_dest(mob: &dyn Mob, dest: PostTarget) -> Vector3<f64> {
+    let pos = mob.get_entity().pos.load();
+    let raw = dest.vec();
+    if is_close(pos, raw) {
+        return raw;
+    }
+    let Some(town) = town_id_of(mob.get_entity()) else {
+        return raw;
+    };
+    let (x, z) = crate::director::flow_waypoint(&town, pos.x, pos.z, dest);
+    Vector3::new(x, raw.y, z)
+}
+
+fn set_nav(mob: &dyn Mob, dest: Vector3<f64>, speed: f64) {
+    let pos = mob.get_entity().pos.load();
+    mob.get_mob_entity()
+        .steered()
+        .navigator()
+        .set_progress(NavigatorGoal::new(pos, dest, speed));
+}
+
+/// Live navigator update. Close / follower steering is free; only a far-away
+/// squad leader spends the shared path budget.
+fn try_path_steered(mob: &dyn Mob, dest: PostTarget, speed: f64, force: bool) -> bool {
+    let pos = mob.get_entity().pos.load();
+    let id = mob.get_entity().entity_id;
+    let age = mob.get_entity().age.load(Ordering::Relaxed);
+    let close = is_close(pos, dest.vec());
+    if !force && !should_refresh_path(id, age, close) {
+        return false;
+    }
+    if !close && is_squad_leader(id) && !crate::director::try_take_path_budget() {
+        return false;
+    }
+    set_nav(mob, steer_dest(mob, dest), speed);
+    true
 }
 
 /// Walk to a column. Destination is refreshed from a callback so alarm can
@@ -142,7 +182,7 @@ impl Goal for MoveToPostGoal {
 
     fn start(&mut self, mob: &dyn Mob) {
         if let Some(dest) = self.dest {
-            let _ = try_path(mob, dest.vec(), self.speed, None);
+            let _ = try_path_steered(mob, dest, self.speed, true);
         }
     }
 
@@ -150,15 +190,7 @@ impl Goal for MoveToPostGoal {
         let Some(dest) = self.dest else {
             return;
         };
-        if mob
-            .get_entity()
-            .age
-            .load(std::sync::atomic::Ordering::Relaxed)
-            % 10
-            == 0
-        {
-            let _ = try_path(mob, dest.vec(), self.speed, None);
-        }
+        let _ = try_path_steered(mob, dest, self.speed, false);
     }
 
     fn stop(&mut self, mob: &dyn Mob) {
@@ -211,15 +243,13 @@ impl Goal for FleeToKeepGoal {
 
     fn start(&mut self, mob: &dyn Mob) {
         if let Some(dest) = self.dest {
-            let _ = try_path(mob, dest.vec(), FLEE_SPEED, None);
+            let _ = try_path_steered(mob, dest, FLEE_SPEED, true);
         }
     }
 
     fn tick(&mut self, mob: &dyn Mob) {
-        if let Some(dest) = self.dest
-            && mob.get_entity().age.load(Ordering::Relaxed) % 8 == 0
-        {
-            let _ = try_path(mob, dest.vec(), FLEE_SPEED, None);
+        if let Some(dest) = self.dest {
+            let _ = try_path_steered(mob, dest, FLEE_SPEED, false);
         }
     }
 
@@ -359,15 +389,13 @@ impl Goal for MarchOnTownGoal {
 
     fn start(&mut self, mob: &dyn Mob) {
         if let Some(dest) = self.dest {
-            let _ = try_path(mob, dest.vec(), MARCH_SPEED, None);
+            let _ = try_path_steered(mob, dest, MARCH_SPEED, true);
         }
     }
 
     fn tick(&mut self, mob: &dyn Mob) {
-        if let Some(dest) = self.dest
-            && mob.get_entity().age.load(Ordering::Relaxed) % 12 == 0
-        {
-            let _ = try_path(mob, dest.vec(), MARCH_SPEED, None);
+        if let Some(dest) = self.dest {
+            let _ = try_path_steered(mob, dest, MARCH_SPEED, false);
         }
     }
 
@@ -385,6 +413,125 @@ impl Goal for MarchOnTownGoal {
         })
     }
 }
+
+/// Melee that path-refreshes on the squad cadence, not every 4 ticks.
+///
+/// Vanilla `MeleeAttackGoal` would spend the whole path budget at 200 vs 200.
+/// This copy still swings the same way, but walks straight once the target is
+/// within [`DIRECT_RANGE`].
+pub struct ThrottledMeleeGoal {
+    speed: f64,
+    cooldown: i32,
+}
+
+impl ThrottledMeleeGoal {
+    #[must_use]
+    pub const fn new(speed: f64) -> Self {
+        Self { speed, cooldown: 0 }
+    }
+}
+
+impl Goal for ThrottledMeleeGoal {
+    fn can_start(&mut self, mob: &dyn Mob) -> bool {
+        mob.get_mob_entity()
+            .get_target()
+            .is_some_and(|t| t.get_entity().is_alive())
+    }
+
+    fn should_continue(&mut self, mob: &dyn Mob) -> bool {
+        self.can_start(mob)
+    }
+
+    fn start(&mut self, mob: &dyn Mob) {
+        mob.get_mob_entity().set_attacking(true);
+        self.cooldown = 0;
+        if let Some(target) = mob.get_mob_entity().get_target() {
+            set_nav(mob, target.get_entity().pos.load(), self.speed);
+        }
+    }
+
+    fn stop(&mut self, mob: &dyn Mob) {
+        mob.get_mob_entity().set_attacking(false);
+        mob.get_mob_entity().steered().navigator().stop();
+    }
+
+    fn tick(&mut self, mob: &dyn Mob) {
+        let Some(target) = mob.get_mob_entity().get_target() else {
+            return;
+        };
+        let target_pos = target.get_entity().pos.load();
+        let eye = target.get_entity().get_eye_pos();
+        mob.get_mob_entity()
+            .look_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .look_at_with_range(eye.x, eye.y, eye.z, 30.0, 30.0);
+
+        let pos = mob.get_entity().pos.load();
+        let close = is_close(pos, target_pos);
+        let los = close || mob.has_line_of_sight(target.get_entity());
+        let dest = if close && los {
+            target_pos
+        } else if let Some(town) = town_id_of(mob.get_entity()) {
+            let post = PostTarget {
+                x: target_pos.x.floor() as i32,
+                y: target_pos.y.floor() as i32,
+                z: target_pos.z.floor() as i32,
+            };
+            let (x, z) = crate::director::flow_waypoint(&town, pos.x, pos.z, post);
+            Vector3::new(x, target_pos.y, z)
+        } else {
+            target_pos
+        };
+        let id = mob.get_entity().entity_id;
+        let age = mob.get_entity().age.load(Ordering::Relaxed);
+        if should_refresh_path(id, age, close || los) {
+            let far_leader = !close && !los && is_squad_leader(id);
+            let allowed = !far_leader || crate::director::try_take_path_budget();
+            if allowed {
+                set_nav(mob, dest, self.speed);
+            }
+        }
+
+        self.cooldown = (self.cooldown - 1).max(0);
+        if self.cooldown <= 0
+            && mob.get_mob_entity().is_in_attack_range(target.as_ref())
+            && mob.has_line_of_sight(target.get_entity())
+        {
+            self.cooldown = 20;
+            if let Some(golem) = mob.as_iron_golem() {
+                golem.trigger_attack_animation();
+            }
+            mob.get_mob_entity().living_entity.swing_hand();
+            let damaged = mob
+                .get_mob_entity()
+                .try_attack(mob.get_entity(), target.as_ref());
+            if damaged {
+                mob.on_attack(target.as_ref());
+            }
+        }
+    }
+
+    fn should_run_every_tick(&self) -> bool {
+        true
+    }
+
+    fn controls(&self) -> Controls {
+        Controls::MOVE | Controls::LOOK
+    }
+
+    fn tick_reach(&self, _mob: &dyn Mob, _running: bool) -> Option<GoalReach> {
+        Some(GoalReach {
+            entities: ACQUIRE_AS_REACH,
+            players: 0.0,
+            speed: self.speed,
+            changes_blocks: false,
+            links: Vec::new(),
+        })
+    }
+}
+
+const ACQUIRE_AS_REACH: f64 = 28.0;
 
 fn equip(mob: &dyn Mob, slot: EquipmentSlot, item: &'static Item) {
     mob.get_mob_entity()
@@ -434,7 +581,7 @@ pub fn bind_citizen(
             equip(mob, EquipmentSlot::LEGS, &Item::CHAINMAIL_LEGGINGS);
             equip(mob, EquipmentSlot::FEET, &Item::CHAINMAIL_BOOTS);
             mob.get_mob_entity()
-                .add_goal(2, MeleeAttackGoal::new(1.1, true));
+                .add_goal(2, ThrottledMeleeGoal::new(MELEE_SPEED));
             mob.get_mob_entity().add_goal(
                 3,
                 MoveToPostGoal::new(PATROL_SPEED, move |m| {
