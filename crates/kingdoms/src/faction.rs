@@ -67,6 +67,16 @@ impl fmt::Display for KingdomId {
     }
 }
 
+/// Leather dye for kingdom soldiers and players (Java RGB with the high byte 0).
+#[must_use]
+pub fn kingdom_color_rgb(kingdom: &KingdomId) -> i32 {
+    match kingdom.as_str() {
+        "raven" => 0x003C44AA,
+        "alder" => 0x005E7C16,
+        _ => 0x00B02E26,
+    }
+}
+
 fn normalize_kingdom_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {

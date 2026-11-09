@@ -23,7 +23,8 @@ use pumpkin_core::entity::mob::patrol::LongDistancePatrolGoal;
 use pumpkin_core::entity::mob::raider::{HoldGroundAttackGoal, RaiderMoveThroughVillageGoal};
 use pumpkin_core::entity::projectile::arrow::{ArrowEntity, ArrowPickup};
 use pumpkin_core::world::World;
-use pumpkin_data::data_component_impl::EquipmentSlot;
+use pumpkin_data::data_component::DataComponent;
+use pumpkin_data::data_component_impl::{DataComponentImpl, DyedColorImpl, EquipmentSlot};
 use pumpkin_data::entity::EntityType;
 use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
@@ -617,6 +618,29 @@ fn equip(mob: &dyn Mob, slot: EquipmentSlot, item: &'static Item) {
         .set_item_slot(&slot, ItemStack::new(1, item));
 }
 
+fn dyed_leather(item: &'static Item, rgb: i32) -> ItemStack {
+    let mut stack = ItemStack::new(1, item);
+    stack.patch.push((
+        DataComponent::DyedColor,
+        Some(DyedColorImpl { rgb }.to_dyn()),
+    ));
+    stack
+}
+
+fn kit_kingdom(mob: &dyn Mob, kingdom: &crate::faction::KingdomId) {
+    let rgb = crate::faction::kingdom_color_rgb(kingdom);
+    let pieces = [
+        (EquipmentSlot::HEAD, &Item::LEATHER_HELMET),
+        (EquipmentSlot::CHEST, &Item::LEATHER_CHESTPLATE),
+        (EquipmentSlot::LEGS, &Item::LEATHER_LEGGINGS),
+        (EquipmentSlot::FEET, &Item::LEATHER_BOOTS),
+    ];
+    for (slot, item) in pieces {
+        mob.get_mob_entity()
+            .set_item_slot(&slot, dyed_leather(item, rgb));
+    }
+}
+
 fn tag(entity: &pumpkin_core::entity::Entity, value: &str) {
     let _ = entity.add_scoreboard_tag(value);
 }
@@ -656,10 +680,7 @@ pub fn bind_citizen(
             remove_avoid(mob);
             strip_vanilla_combat(mob);
             equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_SWORD);
-            equip(mob, EquipmentSlot::HEAD, &Item::CHAINMAIL_HELMET);
-            equip(mob, EquipmentSlot::CHEST, &Item::CHAINMAIL_CHESTPLATE);
-            equip(mob, EquipmentSlot::LEGS, &Item::CHAINMAIL_LEGGINGS);
-            equip(mob, EquipmentSlot::FEET, &Item::CHAINMAIL_BOOTS);
+            kit_kingdom(mob, kingdom);
             mob.get_mob_entity()
                 .add_goal(2, ThrottledMeleeGoal::new(MELEE_SPEED));
             mob.get_mob_entity().add_goal(
@@ -673,8 +694,7 @@ pub fn bind_citizen(
             remove_avoid(mob);
             strip_vanilla_combat(mob);
             equip(mob, EquipmentSlot::MAIN_HAND, &Item::BOW);
-            equip(mob, EquipmentSlot::HEAD, &Item::LEATHER_HELMET);
-            equip(mob, EquipmentSlot::CHEST, &Item::LEATHER_CHESTPLATE);
+            kit_kingdom(mob, kingdom);
             mob.get_mob_entity()
                 .add_goal(2, ThrottledBowGoal::default());
             mob.get_mob_entity().add_goal(

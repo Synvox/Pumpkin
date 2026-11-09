@@ -26,6 +26,10 @@ const RAID_NAME: &str = "raid";
 const RAID_DESC: &str = "Start or stop a pillager raid on a town.";
 const RAID_PERM: &str = "kingdoms:command.raid";
 
+const WAR_NAME: &str = "war";
+const WAR_DESC: &str = "Front-line scores, clock, and kingdom captures.";
+const WAR_PERM: &str = "kingdoms:command.war";
+
 struct LocateTownExecutor;
 
 impl CommandExecutor for LocateTownExecutor {
@@ -238,6 +242,18 @@ impl CommandExecutor for RaidRetakeExecutor {
     }
 }
 
+struct WarExecutor;
+
+impl CommandExecutor for WarExecutor {
+    fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
+        context.source.send_feedback(
+            TextComponent::text(director::format_war_status()).color_named(NamedColor::Gold),
+            false,
+        );
+        Ok(1)
+    }
+}
+
 struct RaidStopExecutor;
 
 impl CommandExecutor for RaidStopExecutor {
@@ -266,6 +282,11 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
     permissions.register_permission_or_panic(Permission::new(
         RAID_PERM,
         RAID_DESC,
+        PermissionDefault::Op(PermissionLvl::Two),
+    ));
+    permissions.register_permission_or_panic(Permission::new(
+        WAR_PERM,
+        WAR_DESC,
         PermissionDefault::Op(PermissionLvl::Two),
     ));
 
@@ -321,5 +342,11 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
                 ),
             )
             .then(literal("stop").executes(RaidStopExecutor)),
+    );
+
+    dispatcher.register(
+        command(WAR_NAME, WAR_DESC)
+            .requires(WAR_PERM)
+            .executes(WarExecutor),
     );
 }

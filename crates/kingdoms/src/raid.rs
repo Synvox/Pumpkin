@@ -16,7 +16,31 @@ use crate::scene::ScenePost;
 pub enum RaidSide {
     #[default]
     Pillager,
+    /// Defending kingdom retakes a pillager-held town.
     Kingdom,
+    /// Alder soldiers march on a raven (or pillager) town.
+    Alder,
+    /// Raven soldiers march on an alder (or pillager) town.
+    Raven,
+}
+
+impl RaidSide {
+    /// Kingdom-coloured villager army rather than a pillager warband.
+    #[must_use]
+    pub const fn is_kingdom_army(self) -> bool {
+        matches!(self, Self::Kingdom | Self::Alder | Self::Raven)
+    }
+
+    /// Display name for logs and `/war`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pillager => "pillager",
+            Self::Kingdom => "kingdom",
+            Self::Alder => "alder",
+            Self::Raven => "raven",
+        }
+    }
 }
 
 /// How to size a raid.
@@ -146,5 +170,20 @@ mod tests {
         let spec = RaidSpec::new(12);
         assert_eq!(spec.waves, 1);
         assert_eq!(spec.raiders_in_wave(0), 12);
+    }
+
+    #[test]
+    fn kingdom_army_sides_round_trip_json() {
+        let alder: RaidSide = serde_json::from_str("\"alder\"").expect("alder");
+        let raven: RaidSide = serde_json::from_str("\"raven\"").expect("raven");
+        assert_eq!(alder, RaidSide::Alder);
+        assert_eq!(raven, RaidSide::Raven);
+        assert!(alder.is_kingdom_army());
+        assert!(RaidSide::Kingdom.is_kingdom_army());
+        assert!(!RaidSide::Pillager.is_kingdom_army());
+        assert_eq!(
+            serde_json::to_string(&RaidSide::Alder).expect("ser"),
+            "\"alder\""
+        );
     }
 }
