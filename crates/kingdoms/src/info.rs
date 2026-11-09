@@ -294,6 +294,19 @@ pub fn town_info(seed: u64, cell_x: i32, cell_z: i32) -> Option<TownInfo> {
     crate::plan::plan_from_cache(seed, cell_x, cell_z).map(|plan| TownInfo::from_plan(&plan))
 }
 
+/// Parse `seed:cell_x:cell_z` and return the cached snapshot.
+#[must_use]
+pub fn town_info_from_id(_seed: u64, town_id: &str) -> Option<TownInfo> {
+    let mut parts = town_id.split(':');
+    let parsed_seed: u64 = parts.next()?.parse().ok()?;
+    let cell_x: i32 = parts.next()?.parse().ok()?;
+    let cell_z: i32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    town_info(parsed_seed, cell_x, cell_z)
+}
+
 /// Snapshot of the town whose cell contains `(block_x, block_z)`, if planned.
 #[must_use]
 pub fn town_info_at(seed: u64, block_x: i32, block_z: i32) -> Option<TownInfo> {

@@ -123,6 +123,78 @@ crates/kingdoms/
 
 `/locatetown` prints the nearest planned town, a sampled surface Y, and the castle size.
 
+## Villagers, factions, and raids
+
+This is the first combat step toward a 24/7 town war. Fork-only: no new AI scheduler in Pumpkin. Kingdoms adds goals on top of vanilla `GoalSelector`, `MeleeAttackGoal`, `BowAttackGoal`, `BreakDoorGoal`, and pillager/vindicator raider goals.
+
+### Factions
+
+Each town belongs to **alder** or **raven** (even/odd cell). Villagers spawned in a town are its citizens. Pillagers are one hostile faction. Team relations:
+
+- same kingdom (villagers, iron golems, players who `/kingdom join`) → allied, friendly fire cancelled
+- kingdom vs pillagers → hostile
+- two kingdoms → hostile (unused until capture)
+
+Vanilla scoreboard teams `k_alder`, `k_raven`, `k_pillager` are created with friendly fire off so `is_allied_to` matches. Damage is also cancelled in `EntityDamageByEntity` because Pumpkin's living-damage path does not check teams.
+
+Scene posts (beds, workstations, camps) are **not** on `TownInfo` yet. `TownScene` / `TownInfoScene` derives guard posts from gates + barracks, archer posts from towers + wall samples, civilian homes from lots, raid camps from the outer road endpoint. Swap the trait when the parallel scene-metadata work lands.
+
+### Roles
+
+| Role | Equipment | Alarm behaviour |
+| --- | --- | --- |
+| Guard | iron sword, chainmail | melee pillagers; rally to the threatened gate |
+| Archer | bow, leather | hold a tower/wall; `BowAttackGoal` |
+| Civilian | none | flee to the keep, ring a bell (`block.bell.use`), return after |
+| Builder | none | stub: idle near the keep. Repair-by-diff (`plan.planned_block`) is later |
+
+Iron golems keep vanilla melee / monster targeting and also rally.
+
+### Raids
+
+`/raid start <town> [size]` — town is `here`, `cell_x,cell_z`, or `seed:cx:cz`. Default size 24. Waves of pillagers (crossbow) and vindicators (melee + door break) spawn at a camp outside the walls, captains wear the ominous banner, and they march on the threatened gate. `/raid stop` ends every raid in the process.
+
+Director API (HTTP later, not in this crate):
+
+```rust
+pumpkin_kingdoms::start_raid(&world, &town_id, RaidSpec::new(40))?;
+pumpkin_kingdoms::set_target_town(raid_id, &other_town)?;
+pumpkin_kingdoms::stop_raid(Some(&town_id));
+let state = pumpkin_kingdoms::battle_state(&town_id);
+```
+
+### Population
+
+`ChunkPopulate` (PR #1) spawns a stable garrison: roughly 4–16 guards, 4–12 archers, 8–24 civilians, 1 builder, 2 golems, homes a function of the plan. Citizens are `PersistenceRequired` and tagged (`kingdoms:citizen`, `kingdoms:role:…`). Empty slots respawn if the home chunk is loaded. `/raid start 200` is 200 **raiders** against that garrison, not 200 extra villagers. Use the siege bench for N vs N.
+
+### Scale / LOD
+
+On each director tick: spatial buckets (16 blocks) for target acquisition, `set_no_ai` stagger (combat every tick, alert every 2, idle every 8), path-search cap 48/tick. Vanilla `MeleeAttackGoal` still pathfinds on ticks it runs; we cannot throttle that without changing Pumpkin.
+
+Headless numbers (goal + steering on a planned town, **not** a full server tick with physics/pathfinder). Debug build, seed `20261025`, 400 ticks:
+
+| N vs N | ms/tick | worst ms | defender kills | raider kills | path capped |
+| --- | --- | --- | --- | --- | --- |
+| 50 | 0.44 | 0.57 | 9 | 1 | 2.2k / 21k |
+| 100 | 0.92 | 1.19 | 1 | 0 | 21k / 40k |
+| 200 | 2.14 | 3.34 | 3 | 0 | 81k / 100k |
+
+At 200 vs 200 the 48 path-searches/tick cap rejects most steering, so few units close to melee in 400 ticks. 50 vs 50 still scores kills. These numbers are the director/LOD/bucket loop plus a 0.25-block step; vanilla `Navigator` + entity physics on a live world will be slower.
+
+```bash
+cargo run -p pumpkin-kingdoms --bin kingdoms-siege-bench -- --n 200 --ticks 400 --out-dir kingdoms-siege
+```
+
+### Commands
+
+| Command | |
+| --- | --- |
+| `/locatetown` | nearest planned town |
+| `/kingdom info` | town, kingdom, battle counts |
+| `/kingdom join <kingdom>` | `alder` or `raven` (players fight with that side) |
+| `/raid start <town> [size]` | start a pillager raid |
+| `/raid stop` | stop all kingdoms raids |
+
 ## Build and run
 
 ```bash

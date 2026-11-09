@@ -1,0 +1,133 @@
+//! Plugin event hooks: tick, populate, damage, death.
+
+use std::sync::Arc;
+
+use pumpkin_core::plugin::api::events::entity::entity_damage_by_entity::EntityDamageByEntityEvent;
+use pumpkin_core::plugin::api::events::entity::entity_death::EntityDeathEvent;
+use pumpkin_core::plugin::api::events::server::ServerTickStartEvent;
+use pumpkin_core::plugin::{EventHandler, EventPriority, Payload, PluginFuture, TypedEventHandler};
+use pumpkin_core::server::Server;
+
+use crate::director;
+use crate::faction::is_allied;
+use crate::populate::PopulateCitizens;
+
+pub fn register(server: &Server) {
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(TickHandler),
+            priority: EventPriority::Normal,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(PopulateCitizens),
+            priority: EventPriority::Normal,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(FriendlyFireHandler),
+            priority: EventPriority::High,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(DeathHandler),
+            priority: EventPriority::Normal,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+}
+
+fn push_handler<E, H>(server: &Server, handler: Arc<TypedEventHandler<E, H>>)
+where
+    E: Payload + Send + Sync + 'static,
+    H: EventHandler<E> + Send + Sync + 'static,
+{
+    server.plugin_manager.handlers.rcu(|handlers| {
+        let mut next = (**handlers).clone();
+        next.entry(E::get_name_static())
+            .or_default()
+            .push(handler.clone());
+        Arc::new(next)
+    });
+}
+
+struct TickHandler;
+
+impl EventHandler<ServerTickStartEvent> for TickHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        server: &'a Arc<Server>,
+        _event: &'a mut ServerTickStartEvent,
+    ) -> PluginFuture<'a, ()> {
+        Box::pin(async move {
+            for world in server.worlds.load().iter() {
+                director::tick_world(world);
+            }
+        })
+    }
+}
+
+struct FriendlyFireHandler;
+
+impl EventHandler<EntityDamageByEntityEvent> for FriendlyFireHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        server: &'a Arc<Server>,
+        event: &'a mut EntityDamageByEntityEvent,
+    ) -> PluginFuture<'a, ()> {
+        let victim_id = event.entity_id;
+        let damager_id = event.damager_id;
+        Box::pin(async move {
+            for world in server.worlds.load().iter() {
+                let Some(victim) = world.get_entity_by_id(victim_id) else {
+                    continue;
+                };
+                let Some(damager) = world.get_entity_by_id(damager_id) else {
+                    continue;
+                };
+                let dir = director::lock();
+                let a = dir.faction_for(damager.as_ref());
+                let b = dir.faction_for(victim.as_ref());
+                drop(dir);
+                if is_allied(&a, &b) {
+                    event.cancelled = true;
+                    event.damage = 0.0;
+                }
+                return;
+            }
+        })
+    }
+}
+
+struct DeathHandler;
+
+impl EventHandler<EntityDeathEvent> for DeathHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        _server: &'a Arc<Server>,
+        event: &'a mut EntityDeathEvent,
+    ) -> PluginFuture<'a, ()> {
+        let id = event.entity_id;
+        Box::pin(async move {
+            director::lock().note_death(id);
+        })
+    }
+}

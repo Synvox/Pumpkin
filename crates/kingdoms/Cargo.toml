@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "kingdoms-pregen"
 path = "src/bin/pregen.rs"
 
+[[bin]]
+name = "kingdoms-siege-bench"
+path = "src/bin/siege_bench.rs"
+
 [dependencies]
 pumpkin-core.workspace = true
 pumpkin-data = { workspace = true, features = ["default"] }
