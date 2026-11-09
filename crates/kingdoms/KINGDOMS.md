@@ -119,9 +119,118 @@ crates/kingdoms/
   src/watertight.rs    flood-fill envelope check
   src/render.rs        top-down + isometric + cutaway PNG
   src/bin/pregen.rs    offline proof + renders + watertight report
+  src/bin/raid_bot.rs  headless Java client that stands in a town so it ticks
 ```
 
 `/locatetown` prints the nearest planned town, a sampled surface Y, and the castle size.
+
+## Villagers, factions, and raids
+
+This is the first combat step toward a 24/7 town war. Fork-only: no new AI scheduler in Pumpkin. Kingdoms adds goals on top of vanilla `GoalSelector`, `BowAttackGoal`, `BreakDoorGoal`, and pillager/vindicator raider goals. Guards use a kingdoms `ThrottledMeleeGoal` instead of vanilla `MeleeAttackGoal` so large fights do not path every 4 ticks.
+
+### Factions
+
+Each town belongs to **alder** or **raven** (even/odd cell). Villagers spawned in a town are its citizens. Pillagers are one hostile faction. Team relations:
+
+- same kingdom (villagers, iron golems, players who `/kingdom join`) → allied, friendly fire cancelled
+- kingdom vs pillagers → hostile
+- two kingdoms → hostile (unused until capture)
+
+Vanilla scoreboard teams `k_alder`, `k_raven`, `k_pillager` are created with friendly fire off so `is_allied_to` matches. Damage is also cancelled in `EntityDamageByEntity` because Pumpkin's living-damage path does not check teams.
+
+`TownScene` / `TownInfoScene` reads [`TownInfo::spawns`](src/info.rs): guards at `Gate` (then `GuardPost`), archers on `GuardPost` (towers, wall walks, watchtowers), civilians on `VillagerBed`, rallies on `RallyKeep` / `RallyMarket`, and raids from `PillagerSpawn` tent columns in the hinterland camp (`PillagerRally` if a camp failed to place).
+
+### Roles
+
+| Role | Equipment | Alarm behaviour |
+| --- | --- | --- |
+| Guard | iron sword, chainmail | melee pillagers; rally to the threatened gate |
+| Archer | bow, leather | hold a tower/wall; `BowAttackGoal` |
+| Civilian | none | flee to the keep, ring a bell (`block.bell.use`), return after |
+| Builder | none | stub: idle near the keep. Repair-by-diff (`plan.planned_block`) is later |
+
+Iron golems keep vanilla melee / monster targeting and also rally.
+
+### Raids
+
+`/raid start <town> [size]` — town is `here` (cell containing the sender), quoted `"0,0"` / `"20261025:0:0"`, or an unquoted word like `here`. Commas and colons need quotes. Default size 24. Waves of pillagers (crossbow) and vindicators (melee + door break) spawn on `PillagerSpawn` tent columns in the hinterland camp, captains wear the ominous banner, and they march on the threatened gate. `/raid stop` ends every raid in the process.
+
+Director API (HTTP later, not in this crate):
+
+```rust
+pumpkin_kingdoms::start_raid(&world, &town_id, RaidSpec::new(40))?;
+pumpkin_kingdoms::set_target_town(raid_id, &other_town)?;
+pumpkin_kingdoms::stop_raid(Some(&town_id));
+let state = pumpkin_kingdoms::battle_state(&town_id);
+```
+
+### Population
+
+`ChunkPopulate` (PR #1) spawns a stable garrison: roughly 4–16 guards, 4–12 archers, 8–24 civilians, 1 builder, 2 golems, homes a function of the plan. Citizens are `PersistenceRequired` and tagged (`kingdoms:citizen`, `kingdoms:role:…`). Empty slots respawn if the home chunk is loaded. `/raid start 200` is 200 **raiders** against that garrison, not 200 extra villagers. Use the siege bench for N vs N.
+
+### Scale / LOD
+
+On each director tick: spatial buckets (16 blocks) for target acquisition. Idle garrisons still `set_no_ai` stagger; a live raid does not, because skipping AI also skipped walking. Path-search cap 48/tick applies only to **squad leaders** refreshing live `navigator.set_progress`. Everyone else steers on a shared flow field (one BFS per gate/keep, 4-block cells, O(1) lookup). Followers keep cohesion with their leader; within ~16 blocks and LOS they walk straight at the target.
+
+`ThrottledMeleeGoal` (kingdoms, not Pumpkin) path-refreshes on that same cadence instead of vanilla melee's ~4 tick interval.
+
+Headless numbers (flow-field steering on a planned town, **not** a full server tick with physics/pathfinder). Release build (`CARGO_PROFILE_RELEASE_LTO=off`), seed `20261025`, 800 ticks. JSON: `/opt/cursor/artifacts/siege-bench.json`.
+
+| N vs N | ms/tick | worst ms | melee engaged | peak melee | path capped |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 50 | 0.026 | 0.066 | 78 | 47 | 0/3102 |
+| 100 | 0.057 | 0.139 | 156 | 93 | 0/6198 |
+| 200 | 0.129 | 0.358 | 314 | 172 | 0/12506 |
+| 400 | 0.319 | 0.916 | 586 | 249 | 5665/24514 |
+
+200 vs 200 stays under ~10 ms/tick of sim AI, with most combatants reaching melee. Path budget is only spent on squad-leader refreshes; 400 vs 400 starts to clip those.
+
+```bash
+CARGO_PROFILE_RELEASE_LTO=off cargo run --release -p pumpkin-kingdoms --bin kingdoms-siege-bench -- --n 200 --ticks 800 --out-dir /opt/cursor/artifacts
+```
+
+Plots are ≥1024 px, wall/keep/gates under the dots, legend, start/mid/end frames plus a strip (`siege-{n}-start/mid/end/strip.png`).
+
+### Live ticking (why a headless raid used to freeze)
+
+Pumpkin ticks an entity only when its chunk is in `World::active_chunks` **and** `Level::is_chunk_loaded`. `forced_chunks` (what `/forceload` and the first raid code wrote) only fills `active_chunks`. The chunk scheduler still unpublishes block data unless a lasting `ChunkLoading::add_force_ticket` is held. `get_or_fetch_chunk` adds a FULL ticket then **removes** it after the fetch, so a one-shot load is not enough. Game tests already pair `forced_chunks` with `add_force_ticket`; vanilla `/forceload` in Pumpkin does not.
+
+That is why a console-only raid spawned 40 raiders, civilians rang the bell in the ~1 s window while tickets were draining, then `raider_gate_dist` sat at 109.28 for thousands of ticks: the camp chunks were no longer `is_chunk_loaded`, so `World::tick` skipped them. `set_no_ai` was already cleared for an active raid.
+
+The raid now leases those chunks with `add_force_ticket` (released on `/raid stop` / victory). The director also drives flow-field navigation every tick, and if a mob's `tick_count` is still 0 it slides along the field and applies melee itself so a missed ticket cannot freeze the fight.
+
+A logged-in player is still how a real game ticks a region. `kingdoms-raid-bot` joins offline, stands at the threatened gate (client-authoritative `SPlayerPosition`), and answers keep-alives. Use it for live evidence:
+
+```bash
+# pumpkin.toml: networking.java.online_mode=false encryption=false (compression can stay on)
+KINGDOMS_PLOT_DIR=/opt/cursor/artifacts cargo run --release -p pumpkin
+# other terminal:
+kingdoms-raid-bot --host 127.0.0.1:25565 --x GATE_X --y GATE_Y --z GATE_Z --seconds 180
+# console:
+raid start here 40
+raid start here 200 200
+```
+
+`Server::get_tps()` is `1000 / get_mspt()`, not a capped 20 Hz counter. An empty tick at 0.5 ms reports ~2000 TPS. That number is inverted MSPT, not proof that entities are running, and not proof that they are not. Read `mspt` and the `n_ticking` line instead.
+
+Live Pumpkin (release, LTO off, seed `20261025`, `kingdoms-raid-bot` standing at the threatened gate, `KINGDOMS_PLOT_DIR` plots). Combat is `EntityDamageByEntity` (`kingdoms combat` in the log).
+
+| Fight | `raider_gate_dist` | kills (def/raid) | fight MSPT | `n_ticking` |
+| --- | ---: | ---: | ---: | ---: |
+| 40 vs ~35 | 57 → 15 (gate) | 58 / 40 | ~17–33 ms | 31–78 |
+| 200 vs 200 | 15 (already at the gate) | +200 raider deaths (238 total / 266 def) | ~38–68 ms at peak | ~90–200 |
+
+40-raid: spawned at hinterland camp `(1532, 476)`, gate `(1504, 597)`, all 40 raiders dead, melee `DamageType::MOB_ATTACK`. 200-raid: one wave of 200 plus 157 extra defenders, server ran behind (`Can't keep up` 8 s / 165 ticks) while ~300 combatants were in contact. Plots: `/opt/cursor/artifacts/live-40-strip.png`, `live-200-strip.png`.
+
+### Commands
+
+| Command | |
+| --- | --- |
+| `/locatetown` | nearest planned town |
+| `/kingdom info` | town, kingdom, battle counts |
+| `/kingdom join <kingdom>` | `alder` or `raven` (players fight with that side) |
+| `/raid start <town> [size] [defenders]` | start a pillager raid. Optional `defenders` is how many kingdom combatants to field (extras spawn at the threatened gate). |
+| `/raid stop` | stop all kingdoms raids |
 
 ## Build and run
 

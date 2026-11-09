@@ -40,24 +40,45 @@ pub mod castle;
 pub mod cells;
 pub mod chunk_fill;
 pub mod command;
+pub mod director;
+pub mod events;
+pub mod faction;
+pub mod flow;
 pub mod geom;
+pub mod goals;
 pub mod height;
 pub mod info;
 pub mod interior;
+pub mod lod;
 pub mod marker;
 pub mod palette;
 pub mod plan;
+pub mod populate;
 pub mod portal;
+pub mod raid;
 pub mod render;
 pub mod rng;
+pub mod roles;
+pub mod scene;
 pub mod scenes;
+pub mod sim;
 pub mod stamp;
 pub mod town;
 pub mod watertight;
 pub mod wfc;
 
-pub use info::{SpawnPoint, SpawnRole, TownInfo, town_id, town_info, town_info_at};
+pub use director::{
+    BattleState, RaidId, battle_state, join_kingdom, query_battle_state, set_target_town,
+    start_raid, stop_raid,
+};
+pub use faction::{Faction, KingdomId, is_allied, is_hostile};
+pub use info::{
+    SpawnPoint, SpawnRole, TownInfo, town_id, town_info, town_info_at, town_info_from_id,
+};
 pub use plan::{plan_at, plan_from_cache};
+pub use raid::RaidSpec;
+pub use roles::VillagerRole;
+pub use scene::{TownInfoScene, TownScene};
 pub use scenes::{Scene, SceneKind};
 pub use stamp::{
     PlannedBlock, planned_block, planned_block_at, planned_blocks_in, planned_blocks_in_at,
@@ -77,11 +98,12 @@ pub fn install(server: &Server) {
     });
 
     for world in server.worlds.load().iter() {
-        attach_world(world);
+        attach_world_arc(world);
     }
 
     register_world_init_handler(server);
-    info!("Kingdoms plugin installed (medieval towns + /locatetown)");
+    events::register(server);
+    info!("Kingdoms plugin installed (towns, villagers, raids)");
 }
 
 /// Registers the decorator, village filter, and height sampler on an overworld.
@@ -92,6 +114,15 @@ pub fn attach_world(world: &World) {
     let world_gen = world.level.world_gen();
     register_world_gen(Arc::clone(&world_gen));
     register_hooks(world_gen.extensions());
+}
+
+/// Same as [`attach_world`], and keeps an `Arc` so populate/raid can spawn entities.
+pub fn attach_world_arc(world: &Arc<World>) {
+    if world.dimension.minecraft_name != Dimension::OVERWORLD.minecraft_name {
+        return;
+    }
+    attach_world(world);
+    director::lock().attach_world(world);
 }
 
 fn register_world_init_handler(server: &Server) {
@@ -119,7 +150,7 @@ impl EventHandler<WorldInitEvent> for AttachOnWorldInit {
         _server: &'a Arc<Server>,
         event: &'a WorldInitEvent,
     ) -> PluginFuture<'a, ()> {
-        attach_world(&event.world);
+        attach_world_arc(&event.world);
         Box::pin(async {})
     }
 
@@ -128,7 +159,7 @@ impl EventHandler<WorldInitEvent> for AttachOnWorldInit {
         _server: &'a Arc<Server>,
         event: &'a mut WorldInitEvent,
     ) -> PluginFuture<'a, ()> {
-        attach_world(&event.world);
+        attach_world_arc(&event.world);
         Box::pin(async {})
     }
 }
