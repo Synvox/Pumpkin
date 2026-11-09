@@ -79,6 +79,7 @@ pub trait TownScene {
     fn guard_posts(&self) -> &[ScenePost];
     fn archer_posts(&self) -> &[ScenePost];
     fn civilian_homes(&self) -> &[ScenePost];
+    fn workstations(&self) -> &[ScenePost];
     fn rally_points(&self) -> &[ScenePost];
     fn raid_camps(&self) -> &[ScenePost];
     fn ram_posts(&self) -> &[ScenePost];
@@ -116,6 +117,7 @@ pub struct TownInfoScene {
     guard_posts: Vec<ScenePost>,
     archer_posts: Vec<ScenePost>,
     civilian_homes: Vec<ScenePost>,
+    workstations: Vec<ScenePost>,
     rally_points: Vec<ScenePost>,
     raid_camps: Vec<ScenePost>,
     ram_posts: Vec<ScenePost>,
@@ -144,6 +146,10 @@ impl TownInfoScene {
         if civilian_homes.is_empty() {
             civilian_homes.push(ScenePost::from_tuple(info.market.center()));
         }
+        let mut workstations = posts(&info, SpawnRole::Workstation);
+        if workstations.is_empty() {
+            workstations.push(ScenePost::from_tuple(info.market.center()));
+        }
         let mut rally_points = posts(&info, SpawnRole::RallyKeep);
         rally_points.extend(posts(&info, SpawnRole::RallyMarket));
         rally_points.extend(posts(&info, SpawnRole::Gate));
@@ -166,6 +172,7 @@ impl TownInfoScene {
             guard_posts,
             archer_posts,
             civilian_homes,
+            workstations,
             rally_points,
             raid_camps,
             ram_posts,
@@ -216,6 +223,10 @@ impl TownScene for TownInfoScene {
 
     fn civilian_homes(&self) -> &[ScenePost] {
         &self.civilian_homes
+    }
+
+    fn workstations(&self) -> &[ScenePost] {
+        &self.workstations
     }
 
     fn rally_points(&self) -> &[ScenePost] {

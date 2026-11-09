@@ -115,6 +115,14 @@ struct OwnershipFile {
     towns: HashMap<String, String>,
     #[serde(default)]
     players: HashMap<String, String>,
+    #[serde(default)]
+    scores: HashMap<String, i32>,
+    #[serde(default)]
+    clock_tick: u32,
+    #[serde(default)]
+    next_raid_id: u32,
+    #[serde(default)]
+    last_clock_tick: u32,
 }
 
 /// World-folder path for the ownership file.
@@ -123,11 +131,15 @@ pub fn ownership_path(world_root: &Path) -> PathBuf {
     world_root.join(OWNERSHIP_FILE)
 }
 
-/// Loaded towns and player kingdom membership.
-#[derive(Default)]
+/// Loaded towns, player membership, scores, and war clock.
+#[derive(Default, Clone)]
 pub struct SavedState {
     pub towns: HashMap<String, TownOwner>,
     pub players: HashMap<String, String>,
+    pub scores: HashMap<String, i32>,
+    pub clock_tick: u32,
+    pub next_raid_id: u32,
+    pub last_clock_tick: u32,
 }
 
 /// Load town id → owner from `kingdoms-ownership.json`.
@@ -136,7 +148,7 @@ pub fn load_ownership(path: &Path) -> HashMap<String, TownOwner> {
     load_state(path).towns
 }
 
-/// Load towns and players from `kingdoms-ownership.json`.
+/// Load towns, players, scores, and the war clock from `kingdoms-ownership.json`.
 #[must_use]
 pub fn load_state(path: &Path) -> SavedState {
     let Ok(bytes) = std::fs::read_to_string(path) else {
@@ -153,31 +165,41 @@ pub fn load_state(path: &Path) -> SavedState {
             .map(|(id, owner)| (id, TownOwner::parse(&owner)))
             .collect(),
         players: file.players,
+        scores: file.scores,
+        clock_tick: file.clock_tick,
+        next_raid_id: file.next_raid_id,
+        last_clock_tick: file.last_clock_tick,
     }
 }
 
 /// Persist town ownership. Overwrites the file.
 #[allow(clippy::implicit_hasher)]
 pub fn save_ownership(path: &Path, owners: &HashMap<String, TownOwner>) -> std::io::Result<()> {
-    save_state(path, owners, &HashMap::new())
+    save_state(
+        path,
+        &SavedState {
+            towns: owners.clone(),
+            ..SavedState::default()
+        },
+    )
 }
 
-/// Persist towns and player membership. Overwrites the file.
-#[allow(clippy::implicit_hasher)]
-pub fn save_state(
-    path: &Path,
-    owners: &HashMap<String, TownOwner>,
-    players: &HashMap<String, String>,
-) -> std::io::Result<()> {
+/// Persist towns, players, scores, and the war clock. Overwrites the file.
+pub fn save_state(path: &Path, state: &SavedState) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let file = OwnershipFile {
-        towns: owners
+        towns: state
+            .towns
             .iter()
             .map(|(id, owner)| (id.clone(), owner.as_str().to_owned()))
             .collect(),
-        players: players.clone(),
+        players: state.players.clone(),
+        scores: state.scores.clone(),
+        clock_tick: state.clock_tick,
+        next_raid_id: state.next_raid_id,
+        last_clock_tick: state.last_clock_tick,
     };
     let json = serde_json::to_string_pretty(&file).unwrap_or_else(|_| "{}".to_owned());
     std::fs::write(path, json)
@@ -336,6 +358,38 @@ mod tests {
             back.get("20261025:1:0"),
             Some(&TownOwner::Kingdom("alder".to_owned()))
         );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn scores_and_clock_survive_a_file_round_trip() {
+        let dir = std::env::temp_dir().join(format!("kingdoms-war-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = ownership_path(&dir);
+        let mut towns = HashMap::new();
+        towns.insert("20261025:0:0".to_owned(), TownOwner::Pillager);
+        let mut scores = HashMap::new();
+        scores.insert("pillager".to_owned(), 3);
+        scores.insert("alder".to_owned(), 1);
+        save_state(
+            &path,
+            &SavedState {
+                towns,
+                players: HashMap::new(),
+                scores,
+                clock_tick: 4800,
+                next_raid_id: 7,
+                last_clock_tick: 2400,
+            },
+        )
+        .unwrap();
+        let back = load_state(&path);
+        assert_eq!(back.towns.get("20261025:0:0"), Some(&TownOwner::Pillager));
+        assert_eq!(back.scores.get("pillager"), Some(&3));
+        assert_eq!(back.clock_tick, 4800);
+        assert_eq!(back.next_raid_id, 7);
+        assert_eq!(back.last_clock_tick, 2400);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
     }

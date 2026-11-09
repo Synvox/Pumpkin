@@ -152,7 +152,7 @@ Vanilla scoreboard teams `k_alder`, `k_raven`, `k_pillager` are created with fri
 | --- | --- | --- |
 | Guard | iron sword, chainmail | melee pillagers; rally to the threatened gate |
 | Archer | bow, leather | hold a tower/wall; `BowAttackGoal` |
-| Civilian | none | flee to the keep, ring a bell (`block.bell.use`), return after |
+| Civilian | none | work by day, home at night; flee to the keep and ring a bell (`block.bell.use`) on alarm |
 | Builder | none | after a siege, walk to missing/wrong blocks vs `plan.planned_column` and place them (gates, then walls, then houses), one block / 10 ticks with a swing |
 
 Iron golems keep vanilla melee / monster targeting and also rally.
@@ -198,6 +198,7 @@ export TOKEN=dev-token-must-be-32-chars-min
 # pumpkin.toml world already running, with KINGDOMS_HTTP=1 KINGDOMS_HTTP_TOKEN=$TOKEN
 
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8742/state
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8742/war
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8742/towns/20261025:0:0
 curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"town":"here","size":40,"side":"pillager"}' http://127.0.0.1:8742/raids
@@ -206,7 +207,11 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"name":"Herald","message":"The gate is down"}' http://127.0.0.1:8742/chat
 ```
 
-`GET /state` returns towns (owners, battles, troop counts) and logged-in player positions. `POST /raids` also accepts `"side":"kingdom"` for a counter-raid and an optional `"camp"` (currently unused; waves still spawn from the hinterland camp / relief post).
+`GET /state` returns towns (owners, battles, troop counts) and logged-in player positions. `GET /war` is a front-line summary for the Sails war map (scores, clock, keep/gate, occupy hold). It is authenticated but does **not** pause the war clock. `POST /raids` also accepts `"side":"kingdom"` for a counter-raid and an optional `"camp"` (currently unused; waves still spawn from the hinterland camp / relief post).
+
+`kingdoms-ownership.json` now also stores kingdom scores, `clock_tick`, `next_raid_id`, and `last_clock_tick` so a restart keeps the war. Town ownership and player membership were already there.
+
+Civilians work at a workstation by day (ticks 2000–11000) and go home to a bed at night. The town bell still sends them to the keep when a raid starts. Guards patrol the wall between raids. Empty bed slots refill at most two citizens per 200 ticks, and never during a fight.
 
 ### Population
 
@@ -287,6 +292,19 @@ Round 4 (seed `20261025`, release, LTO off, two `kingdoms-raid-bot`s). Capture n
 Plots: `/opt/cursor/artifacts/live-r4.log`, `live-r4-200-strip.png`, `live-r4-80-strip.png`, `live-r4-clock-strip.png`, `kingdoms-ownership-r4.json`.
 
 Gaps: the start hitch is still force-load; a full keep capture (`need` attackers in the courtyard) did not complete live (4 in keep is now correctly not enough); leather kits are server-side (bots do not render); the war clock only sees towns already in the director cache (a player, bot, or `/raid start`).
+
+Round 5 (seed `20261025`, release, LTO off, two `kingdoms-raid-bot`s at the gate/keep). Raid spawn is pre-warmed (~80 ticks of force tickets at 12/tick) then soldiers spawn 8 per tick. `kingdoms-ownership.json` stores scores and the war clock. `GET /war` is the Sails front-line map (auth, does not pause the clock). Civilians work by day / home at night / keep on alarm; guards patrol the wall; beds refill two citizens per 200 ticks when the town is quiet.
+
+| Fight | peak bodies | fight MSPT | director_ms | `Can't keep up` | notes |
+| --- | ---: | ---: | ---: | --- | --- |
+| r4 80 vs 20 (before) | ~99 | 9–14 | spawn **107.72** | start 8.5–9.7 s / 169–193 ticks | `keep_r=4`, **no capture** (need=8) |
+| r5 120 vs 40 (after) | **186** ticking (67/122 at first contact) | **9.7–15.6** (worst fight tick **15.56** at spawn complete, then 10–13) | **2.9–5.0** | join only 8.4 s / 168 ticks (player chunk load). **No raid-spawn hitch ≥ 50 ms** | ram `1542,486 → 1507,589` then **breached 21**; `keep_r=8 keep_d=0 hold=200` **captured**; webhook `town_captured`; ownership `"pillager"` score 1; war clock Kingdom counter-raid |
+
+Capture: `kingdoms town captured town=20261025:0:0 raiders_in_keep=8 need=8 hold=200 score=pillager`. Restart reloaded `tick`, `scores.pillager=1`, `owner=pillager`, `last_clock_tick` via `GET /war`.
+
+Plots: `/opt/cursor/artifacts/live-r5.log`, `live-r5-strip.png` (4460×1024), `live-r5-clock-strip.png`, `kingdoms-ownership-r5.json`, `webhook-r5.log`, `war-r5-persist.json`.
+
+Gaps: player join still force-loads ~170 chunks in one tick (~8.5 s); the war clock fired on the same tick as the flip so builders did not get a quiet repair window in that run (the clock now waits out the 400-tick hold lockout); leftover camp hostiles can keep `alarm` true after the raid, which also blocks repair and bed respawn.
 
 ### Commands
 
