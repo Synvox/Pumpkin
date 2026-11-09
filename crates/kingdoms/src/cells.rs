@@ -46,6 +46,26 @@ pub enum CellKind {
     Dock,
     /// Road crossing water.
     Bridge,
+    /// Fruit trees on grass.
+    Orchard,
+    /// Fenced grazing green.
+    Pasture,
+    /// Headstones and paths.
+    Grave,
+    /// Paved gate or market plaza.
+    Plaza,
+    /// Camp palisade of logs.
+    Palisade,
+    /// Wool tent.
+    Tent,
+    /// Broken masonry, no roof.
+    Ruin,
+    /// Outpost walk / hill tower pad.
+    WatchPost,
+    /// Basin, statue, or fountain ring.
+    Fountain,
+    /// Open dirt court inside a palisade.
+    CampCourt,
 }
 
 impl CellKind {

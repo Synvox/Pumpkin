@@ -2,7 +2,8 @@
 //!
 //! This is geometry only: no capture, siege, or AI logic. Kingdoms that later
 //! fight over towns can look up walls, gates, the keep, the market capture
-//! point, and the road graph from [`TownInfo`].
+//! point, the road graph, hinterland scenes, and spawn points from [`TownInfo`].
+//! Every field is a pure function of seed + cell.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,7 @@ use crate::buildings::BuildingKind;
 use crate::geom::{Dir, Rect};
 use crate::palette::PaletteKind;
 use crate::plan::TownPlan;
+use crate::scenes::{Scene, SceneKind};
 use crate::town::TownPos;
 
 /// Stable id for a planned town: `seed:cell_x:cell_z`.
@@ -75,6 +77,36 @@ pub struct CastleInfo {
     pub wall: Vec<[i32; 2]>,
 }
 
+/// Why an AI layer would spawn or path to a column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpawnRole {
+    /// Bed in a villager dwelling (cottage, timber, townhouse, longhouse, tavern).
+    VillagerBed,
+    /// Workstation: smith, church, mill, barn, stall, monastery.
+    Workstation,
+    /// Guard post on a wall walk, town tower, castle tower, or watchtower.
+    GuardPost,
+    /// Market well / plaza rally.
+    RallyMarket,
+    /// Keep courtyard rally.
+    RallyKeep,
+    /// Town or castle gate.
+    Gate,
+    /// Pillager tent / camp spawn.
+    PillagerSpawn,
+    /// Pillager camp court rally.
+    PillagerRally,
+}
+
+/// One spawn or rally column. `y` is planner surface + 1 (standing height).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnPoint {
+    pub role: SpawnRole,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
 /// Snapshot of one town. Safe to serialize and to hold without the occupancy grid.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TownInfo {
@@ -95,6 +127,10 @@ pub struct TownInfo {
     pub castle: CastleInfo,
     pub roads: Vec<RoadInfo>,
     pub buildings: Vec<BuildingInfo>,
+    /// Hinterland and civic scenes (farms, hamlet, camp, monastery, …).
+    pub scenes: Vec<Scene>,
+    /// Villager / pillager spawn and rally points. Pure function of seed+cell.
+    pub spawns: Vec<SpawnPoint>,
 }
 
 impl TownInfo {
@@ -169,6 +205,8 @@ impl TownInfo {
                     }
                 })
                 .collect(),
+            scenes: plan.scenes.clone(),
+            spawns: collect_spawns(plan),
         }
     }
 
@@ -176,6 +214,78 @@ impl TownInfo {
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
+}
+
+fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
+    let mut spawns = Vec::new();
+    let at = |role: SpawnRole, x: i32, z: i32| SpawnPoint {
+        role,
+        x,
+        y: plan.heights.height(x, z) + 1,
+        z,
+    };
+
+    for lot in &plan.lots {
+        let (cx, cz) = lot.rect.center();
+        match lot.kind {
+            BuildingKind::Cottage
+            | BuildingKind::Timber
+            | BuildingKind::Townhouse
+            | BuildingKind::Longhouse
+            | BuildingKind::Tavern => spawns.push(at(SpawnRole::VillagerBed, cx, cz)),
+            BuildingKind::Blacksmith
+            | BuildingKind::Church
+            | BuildingKind::Monastery
+            | BuildingKind::Windmill
+            | BuildingKind::Barn
+            | BuildingKind::Stall => spawns.push(at(SpawnRole::Workstation, cx, cz)),
+            BuildingKind::Watchtower => spawns.push(at(SpawnRole::GuardPost, cx, cz)),
+        }
+    }
+
+    for tower in &plan.town_towers {
+        let (cx, cz) = tower.center();
+        spawns.push(at(SpawnRole::GuardPost, cx, cz));
+    }
+    for tower in &plan.castle.towers {
+        let (cx, cz) = tower.center();
+        spawns.push(at(SpawnRole::GuardPost, cx, cz));
+    }
+    for &(x, z) in plan.town_wall.iter().step_by(12) {
+        spawns.push(at(SpawnRole::GuardPost, x, z));
+    }
+
+    spawns.push(at(SpawnRole::RallyMarket, plan.well.0, plan.well.1));
+    let (kx, kz) = plan.castle.inner.center();
+    spawns.push(at(SpawnRole::RallyKeep, kx, kz));
+    for gate in &plan.gates {
+        spawns.push(at(SpawnRole::Gate, gate.x, gate.z));
+    }
+
+    for scene in &plan.scenes {
+        match scene.kind {
+            SceneKind::PillagerCamp => {
+                let (cx, cz) = scene.rect.center();
+                spawns.push(at(SpawnRole::PillagerRally, cx, cz));
+                for z in (scene.rect.min_z + 3..scene.rect.max_z - 2).step_by(6) {
+                    for x in (scene.rect.min_x + 3..scene.rect.max_x - 2).step_by(6) {
+                        if matches!(
+                            plan.occ.kind(x, z),
+                            crate::cells::CellKind::Tent | crate::cells::CellKind::CampCourt
+                        ) {
+                            spawns.push(at(SpawnRole::PillagerSpawn, x, z));
+                        }
+                    }
+                }
+            }
+            SceneKind::Watchtower => {
+                let (cx, cz) = scene.rect.center();
+                spawns.push(at(SpawnRole::GuardPost, cx, cz));
+            }
+            _ => {}
+        }
+    }
+    spawns
 }
 
 /// Snapshot of a cached plan, if one has been built for this cell.
@@ -217,9 +327,11 @@ mod tests {
         assert_eq!(info.capture_point, [plan.well.0, plan.well.1]);
         assert!(!info.castle.wall.is_empty());
         assert!(!info.gates.is_empty());
+        assert!(!info.spawns.is_empty());
         let json = info.to_json().unwrap();
         let back: TownInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, info.id);
         assert_eq!(back.castle.keep, info.castle.keep);
+        assert_eq!(back.spawns.len(), info.spawns.len());
     }
 }

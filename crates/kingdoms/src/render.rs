@@ -6,8 +6,10 @@ use pumpkin_data::{Block, BlockState};
 
 use crate::buildings::BuildingKind;
 use crate::castle::RoofKind;
+use crate::geom::Rect;
 use crate::interior::keep_storey_label;
 use crate::plan::TownPlan;
+use crate::scenes::SceneKind;
 use crate::stamp::{VolumeSink, fill_volume, ridge_floor};
 
 /// Planner-only renders (no chunk generation).
@@ -34,7 +36,7 @@ pub fn write_renders(
         plan.bounds.min_z,
         plan.bounds.max_x,
         plan.bounds.max_z,
-        4,
+        3,
         1,
     );
     let castle = plan.castle.bounds;
@@ -81,7 +83,85 @@ pub fn write_renders(
         &skyline,
     )?;
     write_cutaways(plan, volume, out_dir, stem)?;
+    write_scene_renders(plan, volume, out_dir, stem)?;
     Ok(())
+}
+
+fn write_scene_renders(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<()> {
+    let overview = overview_bounds(plan);
+    let span = (overview.width() + overview.depth()).max(1);
+    let tile = (1600 / span).clamp(2, 6);
+    save(
+        &out_dir.join(format!("{stem}-aerial.png")),
+        &render_iso_view(
+            volume,
+            overview.min_x,
+            overview.min_z,
+            overview.max_x,
+            overview.max_z,
+            tile,
+            1,
+            |_, _, _| true,
+            Some("Castle town · farms, roads, hinterland"),
+            false,
+        ),
+    )?;
+
+    let mut seen = Vec::new();
+    for scene in &plan.scenes {
+        if seen.contains(&scene.kind) {
+            continue;
+        }
+        seen.push(scene.kind);
+        let pad = match scene.kind {
+            SceneKind::Harbour => 4,
+            SceneKind::PillagerCamp | SceneKind::Farmstead | SceneKind::Hamlet => 4,
+            _ => 3,
+        };
+        let mut rect = scene.rect;
+        if rect.width() > 56 || rect.depth() > 56 {
+            let (cx, cz) = rect.center();
+            rect = Rect::new(cx - 28, cz - 28, cx + 27, cz + 27);
+        }
+        let name = scene.kind.label().to_ascii_lowercase().replace(' ', "-");
+        save(
+            &out_dir.join(format!("{stem}-scene-{name}.png")),
+            &render_exterior(volume, rect, pad, scene.kind.label()),
+        )?;
+    }
+    Ok(())
+}
+
+fn overview_bounds(plan: &TownPlan) -> Rect {
+    let mut bounds = plan.castle.bounds.inflate(8);
+    bounds = union_rect(bounds, plan.market.inflate(24));
+    for scene in &plan.scenes {
+        if scene.kind == SceneKind::Harbour && (scene.rect.width() > 64 || scene.rect.depth() > 64)
+        {
+            continue;
+        }
+        bounds = union_rect(bounds, scene.rect.inflate(8));
+    }
+    Rect::new(
+        bounds.min_x.max(plan.bounds.min_x),
+        bounds.min_z.max(plan.bounds.min_z),
+        bounds.max_x.min(plan.bounds.max_x),
+        bounds.max_z.min(plan.bounds.max_z),
+    )
+}
+
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    Rect::new(
+        a.min_x.min(b.min_x),
+        a.min_z.min(b.min_z),
+        a.max_x.max(b.max_x),
+        a.max_z.max(b.max_z),
+    )
 }
 
 fn write_cutaways(
@@ -377,6 +457,12 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     }
     if id == Block::RED_BANNER.id {
         return [160, 32, 32];
+    }
+    if id == Block::BLACK_BANNER.id || id == Block::BLACK_WOOL.id {
+        return [28, 28, 32];
+    }
+    if id == Block::GRAY_WOOL.id {
+        return [90, 90, 94];
     }
     if id == Block::OAK_FENCE.id || id == Block::SPRUCE_FENCE.id {
         return [120, 90, 50];
