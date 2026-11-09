@@ -178,11 +178,7 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
         let mut cols = collect_lot(plan, lot.id, lot.rect);
         if matches!(lot.kind, BuildingKind::Windmill) {
             let (cx, cz) = lot.rect.center();
-            cols.retain(|&(x, z)| {
-                let dx = x - cx;
-                let dz = z - cz;
-                dx * dx + dz * dz <= 4
-            });
+            cols.retain(|&(x, z)| (x - cx).abs().max((z - cz).abs()) <= 2);
         }
         if cols.is_empty() {
             continue;
@@ -611,11 +607,16 @@ fn is_roof_block(state: &BlockState) -> bool {
         || id == Block::DEEPSLATE_TILE_STAIRS.id
         || id == Block::DEEPSLATE_TILE_SLAB.id
         || id == Block::DEEPSLATE_TILES.id
+        || id == Block::SANDSTONE_SLAB.id
+        || id == Block::SMOOTH_SANDSTONE_SLAB.id
+        || id == Block::SNOW.id
+        || id == Block::SNOW_BLOCK.id
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cells::CellKind;
     use crate::height::HeightGrid;
     use crate::palette::PaletteKind;
     use crate::plan::build_plan;
@@ -854,5 +855,137 @@ mod tests {
             roofed_lots, timber_lots,
             "timber lots {timber_lots} roofed {roofed_lots}"
         );
+    }
+
+    #[test]
+    fn tower_mill_and_rose_window() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            8,
+            6,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let volume = fill_volume(&plan);
+        if let Some(mill) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Windmill)
+        {
+            let (cx, cz) = mill.rect.center();
+            let floor = plan
+                .heights
+                .mean(
+                    mill.rect.min_x,
+                    mill.rect.min_z,
+                    mill.rect.max_x,
+                    mill.rect.max_z,
+                )
+                .max(plan.heights.sea_level + 2);
+            let mut base_r = 0;
+            let mut upper_r = 0;
+            for z in mill.rect.min_z..=mill.rect.max_z {
+                for x in mill.rect.min_x..=mill.rect.max_x {
+                    let cheb = (x - cx).abs().max((z - cz).abs());
+                    if volume.get(x, floor + 3, z).is_some_and(|s| !s.is_air()) {
+                        base_r = base_r.max(cheb);
+                    }
+                    if volume.get(x, floor + 12, z).is_some_and(|s| !s.is_air()) {
+                        upper_r = upper_r.max(cheb);
+                    }
+                }
+            }
+            assert!(
+                base_r >= 3,
+                "tower mill base should be 7 wide, radius={base_r}"
+            );
+            assert!(
+                upper_r == 2,
+                "tower mill should taper to 5 wide, radius={upper_r}"
+            );
+            let mut cloth = 0;
+            let hub = floor + 18;
+            for z in mill.rect.min_z - 12..=mill.rect.max_z + 12 {
+                for x in mill.rect.min_x - 12..=mill.rect.max_x + 12 {
+                    if let Some(state) = volume.get(x, hub, z) {
+                        let id = Block::from_state_id(state.id).id;
+                        if (id == Block::WHITE_WOOL.id
+                            || id == Block::DARK_OAK_FENCE.id
+                            || id == Block::OAK_TRAPDOOR.id)
+                            && (x - cx).abs() == (z - cz).abs()
+                            && (x - cx).abs() >= 5
+                        {
+                            cloth += 1;
+                        }
+                    }
+                }
+            }
+            assert!(cloth >= 8, "lattice sails at hub {hub} count {cloth}");
+            let mut stones = 0;
+            for z in mill.rect.min_z..=mill.rect.max_z {
+                for x in mill.rect.min_x..=mill.rect.max_x {
+                    if volume
+                        .get(x, floor + 1, z)
+                        .is_some_and(|s| Block::from_state_id(s.id).id == Block::GRINDSTONE.id)
+                    {
+                        stones += 1;
+                    }
+                }
+            }
+            assert!(stones >= 1, "millstones");
+        }
+        if let Some(cat) = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == crate::scenes::SceneKind::Cathedral)
+        {
+            let mut nave_west = i32::MAX;
+            let mut nave_east = i32::MIN;
+            let mut min_z = i32::MAX;
+            let mut max_z = i32::MIN;
+            let mut n = 0;
+            for z in cat.rect.min_z..=cat.rect.max_z {
+                for x in cat.rect.min_x..=cat.rect.max_x {
+                    if plan.occ.kind(x, z) == CellKind::CathedralNave {
+                        n += 1;
+                        nave_west = nave_west.min(x);
+                        nave_east = nave_east.max(x);
+                        min_z = min_z.min(z);
+                        max_z = max_z.max(z);
+                    }
+                }
+            }
+            assert!(n > 0, "cathedral nave");
+            let cz = min_z.midpoint(max_z);
+            let floor = crate::stamp::ridge_floor(
+                &plan,
+                crate::geom::Rect::new(nave_west, min_z, nave_east, max_z),
+            );
+            let mut ring = 0;
+            let mut inner = 0;
+            for z in min_z..=max_z {
+                for y in floor + 8..=floor + 14 {
+                    if let Some(state) = volume.get(nave_west, y, z) {
+                        let id = Block::from_state_id(state.id).id;
+                        let glass = id == Block::PURPLE_STAINED_GLASS_PANE.id
+                            || id == Block::YELLOW_STAINED_GLASS_PANE.id;
+                        let d2 = (y - (floor + 11)) * (y - (floor + 11)) + (z - cz) * (z - cz);
+                        if glass && (8..=13).contains(&d2) {
+                            ring += 1;
+                        }
+                        if id == Block::CALCITE.id && d2 < 8 {
+                            inner += 1;
+                        }
+                    }
+                }
+            }
+            assert!(ring >= 6, "rose ring glass {ring}");
+            assert!(inner >= 3, "rose tracery {inner}");
+        }
     }
 }

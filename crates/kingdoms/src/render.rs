@@ -6,8 +6,10 @@ use pumpkin_data::{Block, BlockState};
 
 use crate::buildings::BuildingKind;
 use crate::castle::RoofKind;
+use crate::cells::CellKind;
 use crate::geom::Rect;
 use crate::interior::keep_storey_label;
+use crate::palette::PaletteKind;
 use crate::plan::TownPlan;
 use crate::scenes::SceneKind;
 use crate::stamp::{VolumeSink, fill_volume, ridge_floor};
@@ -125,7 +127,9 @@ fn write_scene_renders(
             | SceneKind::Hamlet
             | SceneKind::Cathedral
             | SceneKind::MountainFortress
-            | SceneKind::Monastery => 6,
+            | SceneKind::Monastery
+            | SceneKind::Mine
+            | SceneKind::Ruin => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -146,7 +150,7 @@ fn write_scene_renders(
     {
         save(
             &out_dir.join(format!("{stem}-scene-windmill.png")),
-            &render_exterior(volume, mill.rect.inflate(8), 2, "Windmill"),
+            &render_exterior(volume, mill.rect.inflate(12), 2, "Windmill"),
         )?;
     }
     Ok(())
@@ -166,7 +170,7 @@ pub fn overview_bounds(plan: &TownPlan) -> Rect {
     }
     for lot in &plan.lots {
         if lot.kind == BuildingKind::Windmill {
-            bounds = union_rect(bounds, lot.rect.inflate(10));
+            bounds = union_rect(bounds, lot.rect.inflate(12));
         }
     }
     Rect::new(
@@ -255,24 +259,27 @@ fn write_cutaways(
     });
     if let Some(lot) = house_lot {
         let floor = lot_floor(plan, lot);
+        let (cut_title, ext_title) = match plan.palette {
+            PaletteKind::Sandstone => (
+                "Desert house · furnished rooms, flat roof",
+                "Desert house · sandstone, flat roof, dome",
+            ),
+            PaletteKind::Spruce => (
+                "Town house · bed, table, hearth",
+                "Town house · dark timber, steep snowy gable",
+            ),
+            PaletteKind::Oak => (
+                "Town house · bed, table, hearth",
+                "Town house · timber frame, closed gable",
+            ),
+        };
         save(
             &out_dir.join(format!("{stem}-house-cutaway.png")),
-            &render_room(
-                volume,
-                lot.rect,
-                floor,
-                floor + 3,
-                "Town house · bed, table, hearth",
-            ),
+            &render_room(volume, lot.rect, floor, floor + 3, cut_title),
         )?;
         save(
             &out_dir.join(format!("{stem}-house.png")),
-            &render_exterior(
-                volume,
-                lot.rect,
-                2,
-                "Town house · timber frame, closed gable",
-            ),
+            &render_exterior(volume, lot.rect, 2, ext_title),
         )?;
     }
 
@@ -323,6 +330,45 @@ fn write_cutaways(
             &out_dir.join(format!("{stem}-keep.png")),
             &render_exterior(volume, keep.inflate(2), 3, "Keep · closed gables"),
         )?;
+    }
+
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::Cathedral)
+    {
+        let mut nave: Option<Rect> = None;
+        for z in scene.rect.min_z..=scene.rect.max_z {
+            for x in scene.rect.min_x..=scene.rect.max_x {
+                if plan.occ.kind(x, z) != CellKind::CathedralNave {
+                    continue;
+                }
+                nave = Some(nave.map_or_else(
+                    || Rect::new(x, z, x, z),
+                    |rect| {
+                        Rect::new(
+                            rect.min_x.min(x),
+                            rect.min_z.min(z),
+                            rect.max_x.max(x),
+                            rect.max_z.max(z),
+                        )
+                    },
+                ));
+            }
+        }
+        if let Some(nave) = nave {
+            let floor = ridge_floor(plan, nave);
+            save(
+                &out_dir.join(format!("{stem}-cathedral-cutaway.png")),
+                &render_room(
+                    volume,
+                    nave,
+                    floor,
+                    floor + 6,
+                    "Cathedral · nave cutaway, pews and rose",
+                ),
+            )?;
+        }
     }
     Ok(())
 }
@@ -527,8 +573,24 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     if id == Block::WHITE_WOOL.id {
         return [230, 230, 225];
     }
-    if id == Block::OAK_LEAVES.id || id == Block::SPRUCE_LEAVES.id {
+    if id == Block::OAK_LEAVES.id || id == Block::SPRUCE_LEAVES.id || id == Block::JUNGLE_LEAVES.id
+    {
         return [48, 116, 40];
+    }
+    if id == Block::JUNGLE_LOG.id {
+        return [86, 62, 28];
+    }
+    if id == Block::WHITE_BANNER.id {
+        return [236, 236, 230];
+    }
+    if id == Block::SNOW.id || id == Block::SNOW_BLOCK.id {
+        return [240, 244, 248];
+    }
+    if id == Block::RAIL.id {
+        return [90, 90, 90];
+    }
+    if id == Block::GRINDSTONE.id {
+        return [130, 130, 128];
     }
     if id == Block::WATER.id {
         return [45, 82, 162];

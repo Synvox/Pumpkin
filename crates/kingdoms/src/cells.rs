@@ -104,6 +104,12 @@ pub enum CellKind {
     CathedralButtress,
     /// Palisade wall-walk between stakes.
     PalisadeWalk,
+    /// Mine headframe over a shaft.
+    MineHead,
+    /// Rail and cart stand.
+    MineRail,
+    /// Gravel and cobble spoil heap.
+    MineSpoil,
 }
 
 impl CellKind {
