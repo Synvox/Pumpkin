@@ -42,6 +42,8 @@ pub struct TownPlan {
     pub bounds: Rect,
     pub castle: CastlePlan,
     pub market: Rect,
+    /// Walled town rectangle (houses, streets, civic square).
+    pub town: Rect,
     pub well: (i32, i32),
     /// Town-wall vertices, clockwise, not necessarily closed.
     pub town_wall: Vec<(i32, i32)>,
@@ -83,6 +85,28 @@ impl TownPlan {
                 .inflate(crate::scenes::SCENE_YARD_MARGIN)
                 .contains(x, z)
         })
+    }
+
+    /// True within [`crate::scenes::BUILDING_TREE_MARGIN`] of a roofed lot.
+    #[must_use]
+    pub fn near_building(&self, x: i32, z: i32) -> bool {
+        self.lots.iter().any(|lot| {
+            !matches!(lot.kind, crate::buildings::BuildingKind::Stall)
+                && lot
+                    .rect
+                    .inflate(crate::scenes::BUILDING_TREE_MARGIN)
+                    .contains(x, z)
+        })
+    }
+
+    /// Columns where feature trees and floating leaves are stripped: every
+    /// scene yard, the walled town, the market crop, and a keepout around lots.
+    #[must_use]
+    pub fn strips_trees(&self, x: i32, z: i32) -> bool {
+        self.in_scene_yard(x, z)
+            || self.town.contains(x, z)
+            || self.market.inflate(16).contains(x, z)
+            || self.near_building(x, z)
     }
 }
 
@@ -237,6 +261,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &mut scenes,
     );
     paint_scene_yards(&mut occ, &grid, &scenes);
+    crate::scenes::paint_tree_keepout(&mut occ, &grid, &lots, market, town_rect);
 
     debug_assert!(castle.bounds.width() >= CASTLE_MIN);
     debug_assert!(castle.bounds.depth() >= CASTLE_MIN);
@@ -249,6 +274,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         bounds,
         castle,
         market,
+        town: town_rect,
         well,
         town_wall,
         gates,

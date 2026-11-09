@@ -305,6 +305,7 @@ impl Director {
             self.next_raid_id = saved.next_raid_id;
         }
         self.last_clock_tick = saved.last_clock_tick;
+        crate::damage::restore(&saved.damage);
         self.ownership_path = Some(path);
         tracing::info!(
             tick = self.tick,
@@ -341,6 +342,7 @@ impl Director {
             clock_tick: self.tick,
             next_raid_id: self.next_raid_id,
             last_clock_tick: self.last_clock_tick,
+            damage: crate::damage::snapshot(),
         };
         if let Err(err) = siege::save_state(path, &state) {
             tracing::warn!(%err, "failed to persist kingdoms ownership");
@@ -3030,6 +3032,7 @@ fn maybe_war_clock(world: &Arc<World>, tick: u32) {
             return;
         }
     }
+    heal_repaired_towns(tick);
     let mut started = 0u32;
     for _ in 0..fronts {
         let Some((town_id, side)) = pick_clock_front(tick, fronts) else {
@@ -3073,6 +3076,21 @@ fn maybe_war_clock(world: &Arc<World>, tick: u32) {
         let mut dir = lock();
         dir.last_clock_tick = tick;
         dir.persist();
+    }
+}
+
+fn heal_repaired_towns(tick: u32) {
+    let ids: Vec<String> = {
+        let dir = lock();
+        dir.towns
+            .values()
+            .filter(|war| war.raid.is_none() && tick >= war.repair_until)
+            .filter(|war| crate::damage::damage_state(&war.info_id).is_damaged())
+            .map(|war| war.info_id.clone())
+            .collect()
+    };
+    for id in ids {
+        crate::damage::set_damage_state(&id, crate::damage::DamageState::Intact);
     }
 }
 
@@ -3334,6 +3352,8 @@ fn apply_capture(
         let mut dir = lock();
         dir.add_score(&owner_name, 1);
         dir.persist_owner(town_id, occupier);
+        crate::damage::set_damage_state(town_id, crate::damage::DamageState::Scarred);
+        dir.persist();
         dir.push_event(CombatEvent {
             tick,
             kind: CombatKind::Capture,

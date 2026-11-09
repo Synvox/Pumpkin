@@ -76,58 +76,64 @@ impl TownCheck {
     }
 }
 
-/// Leaves or plants with air below that are not next to a log, plus feature
-/// trees (log+leaves) overlapping a scene yard. Lily pads in a scene fail even
-/// when they sit on water.
+/// Leaves or plants with air below, plus feature trees on tree-strip columns.
+///
+/// Covers the whole town plan (walled town, market crop, lots, scene yards).
+/// Lily pads fail even when they sit on water.
 #[must_use]
 pub fn check_scene_vegetation(plan: &TownPlan, volume: &VolumeSink) -> Vec<String> {
-    use crate::scenes::SCENE_YARD_MARGIN;
-
     let mut fails = Vec::new();
-    for scene in &plan.scenes {
-        let pad = scene.rect.inflate(SCENE_YARD_MARGIN);
-        for z in pad.min_z.max(volume.min_z)..=pad.max_z.min(volume.min_z + volume.sz - 1) {
-            for x in pad.min_x.max(volume.min_x)..=pad.max_x.min(volume.min_x + volume.sx - 1) {
-                let kind = plan.occ.kind(x, z);
-                for y in volume.min_y..volume.min_y + volume.sy {
-                    let Some(state) = volume.get(x, y, z) else {
-                        continue;
-                    };
-                    if state.is_air() {
-                        continue;
-                    }
-                    let block = Block::from_state_id(state.id);
-                    if is_water_plant(block.id) {
-                        fails.push(format!(
-                            "{:?} water-plant {} at {x},{y},{z}",
-                            scene.kind, block.name
-                        ));
-                        continue;
-                    }
-                    if is_leaf_or_plant(block.id) {
-                        let below_air = volume
-                            .get(x, y - 1, z)
-                            .is_none_or(pumpkin_data::BlockState::is_air);
-                        if below_air
-                            && !adjacent_log(volume, x, y, z)
-                            && y + 4 >= plan.heights.height(x, z)
-                        {
-                            fails.push(format!(
-                                "{:?} floating {} at {x},{y},{z}",
-                                scene.kind, block.name
-                            ));
-                        }
-                    }
-                    if is_log(block.id)
-                        && !planned_timber(kind)
-                        && nearby_leaves(volume, x, y, z)
+    let min_z = volume.min_z.max(plan.bounds.min_z);
+    let max_z = (volume.min_z + volume.sz - 1).min(plan.bounds.max_z);
+    let min_x = volume.min_x.max(plan.bounds.min_x);
+    let max_x = (volume.min_x + volume.sx - 1).min(plan.bounds.max_x);
+    for z in min_z..=max_z {
+        for x in min_x..=max_x {
+            if !plan.strips_trees(x, z) {
+                continue;
+            }
+            let kind = plan.occ.kind(x, z);
+            let where_ = plan
+                .scene_at(x, z)
+                .map_or_else(|| "town".to_string(), |scene| format!("{:?}", scene.kind));
+            for y in volume.min_y..volume.min_y + volume.sy {
+                let Some(state) = volume.get(x, y, z) else {
+                    continue;
+                };
+                if state.is_air() {
+                    continue;
+                }
+                let block = Block::from_state_id(state.id);
+                if is_water_plant(block.id) {
+                    fails.push(format!(
+                        "{where_} water-plant {} at {x},{y},{z}",
+                        block.name
+                    ));
+                    continue;
+                }
+                if is_leaf_or_plant(block.id) {
+                    let below_air = volume
+                        .get(x, y - 1, z)
+                        .is_none_or(pumpkin_data::BlockState::is_air);
+                    if below_air
+                        && !adjacent_log(volume, x, y, z)
                         && y + 4 >= plan.heights.height(x, z)
+                        && !planned_timber(kind)
                     {
                         fails.push(format!(
-                            "{:?} feature tree at {x},{y},{z} kind={kind:?}",
-                            scene.kind
+                            "{where_} floating {} at {x},{y},{z} kind={kind:?}",
+                            block.name
                         ));
                     }
+                }
+                if is_log(block.id)
+                    && !planned_timber(kind)
+                    && nearby_leaves(volume, x, y, z)
+                    && y + 4 >= plan.heights.height(x, z)
+                {
+                    fails.push(format!(
+                        "{where_} feature tree at {x},{y},{z} kind={kind:?}"
+                    ));
                 }
             }
         }
@@ -1268,17 +1274,22 @@ mod tests {
             let mut stone = 0;
             let mut rose_lo = i32::MAX;
             let mut rose_hi = i32::MIN;
-            let cy = floor + 11;
+            let cy = floor + 13;
+            let mut purple = 0;
+            let mut yellow = 0;
+            let mut petals = 0;
             for z in min_z..=max_z {
-                for y in cy - 5..=cy + 5 {
+                for y in cy - 6..=cy + 6 {
                     if let Some(state) = volume.get(nave_west, y, z) {
                         let id = Block::from_state_id(state.id).id;
                         let is_glass = id == Block::PURPLE_STAINED_GLASS.id
                             || id == Block::YELLOW_STAINED_GLASS.id
                             || id == Block::PURPLE_STAINED_GLASS_PANE.id
                             || id == Block::YELLOW_STAINED_GLASS_PANE.id;
-                        let d2 = (y - cy) * (y - cy) + (z - cz) * (z - cz);
-                        if d2 > 25 {
+                        let dy = y - cy;
+                        let dz = z - cz;
+                        let d2 = dy * dy + dz * dz;
+                        if d2 > 36 {
                             continue;
                         }
                         if is_glass || id == Block::CALCITE.id {
@@ -1288,17 +1299,33 @@ mod tests {
                         if is_glass {
                             glass += 1;
                         }
+                        if id == Block::PURPLE_STAINED_GLASS.id
+                            || id == Block::PURPLE_STAINED_GLASS_PANE.id
+                        {
+                            purple += 1;
+                        }
+                        if id == Block::YELLOW_STAINED_GLASS.id
+                            || id == Block::YELLOW_STAINED_GLASS_PANE.id
+                        {
+                            yellow += 1;
+                        }
                         if id == Block::CALCITE.id {
                             stone += 1;
+                            if dy.abs() * 2 == dz.abs() || dz.abs() * 2 == dy.abs() {
+                                petals += 1;
+                            }
                         }
                     }
                 }
             }
-            assert!(glass >= 8, "rose glass {glass}");
-            assert!(stone >= 12, "rose tracery {stone}");
+            assert!(glass >= 12, "rose glass {glass}");
+            assert!(stone >= 16, "rose tracery {stone}");
+            assert!(purple >= 4, "rose purple glass {purple}");
+            assert!(yellow >= 4, "rose yellow glass {yellow}");
+            assert!(petals >= 8, "rose 12-petal spokes {petals}");
             assert!(
-                rose_hi - rose_lo >= 10,
-                "rose should be at least 11 wide, span={}",
+                rose_hi - rose_lo >= 12,
+                "rose should be at least 13 wide, span={}",
                 rose_hi - rose_lo + 1
             );
         }
@@ -1477,8 +1504,8 @@ mod tests {
         let cz = nave.center().1;
         let wall_x = nave.min_x;
         let mut dark = 0;
-        for z in cz - 5..=cz + 5 {
-            for y in floor + 6..=floor + 16 {
+        for z in cz - 6..=cz + 6 {
+            for y in floor + 7..=floor + 19 {
                 if let Some(state) = volume.get(wall_x, y, z) {
                     let id = Block::from_state_id(state.id).id;
                     if id == Block::DEEPSLATE_TILES.id
@@ -1512,88 +1539,83 @@ mod tests {
         crate::height::register_world_gen(Arc::clone(&world_gen));
         crate::marker::register_hooks(world_gen.extensions());
         let plan = crate::plan::plan_for(seed, 0, 0, &world_gen);
-        let mut region = plan.market.inflate(8);
-        for scene in &plan.scenes {
-            if !matches!(
-                scene.kind,
-                crate::scenes::SceneKind::Harbour
-                    | crate::scenes::SceneKind::Mine
-                    | crate::scenes::SceneKind::Tourney
-                    | crate::scenes::SceneKind::Plaza
-                    | crate::scenes::SceneKind::Frontier
-            ) {
-                continue;
-            }
-            let mut rect = scene.rect;
-            if scene.kind == crate::scenes::SceneKind::Harbour {
-                if let Some(hull) = largest_ship(&plan) {
-                    rect = hull.inflate(12);
-                } else if rect.width() > 48 || rect.depth() > 48 {
-                    let (cx, cz) = rect.center();
-                    rect = Rect::new(cx - 24, cz - 24, cx + 23, cz + 23);
-                }
-            } else if rect.width() > 48 || rect.depth() > 48 {
-                let (cx, cz) = rect.center();
-                rect = Rect::new(cx - 24, cz - 24, cx + 23, cz + 23);
-            }
-            region = Rect::new(
-                region.min_x.min(rect.min_x),
-                region.min_z.min(rect.min_z),
-                region.max_x.max(rect.max_x),
-                region.max_z.max(rect.max_z),
-            );
-        }
+        // Whole town plan: walled town plus the market crop. Hinterland
+        // scenes are stamped in their own chunks; unioning them here would
+        // generate the forest between town and harbour.
+        let market = plan.market.inflate(16);
+        let region = Rect::new(
+            plan.town.min_x.min(market.min_x) - 4,
+            plan.town.min_z.min(market.min_z) - 4,
+            plan.town.max_x.max(market.max_x) + 4,
+            plan.town.max_z.max(market.max_z) + 4,
+        );
         let volume = crate::chunk_fill::fill_volume_from_chunks_in(&plan, &world_gen, region);
-        let fails: Vec<String> = check_scene_vegetation(&plan, &volume)
-            .into_iter()
-            .filter(|line| {
-                line.contains("Harbour")
-                    || line.contains("Plaza")
-                    || line.contains("Mine")
-                    || line.contains("Tourney")
-                    || line.contains("Frontier")
-            })
-            .collect();
+        let fails = check_scene_vegetation(&plan, &volume);
         assert!(
             fails.is_empty(),
-            "feature trees / floating plants in scene yards:\n{}",
+            "feature trees / floating plants in the town plan:\n{}",
             fails.join("\n")
         );
     }
 
-    fn largest_ship(plan: &crate::plan::TownPlan) -> Option<Rect> {
-        let mut best: Option<Rect> = None;
-        let mut best_n = 0;
-        for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
-            for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
-                if plan.occ.kind(x, z) != CellKind::Ship {
+    #[test]
+    fn planned_block_returns_damaged_variant_until_repaired() {
+        let origin = town_in_cell(99, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let plan = build_plan(99, origin, grid, PaletteKind::Oak);
+        let id = crate::info::town_id(plan.seed, plan.origin.cell_x, plan.origin.cell_z);
+        let _guard = DamageGuard(id.clone());
+        crate::damage::set_damage_state(&id, crate::damage::DamageState::Scarred);
+        assert_eq!(
+            crate::damage::damage_state(&id),
+            crate::damage::DamageState::Scarred
+        );
+        let volume = fill_volume(&plan);
+        let mut scars = 0;
+        for z in plan.town.min_z..=plan.town.max_z {
+            for x in plan.town.min_x..=plan.town.max_x {
+                if !matches!(
+                    plan.occ.kind(x, z),
+                    CellKind::TownWall | CellKind::TownTower
+                ) {
                     continue;
                 }
-                if best.is_some_and(|rect| rect.contains(x, z)) {
-                    continue;
-                }
-                let mut min_x = x;
-                let mut max_x = x;
-                let mut min_z = z;
-                let mut max_z = z;
-                for dz in -10..=10 {
-                    for dx in -10..=10 {
-                        if plan.occ.kind(x + dx, z + dz) == CellKind::Ship {
-                            min_x = min_x.min(x + dx);
-                            max_x = max_x.max(x + dx);
-                            min_z = min_z.min(z + dz);
-                            max_z = max_z.max(z + dz);
-                        }
+                let floor = crate::stamp::ridge_floor(&plan, Rect::new(x, z, x, z));
+                for y in floor + 2..=floor + 4 {
+                    if volume
+                        .get(x, y, z)
+                        .is_some_and(pumpkin_data::BlockState::is_air)
+                    {
+                        scars += 1;
                     }
                 }
-                let blob = Rect::new(min_x, min_z, max_x, max_z);
-                let n = blob.width() * blob.depth();
-                if n > best_n {
-                    best_n = n;
-                    best = Some(blob);
+                if volume
+                    .get(x, plan.heights.height(x, z), z)
+                    .is_some_and(|s| Block::from_state_id(s.id).id == Block::COAL_BLOCK.id)
+                {
+                    scars += 1;
                 }
             }
         }
-        best
+        assert!(
+            scars >= 4,
+            "scarred curtain should punch holes/scorch {scars}"
+        );
+    }
+
+    struct DamageGuard(String);
+    impl Drop for DamageGuard {
+        fn drop(&mut self) {
+            crate::damage::set_damage_state(&self.0, crate::damage::DamageState::Intact);
+        }
     }
 }

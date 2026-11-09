@@ -323,7 +323,7 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));
             }
-            SceneKind::Cathedral | SceneKind::Mine => {
+            SceneKind::Cathedral | SceneKind::Mine | SceneKind::Riverside => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::Workstation, cx, cz));
             }
