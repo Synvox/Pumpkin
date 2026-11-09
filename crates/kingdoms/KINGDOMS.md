@@ -577,7 +577,8 @@ Plots: `/opt/cursor/artifacts/soak-r11-branch-summary.json`, `soak-r11-branch2-s
 | `/kingdom deploy [town]` | teleport to the threatened gate (live surface Y, not the keep roof); abstract fronts materialise on a staggered warmup |
 | `/kingdom stats` | your rank, renown, kills, captures, defenses |
 | `/kingdom fire` | loose a camp trebuchet at the threatened wall (stand at the anvil) |
-| `/kingdom rally [follow\|hold\|charge]` | Freeman+ orders nearby bot soldiers (default follow). A goat horn cycles the same orders. |
+| `/kingdom rally [follow\|hold\|charge]` | Freeman+ orders nearby bot soldiers (default follow). A goat horn or `/kingdom horn` cycles the same orders. |
+| `/kingdom rank set <rank>` | op: grant levy/freeman/sergeant/knight/banneret without farming kills |
 | `/raid start <town> [size] [defenders]` | start a pillager raid. Optional `defenders` is how many kingdom combatants to field (extras spawn at the threatened gate). |
 | `/raid retake <town> [size]` | kingdom counter-raid to retake a pillager-owned town |
 | `/raid stop` | stop all kingdoms raids |

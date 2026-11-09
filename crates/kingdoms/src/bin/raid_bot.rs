@@ -49,7 +49,7 @@ use pumpkin_protocol::java::server::handshake::SHandShake;
 use pumpkin_protocol::java::server::login::{SLoginAcknowledged, SLoginStart};
 use pumpkin_protocol::java::server::play::{
     SAttack, SChatCommand, SClientCommand, SConfirmTeleport, SKeepAlive, SPlayerLoaded,
-    SPlayerPosition, SPlayerPositionRotation, SSwingArm,
+    SPlayerPosition, SPlayerPositionRotation, SSwingArm, SUseItem,
 };
 use pumpkin_protocol::packet::MultiVersionJavaPacket;
 use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
@@ -1132,11 +1132,49 @@ async fn main() -> ExitCode {
     }
     println!("standing; holding for {}s", args.seconds);
     for cmd in &args.commands {
+        if let Some(secs) = cmd.strip_prefix("wait:") {
+            let n: u64 = match secs.parse() {
+                Ok(n) => n,
+                Err(err) => {
+                    eprintln!("wait: {err}");
+                    return ExitCode::from(2);
+                }
+            };
+            println!("WAIT {n}s");
+            if let Err(err) = bot.pump(Duration::from_secs(n)).await {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+            continue;
+        }
+        if cmd == "horn" {
+            println!("HORN");
+            if let Err(err) = bot
+                .send_packet(&SUseItem {
+                    hand: VarInt(0),
+                    sequence: VarInt(1),
+                    yaw: bot.yaw,
+                    pitch: bot.pitch,
+                })
+                .await
+            {
+                eprintln!("horn failed: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = bot.pump(Duration::from_secs(2)).await {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+            continue;
+        }
         if let Err(err) = bot.chat_command(cmd).await {
             eprintln!("command failed: {err}");
             return ExitCode::from(1);
         }
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        if let Err(err) = bot.pump(Duration::from_millis(1500)).await {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
     }
     if args.fight {
         if let Err(err) = fight_loop(&mut bot, &args.kingdom, args.seconds, stand).await {

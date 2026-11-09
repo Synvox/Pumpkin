@@ -48,7 +48,7 @@ const MELEE_SPEED: f64 = 1.1;
 const DIRECT_RANGE_SQ: f64 = DIRECT_RANGE * DIRECT_RANGE;
 
 /// Destination a post-walking goal is heading toward.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PostTarget {
     pub x: i32,
     pub y: i32,

@@ -97,11 +97,11 @@ const REPAIR_SCAN_COLUMNS: usize = 1;
 const COMBAT_LOG_CAP: usize = 512;
 const RESPAWN_PERIOD: u32 = 200;
 /// Force-load tickets and garrison before the first soldier spawns (~5 s).
-const WARM_TICKS: u32 = 100;
+const WARM_TICKS: u32 = 120;
 /// Tickets applied per town per director tick during warmup.
 const TICKETS_PER_TICK: usize = 1;
-/// Cap across every town so two fronts cannot watch-chunk on the same tick.
-const TICKETS_PER_WORLD_TICK: u32 = 1;
+/// One ticket per live front; idle towns must not consume these.
+const TICKETS_PER_WORLD_TICK: u32 = 3;
 /// Ownership flips (persist, webhook, credit) committed per director tick.
 const CAPTURES_PER_TICK: usize = 1;
 /// Soldiers (raiders, extras, garrison) spawned per town per director tick.
@@ -121,6 +121,8 @@ const HOLD_LOCKOUT_TICKS: u32 = 400;
 /// Trebuchet-hole blocks restored per director tick (the 45-block dump was a 629 ms hitch).
 const PUNCH_REPAIR_PER_TICK: usize = 2;
 const PUNCH_BREAK_PER_TICK: usize = 2;
+/// Iron-bar portcullis cells written per town per tick.
+const PORTCULLIS_BARS_PER_TICK: usize = 2;
 /// Civilians kitted from the armoury per tick when the bell rings.
 const ARM_PER_TICK: usize = 4;
 /// Log a director phase that ran longer than this.
@@ -386,6 +388,7 @@ struct TownWar {
     punch_repair: Vec<RepairJob>,
     punch_repair_at: u32,
     punch_break: Vec<engines::PunchHit>,
+    pending_bars: Vec<BlockPos>,
     crossed_curtain: bool,
     logged_archer: bool,
     logged_sally: bool,
@@ -535,7 +538,9 @@ impl Director {
                     return 0;
                 };
                 if raid.materialized {
-                    w.wired.len() + raid.living.len()
+                    // Soldiers only. Militia and named civilians sit in `wired`
+                    // after the bell and must not eat KINGDOMS_BODY_BUDGET.
+                    raid.living.len() + raid.temps.len()
                 } else {
                     0
                 }
@@ -644,11 +649,9 @@ impl Director {
             PLAYER_LIVE_RANGE,
         );
         let materialized = near && self.live_body_count() < body_budget();
-        let warm_until = if materialized {
-            tick.saturating_add(WARM_TICKS)
-        } else {
-            tick
-        };
+        // Always warm tickets, including abstract raids, so first contact
+        // does not apply a town's tickets on the same tick bodies spawn.
+        let warm_until = tick.saturating_add(WARM_TICKS);
         let virt_raiders = spec.raiders;
         let virt_defenders = spec.extra_defenders;
         if let Some(war) = self.towns.get_mut(town_id) {
@@ -681,6 +684,7 @@ impl Director {
             war.punch_repair.clear();
             war.punch_repair_at = 0;
             war.punch_break.clear();
+            war.pending_bars.clear();
             war.crossed_curtain = false;
             war.logged_archer = false;
             war.logged_sally = false;
@@ -1124,6 +1128,7 @@ impl TownWar {
             punch_repair: Vec::new(),
             punch_repair_at: 0,
             punch_break: Vec::new(),
+            pending_bars: Vec::new(),
             crossed_curtain: false,
             logged_archer: false,
             logged_sally: false,
@@ -1562,26 +1567,6 @@ fn keep_stand_plan(kingdom: &KingdomId, towns: &HashMap<String, TownWar>) -> Opt
     })
 }
 
-fn structure_column(kind: crate::cells::CellKind) -> bool {
-    matches!(
-        kind,
-        crate::cells::CellKind::CastleKeep
-            | crate::cells::CellKind::CastleWall
-            | crate::cells::CellKind::CastleTower
-            | crate::cells::CellKind::CastleGate
-            | crate::cells::CellKind::CastleInnerWall
-            | crate::cells::CellKind::CastleHall
-            | crate::cells::CellKind::CastleChapel
-            | crate::cells::CellKind::CastleBarbican
-            | crate::cells::CellKind::CastleBarracks
-            | crate::cells::CellKind::CastleKitchen
-            | crate::cells::CellKind::CastleStables
-            | crate::cells::CellKind::TownWall
-            | crate::cells::CellKind::TownGate
-            | crate::cells::CellKind::TownTower
-    )
-}
-
 fn pick_keep_stand(
     world: &World,
     kingdom: &KingdomId,
@@ -1617,21 +1602,17 @@ fn pick_keep_stand(
             );
             return Some(stand);
         }
+        // Plan heights only. Sampling the live world here was a 7–15 s hitch
+        // that blocked other players from logging in.
+        let y = town_plan.heights.height(plan.keep.x, plan.keep.z) + 1;
+        return Some((plan.keep.x, y, plan.keep.z));
     }
     Some(siege::pick_safe_stand(
         plan.keep,
         plan.court,
         &plan.fallbacks,
         |x, z| world_stand_y(world, x, z),
-        |x, y, z| {
-            if occ
-                .as_ref()
-                .is_some_and(|p| structure_column(p.occ.kind(x, z)))
-            {
-                return true;
-            }
-            world_column_solid(world, x, y, z)
-        },
+        |x, y, z| world_column_solid(world, x, y, z),
     ))
 }
 
@@ -1978,17 +1959,21 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             .is_some_and(|w| w.raid.as_ref().is_some_and(|r| r.materialized))
     };
     let near = town_has_nearby_player(world, town_id);
-    if !materialized {
+    if materialized {
+        tick_raid_warmup(world, town_id, tick);
+        if tickets_pending(town_id) || raid_still_warming(town_id, tick) {
+            return;
+        }
+    } else {
         tick_abstract_raid(world, town_id, tick);
         if town_has_player_within(world, town_id, PLAYER_APPROACH_RANGE) {
-            queue_raid_warmup(world, town_id);
-            tick_raid_warmup(world, town_id, tick);
+            queue_raid_warmup(town_id);
         }
-        if !near {
+        tick_raid_warmup(world, town_id, tick);
+        if !near || tickets_pending(town_id) {
             return;
         }
     }
-    tick_raid_warmup(world, town_id, tick);
     let (bounds, kingdom, alarm_before, camps, gates) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
@@ -2306,9 +2291,15 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 .map(|w| w.scene.gates().to_vec())
                 .unwrap_or_default()
         };
-        siege::close_gates(world, &gates, |x, z| {
+        let cells = siege::portcullis_cells(world, &gates, |x, z| {
             standing_y(world, ScenePost::new(x, z))
         });
+        {
+            let mut dir = lock();
+            if let Some(war) = dir.towns.get_mut(town_id) {
+                war.pending_bars = cells;
+            }
+        }
         if let Some(gate) = gates.first() {
             let mut dir = lock();
             let tick = dir.tick;
@@ -2323,6 +2314,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             });
         }
     }
+    apply_pending_bars(world, town_id);
 
     // Director-owned combat: NoAI + flow-field slide. Vanilla melee/bow/path
     // goals stay off during a raid so 200 vs 200 does not A* or shove.
@@ -2439,6 +2431,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     let mut n_ranged = 0u32;
     let mut n_arrows = 0u32;
     let mut n_repair = 0u32;
+    let mut squad_n = 0u32;
     let mut ram_at_gate = false;
     let mut raiders_in_keep = 0u32;
     let mut defenders_in_keep = 0u32;
@@ -2605,7 +2598,11 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             keep_dest,
             civilian_duty(base, id),
         );
-        let dest = overlay_squad_order(dest, faction, pos.x, pos.z, &squads, march_dest);
+        let squad_dest = overlay_squad_order(dest, faction, pos.x, pos.z, &squads, march_dest);
+        if squad_dest != dest {
+            squad_n += 1;
+        }
+        let dest = squad_dest;
         if matches!(faction, Faction::Pillager) && ladders_placed {
             let near_ladders =
                 (pos.x - f64::from(ladder_dest.x)).hypot(pos.z - f64::from(ladder_dest.z)) < 10.0;
@@ -2798,6 +2795,15 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         let town = town_id.to_owned();
         std::thread::spawn(move || dump_live_plots(Some(&town)));
     }
+    if squad_n > 0 && tick.is_multiple_of(20) {
+        let order = squads.first().map_or("none", |s| s.order.as_str());
+        tracing::info!(
+            town = town_id,
+            order,
+            soldiers = squad_n,
+            "kingdoms squad soldiers"
+        );
+    }
     if tick.is_multiple_of(100) && (alarm || n_repair > 0 || n_arrows > 0) {
         let n_entities = snapshots.len();
         tracing::info!(
@@ -2848,7 +2854,6 @@ fn spawn_soldiers_this_tick(world: &Arc<World>, town_id: &str, tick: u32) {
         if n > 0 {
             spawn_extra_defenders(world, town_id, n as u16);
         }
-        return;
     }
     spawn_wave_batch(world, town_id, tick);
 }
@@ -2972,6 +2977,7 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         return;
     }
     let mut spawned_ids = Vec::new();
+    let mut leftover = Vec::new();
     for (i, member) in &batch {
         let vindicator = member.entity_type == &EntityType::VINDICATOR;
         let job = MarchJob::assign(*i, vindicator);
@@ -2997,6 +3003,8 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         let id = base.get_entity().entity_id;
         if world.spawn_entity(base) {
             spawned_ids.push(id);
+        } else {
+            leftover.push(*member);
         }
     }
     let mut dir = lock();
@@ -3005,6 +3013,8 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         && let Some(raid) = &mut war.raid
         && raid.id == raid_id
     {
+        leftover.append(&mut raid.pending_members);
+        raid.pending_members = leftover;
         raid.spawn_cursor = raid.spawn_cursor.saturating_add(spawned_ids.len() as u16);
         raid.living.extend(spawned_ids.iter().copied());
         if raid.pending_members.is_empty() {
@@ -3125,14 +3135,7 @@ pub fn rebind_if_needed(entity: &dyn EntityBase) {
 /// Public start-raid used by commands and a future HTTP director.
 pub fn start_raid(world: &Arc<World>, town_id: &str, spec: RaidSpec) -> Result<RaidId, String> {
     let id = lock().start_raid(world, town_id, spec)?;
-    let live = lock()
-        .towns
-        .get(town_id)
-        .and_then(|w| w.raid.as_ref())
-        .is_some_and(|r| r.materialized);
-    if live {
-        queue_raid_warmup(world, town_id);
-    }
+    queue_raid_warmup(town_id);
     Ok(id)
 }
 
@@ -3154,7 +3157,7 @@ pub fn flow_waypoint(town_id: &str, x: f64, z: f64, dest: PostTarget) -> (f64, f
     field.waypoint(x, z)
 }
 
-fn queue_raid_warmup(world: &Arc<World>, town_id: &str) {
+fn queue_raid_warmup(town_id: &str) {
     let Some((chunks, camp, keep)) = raid_chunk_list(town_id) else {
         return;
     };
@@ -3180,10 +3183,20 @@ fn queue_raid_warmup(world: &Arc<World>, town_id: &str) {
         keep_z = keep.z,
         "kingdoms raid warmup queued"
     );
-    // Read tick first: `tick_raid_warmup(..., lock().tick)` would keep the
-    // director mutex live across the call and deadlock on the inner lock.
-    let tick = lock().tick;
-    tick_raid_warmup(world, town_id, tick);
+}
+
+fn tickets_pending(town_id: &str) -> bool {
+    let dir = lock();
+    dir.towns
+        .get(town_id)
+        .is_some_and(|w| w.ticket_cursor < w.pending_tickets.len())
+}
+
+fn raid_still_warming(town_id: &str, tick: u32) -> bool {
+    let dir = lock();
+    dir.towns
+        .get(town_id)
+        .is_some_and(|w| w.raid.as_ref().is_some_and(|r| tick < r.warm_until))
 }
 
 fn take_ticket_slots(want: u32) -> u32 {
@@ -3206,6 +3219,15 @@ fn take_ticket_slots(want: u32) -> u32 {
 }
 
 fn tick_raid_warmup(world: &Arc<World>, town_id: &str, tick: u32) {
+    let has_work = {
+        let dir = lock();
+        dir.towns
+            .get(town_id)
+            .is_some_and(|w| w.ticket_cursor < w.pending_tickets.len())
+    };
+    if !has_work {
+        return;
+    }
     let slots = take_ticket_slots(TICKETS_PER_TICK as u32) as usize;
     if slots == 0 {
         return;
@@ -3215,7 +3237,7 @@ fn tick_raid_warmup(world: &Arc<World>, town_id: &str, tick: u32) {
         let Some(war) = dir.towns.get_mut(town_id) else {
             return;
         };
-        if war.raid.is_none() || war.ticket_cursor >= war.pending_tickets.len() {
+        if war.ticket_cursor >= war.pending_tickets.len() {
             return;
         }
         let start = war.ticket_cursor;
@@ -3234,25 +3256,9 @@ fn tick_raid_warmup(world: &Arc<World>, town_id: &str, tick: u32) {
     if batch.is_empty() {
         return;
     }
-    {
-        let mut forced = world
-            .forced_chunks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for pos in &batch {
-            forced.insert(*pos);
-        }
-    }
     apply_force_tickets(world, &batch, true);
-    let loaded_world = Arc::clone(world);
-    let level = Arc::clone(&world.level);
+    flush_tickets_off_tick(world, batch.clone(), true);
     let n = batch.len();
-    world.level.spawn_task(async move {
-        for pos in &batch {
-            level.get_or_fetch_chunk(*pos, |_| ()).await;
-        }
-        loaded_world.update_active_chunks();
-    });
     tracing::info!(
         town = town_id,
         tick,
@@ -3273,6 +3279,19 @@ fn apply_force_tickets(world: &World, chunks: &[Vector2<i32>], add: bool) {
     if chunks.is_empty() {
         return;
     }
+    {
+        let mut forced = world
+            .forced_chunks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for pos in chunks {
+            if add {
+                forced.insert(*pos);
+            } else {
+                forced.remove(pos);
+            }
+        }
+    }
     let mut loading = world
         .level
         .chunk_loading
@@ -3285,6 +3304,32 @@ fn apply_force_tickets(world: &World, chunks: &[Vector2<i32>], add: bool) {
             loading.remove_force_ticket(*pos);
         }
     }
+}
+
+/// Flush ticket changes and fetch chunks off the director tick.
+/// `send_change` on the tick was the 200–470 ms first-contact hitch.
+fn flush_tickets_off_tick(world: &Arc<World>, chunks: Vec<Vector2<i32>>, fetch: bool) {
+    if chunks.is_empty() {
+        return;
+    }
+    let loaded_world = Arc::clone(world);
+    let level = Arc::clone(&world.level);
+    world.level.spawn_task(async move {
+        send_ticket_change(&level);
+        if fetch {
+            for pos in &chunks {
+                level.get_or_fetch_chunk(*pos, |_| ()).await;
+            }
+        }
+        loaded_world.update_active_chunks();
+    });
+}
+
+fn send_ticket_change(level: &pumpkin_world::level::Level) {
+    let mut loading = level
+        .chunk_loading
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     loading.send_change();
 }
 
@@ -3677,6 +3722,7 @@ fn drain_pending_work(world: &Arc<World>, town_id: &str) {
     };
     despawn_entities(world, &despawn);
     apply_force_tickets(world, &tickets, false);
+    flush_tickets_off_tick(world, tickets, false);
 }
 
 fn credit_nearby(keep: ScenePost, kingdom: Option<&str>, captures: u32, defenses: u32) {
@@ -4186,6 +4232,29 @@ fn apply_punch_repair(world: &Arc<World>, town_id: &str, tick: u32) {
     }
 }
 
+fn apply_pending_bars(world: &Arc<World>, town_id: &str) {
+    let cells = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        if war.pending_bars.is_empty() {
+            return;
+        }
+        let n = war.pending_bars.len().min(PORTCULLIS_BARS_PER_TICK);
+        war.pending_bars.drain(..n).collect::<Vec<_>>()
+    };
+    let mut placed = 0u32;
+    for pos in cells {
+        if siege::place_portcullis_bar(world, pos) {
+            placed += 1;
+        }
+    }
+    if placed > 0 {
+        tracing::info!(town = town_id, placed, "kingdoms portcullis bars placed");
+    }
+}
+
 /// Player looses a shot at the threatened wall of an active raid.
 pub fn try_fire_trebuchet(player: &Player) -> Result<String, String> {
     let world = Arc::clone(&player.get_entity().world.load());
@@ -4324,6 +4393,33 @@ pub fn try_rally(player: &Player, order: SquadOrder) -> Result<String, String> {
     ))
 }
 
+/// Op/test path: grant a rank without farming kills.
+pub fn set_player_rank(player: &Player, rank: siege::Rank) -> Result<String, String> {
+    let uuid = player.gameprofile.id.to_string();
+    let kingdom = {
+        let mut dir = lock();
+        let Some(kingdom) = dir.player_kingdom(&uuid).cloned() else {
+            return Err("join a kingdom first".to_owned());
+        };
+        let stats = dir.player_stats.entry(uuid).or_default();
+        stats.kills = stats.kills.max(rank.min_kills());
+        dir.persist_dirty = true;
+        kingdom
+    };
+    kit_player(player, &kingdom, rank, false);
+    announce_rank(player, rank);
+    tracing::info!(
+        player = %player.gameprofile.name,
+        rank = rank.as_str(),
+        "kingdoms rank set"
+    );
+    Ok(format!(
+        "{} is now a {}",
+        player.gameprofile.name,
+        rank.as_str()
+    ))
+}
+
 /// Goat horn: cycle follow → hold → charge for a ranked player.
 pub fn try_horn(player: &Player) -> Result<String, String> {
     let uuid = player.gameprofile.id.to_string();
@@ -4333,6 +4429,11 @@ pub fn try_horn(player: &Player) -> Result<String, String> {
             .get(&uuid)
             .map_or(SquadOrder::Follow, |c| c.order.next())
     };
+    tracing::info!(
+        player = %player.gameprofile.name,
+        order = next.as_str(),
+        "kingdoms horn"
+    );
     try_rally(player, next)
 }
 
@@ -5273,7 +5374,7 @@ fn sync_front_lod(world: &Arc<World>, town_id: &str, tick: u32) {
     }
 }
 
-fn materialize_raid(world: &Arc<World>, town_id: &str, tick: u32) {
+fn materialize_raid(_world: &Arc<World>, town_id: &str, tick: u32) {
     {
         let mut dir = lock();
         let Some(war) = dir.towns.get_mut(town_id) else {
@@ -5283,7 +5384,9 @@ fn materialize_raid(world: &Arc<World>, town_id: &str, tick: u32) {
             return;
         };
         raid.materialized = true;
-        raid.warm_until = tick.saturating_add(WARM_TICKS);
+        if raid.warm_until <= tick {
+            raid.warm_until = tick.saturating_add(WARM_TICKS);
+        }
         raid.spawned_this_wave = 0;
         raid.wave = 0;
         raid.last_wave_tick = tick;
@@ -5296,7 +5399,7 @@ fn materialize_raid(world: &Arc<World>, town_id: &str, tick: u32) {
             raid.pending_retake = 0;
         }
     }
-    queue_raid_warmup(world, town_id);
+    queue_raid_warmup(town_id);
     tracing::info!(town = town_id, tick, "kingdoms raid materialised");
 }
 
@@ -5345,6 +5448,7 @@ fn dematerialize_raid(world: &Arc<World>, town_id: &str) {
     };
     despawn_entities(world, &despawn);
     apply_force_tickets(world, &tickets, false);
+    flush_tickets_off_tick(world, tickets, false);
     tracing::info!(
         town = town_id,
         leftover = despawn.len(),
@@ -5436,6 +5540,7 @@ fn finish_abstract_victory(world: &Arc<World>, town_id: &str, tick: u32) {
         tickets
     };
     apply_force_tickets(world, &tickets, false);
+    flush_tickets_off_tick(world, tickets, false);
     tracing::info!(town = town_id, "kingdoms abstract raid defeated");
 }
 
@@ -5583,22 +5688,13 @@ fn spawn_extra_defenders(world: &Arc<World>, town_id: &str, max: u16) {
         return;
     }
     let (kingdom, gate, extra, cursor) = {
-        let mut dir = lock();
-        let Some(war) = dir.towns.get_mut(town_id) else {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
             return;
         };
-        let home = Faction::Kingdom(war.kingdom.clone());
-        let have = war
-            .wired
-            .values()
-            .filter(|w| is_allied(&w.faction, &home))
-            .count() as u16;
-        let Some(raid) = war.raid.as_mut() else {
+        let Some(raid) = war.raid.as_ref() else {
             return;
         };
-        if raid.temps.is_empty() {
-            raid.extra_left = raid.extra_left.saturating_sub(have);
-        }
         let gate = war.threatened.unwrap_or_else(|| war.scene.keep());
         (
             war.kingdom.clone(),
@@ -5706,6 +5802,7 @@ pub fn stop_raid(town_id: Option<&str>) -> u32 {
     for world in worlds {
         despawn_entities(&world, &despawn);
         apply_force_tickets(&world, &tickets, false);
+        flush_tickets_off_tick(&world, tickets.clone(), false);
     }
     n
 }
@@ -5825,7 +5922,7 @@ pub fn deploy_player(player: &Player, town_arg: Option<&str>) -> Result<String, 
         let live = war.raid.as_ref().is_some_and(|r| r.materialized);
         (kingdom, town_id, post, live)
     };
-    queue_raid_warmup(&world, &town_id);
+    queue_raid_warmup(&town_id);
     if !live {
         let tick = lock().tick;
         materialize_raid(&world, &town_id, tick);
@@ -6145,8 +6242,9 @@ mod tests {
         assert_eq!(DESPAWNS_PER_TICK, 12);
         assert_eq!(REPAIR_SCAN_COLUMNS, 1);
         assert_eq!(TICKETS_PER_TICK, 1);
-        assert_eq!(TICKETS_PER_WORLD_TICK, 1);
+        assert_eq!(TICKETS_PER_WORLD_TICK, 3);
         assert_eq!(CAPTURES_PER_TICK, 1);
+        assert_eq!(PORTCULLIS_BARS_PER_TICK, 2);
     }
 
     #[test]
@@ -6381,6 +6479,7 @@ mod tests {
         assert_eq!(SquadOrder::Follow.next(), SquadOrder::Hold);
         assert_eq!(PUNCH_REPAIR_PER_TICK, 2);
         assert_eq!(PUNCH_BREAK_PER_TICK, 2);
+        assert_eq!(PORTCULLIS_BARS_PER_TICK, 2);
         assert!((PHASE_WARN_MS - 20.0).abs() < f64::EPSILON);
     }
 }

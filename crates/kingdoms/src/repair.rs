@@ -5,7 +5,6 @@
 
 use pumpkin_core::world::World;
 use pumpkin_util::math::position::BlockPos;
-use pumpkin_world::world::BlockFlags;
 use std::sync::Arc;
 
 use crate::plan::TownPlan;
@@ -126,7 +125,7 @@ pub fn place_one(world: &Arc<World>, job: RepairJob) -> bool {
     world.set_block_state(
         &pos,
         pumpkin_data::BlockStateId::new_or_air(job.state),
-        BlockFlags::NOTIFY_LISTENERS | BlockFlags::SKIP_DROPS,
+        crate::siege::SIEGE_PLACE_FLAGS,
     );
     true
 }

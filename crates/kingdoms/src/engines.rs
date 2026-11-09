@@ -15,7 +15,6 @@ use pumpkin_data::block_properties::{HorizontalFacing, LadderLikeProperties};
 use pumpkin_data::entity::EntityType;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
-use pumpkin_world::world::BlockFlags;
 use std::sync::Arc;
 
 use crate::geom::Rect;
@@ -227,7 +226,7 @@ pub fn apply_punch_hit(world: &Arc<World>, hit: PunchHit) -> bool {
     world.set_block_state(
         &pos,
         Block::AIR.default_state.id,
-        BlockFlags::NOTIFY_LISTENERS | BlockFlags::SKIP_DROPS,
+        crate::siege::SIEGE_PLACE_FLAGS,
     );
     true
 }
@@ -280,11 +279,7 @@ pub fn place_assault_ladders(
         if block.id == Block::LADDER.id {
             continue;
         }
-        world.set_block_state(
-            &pos,
-            ladder_facing(fx, fz),
-            BlockFlags::NOTIFY_LISTENERS | BlockFlags::SKIP_DROPS,
-        );
+        world.set_block_state(&pos, ladder_facing(fx, fz), crate::siege::SIEGE_PLACE_FLAGS);
         placed += 1;
     }
     if placed > 0 {
