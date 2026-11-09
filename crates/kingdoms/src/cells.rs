@@ -92,6 +92,18 @@ pub enum CellKind {
     FortressTower,
     /// Mountain-fortress court.
     FortressCourt,
+    /// Cathedral nave.
+    CathedralNave,
+    /// Cathedral transept.
+    CathedralTransept,
+    /// Cathedral choir and apse.
+    CathedralChoir,
+    /// West tower with spire.
+    CathedralTower,
+    /// Flying buttress / pinnacle (exterior).
+    CathedralButtress,
+    /// Palisade wall-walk between stakes.
+    PalisadeWalk,
 }
 
 impl CellKind {
@@ -131,6 +143,10 @@ impl CellKind {
                 | Self::CastleChapel
                 | Self::TownWall
                 | Self::TownTower
+                | Self::CathedralNave
+                | Self::CathedralTransept
+                | Self::CathedralChoir
+                | Self::CathedralTower
         )
     }
 }

@@ -164,8 +164,15 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
         volume,
         plan,
     );
+    push_if_any(
+        &mut buildings,
+        "cathedral",
+        collect_cathedral(plan),
+        volume,
+        plan,
+    );
     for lot in &plan.lots {
-        if matches!(lot.kind, BuildingKind::Stall | BuildingKind::Outpost) {
+        if matches!(lot.kind, BuildingKind::Stall) {
             continue;
         }
         let mut cols = collect_lot(plan, lot.id, lot.rect);
@@ -180,10 +187,7 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
         if cols.is_empty() {
             continue;
         }
-        let check_sky = !matches!(
-            lot.kind,
-            BuildingKind::Watchtower | BuildingKind::Outpost | BuildingKind::BellTower
-        );
+        let check_sky = !matches!(lot.kind, BuildingKind::Watchtower | BuildingKind::BellTower);
         buildings.push(check_columns(
             &format!("lot{}-{:?}", lot.id, lot.kind),
             cols,
@@ -256,11 +260,29 @@ fn collect_spec(
     cols
 }
 
+fn collect_cathedral(plan: &TownPlan) -> Vec<(i32, i32)> {
+    let mut cols = Vec::new();
+    for z in plan.bounds.min_z..=plan.bounds.max_z {
+        for x in plan.bounds.min_x..=plan.bounds.max_x {
+            if matches!(
+                plan.occ.kind(x, z),
+                CellKind::CathedralNave
+                    | CellKind::CathedralTransept
+                    | CellKind::CathedralChoir
+                    | CellKind::CathedralTower
+            ) {
+                cols.push((x, z));
+            }
+        }
+    }
+    cols
+}
+
 fn collect_lot(plan: &TownPlan, lot_id: u16, rect: Rect) -> Vec<(i32, i32)> {
     let mut cols = Vec::new();
     for z in rect.min_z..=rect.max_z {
         for x in rect.min_x..=rect.max_x {
-            if plan.occ.lot(x, z) == lot_id {
+            if plan.occ.lot(x, z) == lot_id && plan.occ.kind(x, z) == CellKind::Building {
                 cols.push((x, z));
             }
         }
@@ -387,6 +409,11 @@ fn flood_leak(
             if !seen.insert(n) {
                 continue;
             }
+            // Air above a building column's own roof is outside, not a room.
+            if columns.contains(&(n.0, n.2)) && volume.top(n.0, n.2).is_some_and(|(ty, _)| n.1 > ty)
+            {
+                continue;
+            }
             if is_air(volume, n.0, n.1, n.2) {
                 q.push_back(n);
             }
@@ -416,6 +443,10 @@ fn is_exterior(kind: CellKind) -> bool {
             | CellKind::FortressKeep
             | CellKind::FortressTower
             | CellKind::FortressWall
+            | CellKind::CathedralNave
+            | CellKind::CathedralTransept
+            | CellKind::CathedralChoir
+            | CellKind::CathedralTower
     )
 }
 
@@ -510,7 +541,7 @@ fn is_roof_deck(volume: &VolumeSink, x: i32, floor: i32, z: i32) -> bool {
         }
         y -= 1;
     }
-    solids >= 4
+    solids >= 4 || (solids >= 2 && floor + 1 >= top)
 }
 
 fn sees_sky(volume: &VolumeSink, x: i32, floor: i32, z: i32) -> bool {
@@ -563,6 +594,7 @@ fn is_furniture(state: Option<&BlockState>) -> bool {
         || id == Block::GLASS_PANE.id
         || id == Block::RED_STAINED_GLASS_PANE.id
         || id == Block::YELLOW_STAINED_GLASS_PANE.id
+        || id == Block::PURPLE_STAINED_GLASS_PANE.id
         || id == Block::IRON_BARS.id
         || id == Block::OAK_TRAPDOOR.id
 }
@@ -576,6 +608,9 @@ fn is_roof_block(state: &BlockState) -> bool {
         || id == Block::STONE_BRICK_STAIRS.id
         || id == Block::SANDSTONE_STAIRS.id
         || id == Block::OAK_STAIRS.id
+        || id == Block::DEEPSLATE_TILE_STAIRS.id
+        || id == Block::DEEPSLATE_TILE_SLAB.id
+        || id == Block::DEEPSLATE_TILES.id
 }
 
 #[cfg(test)]

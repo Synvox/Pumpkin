@@ -8,6 +8,7 @@ use pumpkin_world::generation::generator::WorldGenerator;
 use pumpkin_world::generation::proto_chunk::ProtoChunk;
 use rayon::prelude::*;
 
+use crate::geom::Rect;
 use crate::plan::TownPlan;
 use crate::portal::PregenPortal;
 use crate::stamp::{BlockSink, VolumeSink};
@@ -16,20 +17,30 @@ use crate::stamp::{BlockSink, VolumeSink};
 /// kingdoms decorator) and copies the result into a render volume.
 #[must_use]
 pub fn fill_volume_from_chunks(plan: &TownPlan, world_gen: &WorldGenerator) -> VolumeSink {
+    fill_volume_from_chunks_in(plan, world_gen, plan.bounds)
+}
+
+/// Same as [`fill_volume_from_chunks`], cropped to `region` (plus a 16-block pad).
+#[must_use]
+pub fn fill_volume_from_chunks_in(
+    plan: &TownPlan,
+    world_gen: &WorldGenerator,
+    region: Rect,
+) -> VolumeSink {
     let pad = 16;
-    let min_x = plan.bounds.min_x - pad;
-    let max_x = plan.bounds.max_x + pad;
-    let min_z = plan.bounds.min_z - pad;
-    let max_z = plan.bounds.max_z + pad;
+    let min_x = region.min_x - pad;
+    let max_x = region.max_x + pad;
+    let min_z = region.min_z - pad;
+    let max_z = region.max_z + pad;
     let min_cx = min_x.div_euclid(16);
     let max_cx = max_x.div_euclid(16);
     let min_cz = min_z.div_euclid(16);
     let max_cz = max_z.div_euclid(16);
     let (lo, hi) = plan.heights.range(
-        plan.bounds.min_x,
-        plan.bounds.min_z,
-        plan.bounds.max_x,
-        plan.bounds.max_z,
+        region.min_x.max(plan.bounds.min_x),
+        region.min_z.max(plan.bounds.min_z),
+        region.max_x.min(plan.bounds.max_x),
+        region.max_z.min(plan.bounds.max_z),
     );
     let min_y = lo - 24;
     let max_y = hi + 56;

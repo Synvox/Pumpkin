@@ -11,6 +11,7 @@ use pumpkin_data::block_properties::{
 
 use crate::buildings::BuildingKind;
 use crate::castle::{RoofKind, TowerSpec};
+use crate::cells::CellKind;
 use crate::geom::{Dir, Rect};
 use crate::palette::{Palette, stair_state};
 use crate::stamp::BlockSink;
@@ -183,6 +184,68 @@ pub fn furnish_chapel(
         sink.put(x, floor + 1, z, stair_state(palette.stairs, dir));
     }
     if light_here(x, z, 6) && roof_y >= floor + 4 {
+        hang_lantern(sink, x, roof_y - 2, z);
+    }
+}
+
+/// Gothic cathedral: pews, columns, altar, chandeliers, side chapels.
+pub fn furnish_cathedral(
+    sink: &mut impl BlockSink,
+    rect: Rect,
+    kind: CellKind,
+    x: i32,
+    floor: i32,
+    z: i32,
+    roof_y: i32,
+    palette: &Palette,
+) {
+    let (cx, cz) = rect.center();
+    let aisle = z == cz;
+    match kind {
+        CellKind::CathedralChoir => {
+            if aisle && x >= rect.max_x - 2 {
+                sink.put(x, floor + 1, z, Block::SMOOTH_STONE.default_state);
+                sink.put(x, floor + 2, z, Block::CANDLE.default_state);
+                if x == rect.max_x - 1 {
+                    sink.put(x, floor + 3, z, Block::LANTERN.default_state);
+                }
+            } else if (x - cx).abs() == 1 && z == cz {
+                sink.put(x, floor + 1, z, Block::LECTERN.default_state);
+            } else if aisle {
+                sink.put(x, floor + 1, z, Block::RED_CARPET.default_state);
+            } else if (z - cz).abs() == 2 {
+                let dir = if z < cz { Dir::South } else { Dir::North };
+                sink.put(x, floor + 1, z, stair_state(palette.stairs, dir));
+            }
+        }
+        CellKind::CathedralTransept => {
+            let end = z == rect.min_z + 1 || z == rect.max_z - 1;
+            if end && x == cx {
+                sink.put(x, floor + 1, z, Block::LECTERN.default_state);
+                sink.put(x, floor + 2, z, Block::CANDLE.default_state);
+            } else if end && (x - cx).abs() == 1 {
+                sink.put(x, floor + 1, z, Block::BOOKSHELF.default_state);
+            } else if (x - cx).abs() >= 1 && (z - cz).abs() % 2 == 0 && (z - cz).abs() >= 2 {
+                let dir = if x < cx { Dir::East } else { Dir::West };
+                sink.put(x, floor + 1, z, stair_state(palette.stairs, dir));
+            } else if x == cx {
+                sink.put(x, floor + 1, z, Block::RED_CARPET.default_state);
+            }
+        }
+        _ => {
+            if aisle {
+                sink.put(x, floor + 1, z, Block::RED_CARPET.default_state);
+            } else if (z - cz).abs() >= 2
+                && (z - cz).abs() <= 4
+                && x % 2 == 0
+                && (x - cx).abs() != 2
+            {
+                let dir = if z < cz { Dir::South } else { Dir::North };
+                sink.put(x, floor + 1, z, stair_state(palette.stairs, dir));
+            }
+        }
+    }
+    if aisle && x % 4 == 0 && roof_y >= floor + 6 {
         hang_lantern(sink, x, roof_y - 2, z);
     }
 }

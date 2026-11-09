@@ -42,7 +42,7 @@ impl BuildingKind {
             Self::Monastery => (18, 12),
             Self::Watchtower => (7, 7),
             Self::Outpost => (5, 5),
-            Self::Cathedral => (28, 16),
+            Self::Cathedral => (32, 22),
             Self::BellTower => (5, 5),
         }
     }
@@ -72,7 +72,7 @@ impl BuildingKind {
             Self::Monastery => 9,
             Self::Watchtower => 14,
             Self::Outpost => 12,
-            Self::Cathedral => 12,
+            Self::Cathedral => 16,
             Self::BellTower => 18,
         }
     }
