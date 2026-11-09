@@ -61,6 +61,12 @@ Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `G
 
 `TownInfo` stays geometry only. Capture, siege jobs, and AI live in the director (`siege.rs`). Town ownership is `kingdoms-ownership.json` in the world folder and shows up on `battle_state.owner`.
 
+A town flips only when attackers hold the keep courtyard **and** defenders there are wiped out or routed. The hold needs `max(8, 10% of the surviving raid)` attackers in the keep for 200 ticks (~10 s). Nearby players see a boss-bar and actionbar capture meter (`Capture 12/40 hold 80/200`). `/raid stop` and battle end (`Victory` / capture / retake) despawn leftover raid soldiers, extra defenders tagged `kingdoms:temp`, and ram display entities so a later fight does not stack bodies.
+
+A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). It either breaches the iron-bar gate or is destroyed. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks) or their captain dies; a living captain rallies routed soldiers within 16 blocks.
+
+When no HTTP director has talked to the API in the last 30 s, a war clock starts the next raid on a timer (`KINGDOMS_WAR_CLOCK`, default on; `KINGDOMS_WAR_CLOCK_TICKS`, default 2400 ≈ 2 min). It picks a cached town and the attacking side from current ownership. An authenticated HTTP call marks the external director as connected and pauses the clock.
+
 Inter-cell roads meet at a crossing hashed from the unordered cell pair. The western/northern cell writes up to the column before the shared edge; the eastern/southern cell writes the edge column. Both sides use the same `z` (or `x`) so the road reads as one line.
 
 ### Planned blocks (for later repair)
@@ -176,15 +182,19 @@ For an external AI director (e.g. on Sails). Enable with env; bind is localhost 
 | Env | |
 | --- | --- |
 | `KINGDOMS_HTTP=1` | turn the server on (`KINGDOMS_DIRECTOR_HTTP` also works) |
-| `KINGDOMS_HTTP_TOKEN` | bearer token (required; no token means no bind). Alias `KINGDOMS_DIRECTOR_TOKEN` |
+| `KINGDOMS_HTTP_TOKEN` | bearer token (required, **≥ 32 characters**; shorter or missing refuses to bind). Alias `KINGDOMS_DIRECTOR_TOKEN`. Compared in constant time |
 | `KINGDOMS_HTTP_BIND` | default `127.0.0.1:8742` |
 | `KINGDOMS_HTTP_WEBHOOK` | optional URL; POSTs JSON events |
 | `KINGDOMS_HTTP_WEBHOOK_SECRET` | HMAC-SHA256 key (defaults to the bearer token) |
+| `KINGDOMS_WAR_CLOCK` | `0`/`false` disables the 24/7 loop (default on) |
+| `KINGDOMS_WAR_CLOCK_TICKS` | ticks between auto-raids (default `2400`) |
+
+Bodies over 16 KiB return 413. More than 20 requests/second return 429. A successful bearer auth pauses the war clock for 30 s.
 
 Webhook body is JSON. Header `X-Kingdoms-Signature: sha256=<hex>` is HMAC-SHA256 of the raw body. Events: `raid_started`, `gate_breached`, `town_captured`, `player_joined_a_kingdom`.
 
 ```bash
-export TOKEN=dev-token
+export TOKEN=dev-token-must-be-32-chars-min
 # pumpkin.toml world already running, with KINGDOMS_HTTP=1 KINGDOMS_HTTP_TOKEN=$TOKEN
 
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8742/state
@@ -266,7 +276,17 @@ Round 3 (fresh world, two `kingdoms-raid-bot`s on alder/raven, HTTP `POST /raids
 
 Plots: `/opt/cursor/artifacts/live-r3.log`, `live-r3-strip.png`, `live-r3-start-strip.png`, `live-r3-mid-strip.png`, `kingdoms-ownership-r3.json`, `webhook-r3.log`.
 
-Gaps: the start hitch is still force-load, not AI; capture used 4 raiders in the keep (the hold threshold) while most of the 400 were still outside; `/raid stop` does not despawn leftover soldiers, so a later retake can see them; the covered ram is still a spawn/job, not a moving block; leather kits are server-side (bots do not render).
+Round 4 (seed `20261025`, release, LTO off, two `kingdoms-raid-bot`s). Capture need is `max(8, 10% surviving)`; 4 raiders in an empty keep no longer flip a town. `/raid stop` despawned leftover soldiers (`despawned=36` then `29`). HTTP refused tokens shorter than 32 chars, compared in constant time, returned 413 over 16 KiB and 429 over 20 req/s. A six-part block-display ram walked the road (`x=1543→1506`) and breached 21 bars. 282 soldiers routed when a captain died. The war clock started a 24-man raid at tick 800 with no HTTP director connected.
+
+| Fight | peak bodies | fight MSPT | director_ms | `Can't keep up` | notes |
+| --- | ---: | ---: | ---: | --- | --- |
+| war clock 24 | ~90 | 14–16 | 3–4 | start 8.5 s / 169 ticks | clock raid; ram spawned+breached 21; rout 71 `captain_down`; stop despawned 36 |
+| 200 vs 200 | **401** ticking (200/201) | **14–24** (peak **24.21** at contact, then 14–17) | 3–7 | start 8.6 s / 171 ticks | ram walked camp→gate with 60 crew; rout 282 `captain_down=true`; arrows 64–112 |
+| 80 vs 20 | ~99 | **9–14** | 3 | spawn hitch 107 ms | ram `1543,482 → 1506,591` then **breached 21 bars**; `keep_r=4 keep_d=0` for ~200 ticks, **no capture** (need=8) |
+
+Plots: `/opt/cursor/artifacts/live-r4.log`, `live-r4-200-strip.png`, `live-r4-80-strip.png`, `live-r4-clock-strip.png`, `kingdoms-ownership-r4.json`.
+
+Gaps: the start hitch is still force-load; a full keep capture (`need` attackers in the courtyard) did not complete live (4 in keep is now correctly not enough); leather kits are server-side (bots do not render); the war clock only sees towns already in the director cache (a player, bot, or `/raid start`).
 
 ### Commands
 
