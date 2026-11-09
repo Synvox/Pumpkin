@@ -513,17 +513,74 @@ pub fn pick_safe_stand(
         }
     }
     candidates.extend(fallbacks.iter().copied());
+    let mut court_best: Option<(i32, i32, i32)> = None;
+    let mut other_best: Option<(i32, i32, i32)> = None;
     for c in candidates {
-        let y = floor_y(c.x, c.z);
-        if column_is_standable(c.x, c.z, y, &solid) {
-            return (c.x, y, c.z);
+        if courtyard.contains(c.x, c.z) && on_courtyard_edge(courtyard, c.x, c.z) {
+            continue;
         }
+        let y = floor_y(c.x, c.z);
+        if !column_is_standable(c.x, c.z, y, &solid) {
+            continue;
+        }
+        let slot = if courtyard.contains(c.x, c.z) {
+            &mut court_best
+        } else {
+            &mut other_best
+        };
+        match *slot {
+            None => *slot = Some((c.x, y, c.z)),
+            Some((_, by, _)) if y < by => *slot = Some((c.x, y, c.z)),
+            _ => {}
+        }
+    }
+    if let Some(stand) = court_best.or(other_best) {
+        return stand;
     }
     if let Some(c) = fallbacks.first() {
         return (c.x, floor_y(c.x, c.z), c.z);
     }
     let y = floor_y(keep.x, keep.z);
     (keep.x, y, keep.z)
+}
+
+fn on_courtyard_edge(rect: Rect, x: i32, z: i32) -> bool {
+    x == rect.min_x || x == rect.max_x || z == rect.min_z || z == rect.max_z
+}
+
+/// Lowest open bailey column around the keep, using plan occupancy.
+///
+/// Inner-ward terraces sit next to the keep at roof height; the real court is
+/// the lower grass. Prefer that Y, then the nearest column at that floor.
+#[must_use]
+pub fn pick_open_court(
+    keep: StandCandidate,
+    is_open: impl Fn(i32, i32) -> bool,
+    floor_y: impl Fn(i32, i32) -> i32,
+    radius: i32,
+) -> Option<(i32, i32, i32)> {
+    let mut best = None;
+    let mut best_key = (i32::MAX, i32::MAX);
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx.abs() < 4 && dz.abs() < 4 {
+                continue;
+            }
+            let x = keep.x + dx;
+            let z = keep.z + dz;
+            if !is_open(x, z) {
+                continue;
+            }
+            let y = floor_y(x, z);
+            let d = dx.abs() + dz.abs();
+            let key = (y, d);
+            if key < best_key {
+                best_key = key;
+                best = Some((x, y, z));
+            }
+        }
+    }
+    best
 }
 
 #[cfg(test)]
@@ -607,6 +664,100 @@ mod tests {
         let (x, y, z) = pick_safe_stand(keep, court, &[], roof_y, roof_ok);
         assert_ne!((x, z), (10, 10), "keep roof must not beat the courtyard");
         assert_eq!(y, 80);
+    }
+
+    #[test]
+    fn keep_respawn_skips_the_curtain_ring() {
+        let keep = StandCandidate { x: 10, z: 10 };
+        let court = Rect::new(4, 4, 16, 16);
+        let solid = |x: i32, y: i32, z: i32| {
+            let wall = x == 4 || x == 16 || z == 4 || z == 16;
+            if wall {
+                return (79..=85).contains(&y);
+            }
+            y == 79
+        };
+        let floor = |x: i32, z: i32| {
+            if x == 4 || x == 16 || z == 4 || z == 16 {
+                86
+            } else {
+                80
+            }
+        };
+        let (x, y, z) = pick_safe_stand(keep, court, &[], floor, solid);
+        assert_ne!(x, 4);
+        assert_ne!(x, 16);
+        assert_ne!(z, 4);
+        assert_ne!(z, 16);
+        assert!(court.contains(x, z));
+        assert!(column_is_standable(x, z, y, solid));
+        assert_eq!(y, 80);
+    }
+
+    #[test]
+    fn keep_respawn_prefers_courtyard_over_world_spawn() {
+        let keep = StandCandidate { x: 100, z: 100 };
+        let court = Rect::new(90, 90, 110, 110);
+        let spawn = StandCandidate { x: 0, z: 0 };
+        let solid = |_x: i32, y: i32, _z: i32| y == 79 || y == 63;
+        let floor = |x: i32, z: i32| {
+            if x == 0 && z == 0 { 64 } else { 80 }
+        };
+        let (x, y, z) = pick_safe_stand(keep, court, &[spawn], floor, solid);
+        assert!(
+            court.contains(x, z),
+            "respawn {x},{y},{z} must stay in the court"
+        );
+        assert_ne!((x, z), (0, 0));
+        assert_eq!(y, 80);
+        assert!(column_is_standable(x, z, y, solid));
+    }
+
+    #[test]
+    fn pick_open_court_skips_the_keep_mass() {
+        let keep = StandCandidate { x: 10, z: 10 };
+        let is_open = |x: i32, z: i32| (x - 10).abs() >= 6 || (z - 10).abs() >= 6;
+        let floor = |_x: i32, _z: i32| 80;
+        let (x, y, z) = pick_open_court(keep, is_open, floor, 12).expect("open bailey");
+        assert!((x - 10).abs() >= 6 || (z - 10).abs() >= 6);
+        assert_ne!((x, z), (10, 10));
+        assert_eq!(y, 80);
+    }
+
+    #[test]
+    fn pick_open_court_prefers_the_lower_bailey_over_the_keep_terrace() {
+        let keep = StandCandidate { x: 10, z: 10 };
+        let is_open = |_x: i32, _z: i32| true;
+        let floor = |x: i32, z: i32| {
+            if (x - 10).abs() <= 12 && (z - 10).abs() <= 12 {
+                173
+            } else {
+                80
+            }
+        };
+        let (x, y, z) = pick_open_court(keep, is_open, floor, 20).expect("lower bailey");
+        assert_eq!(y, 80, "respawn {x},{y},{z} must not stay on the keep roof");
+        assert!((x - 10).abs() > 12 || (z - 10).abs() > 12);
+        assert_ne!((x, z), (10, 10));
+    }
+
+    #[test]
+    fn keep_respawn_picks_the_lower_courtyard_over_the_keep_roof() {
+        let keep = StandCandidate { x: 10, z: 10 };
+        let court = Rect::new(0, 0, 20, 20);
+        let solid = |x: i32, y: i32, z: i32| {
+            if x == 10 && z == 10 {
+                return y <= 173;
+            }
+            y == 79
+        };
+        let floor = |x: i32, z: i32| {
+            if x == 10 && z == 10 { 174 } else { 80 }
+        };
+        let (x, y, z) = pick_safe_stand(keep, court, &[], floor, solid);
+        assert_ne!((x, z), (10, 10));
+        assert_eq!(y, 80);
+        assert!(court.contains(x, z));
     }
 
     #[test]

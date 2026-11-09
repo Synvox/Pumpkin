@@ -228,9 +228,10 @@ pub fn dist2_to_segment(px: i32, pz: i32, ax: i32, az: i32, bx: i32, bz: i32) ->
         return dx * dx + dz * dz;
     }
     // (w - t v)^2 with t = c1/c2, multiplied through by c2^2 then divided.
-    let nx = wx * c2 - c1 * vx;
-    let nz = wz * c2 - c1 * vz;
-    (nx * nx + nz * nz) / (c2 * c2)
+    let nx = i128::from(wx) * i128::from(c2) - i128::from(c1) * i128::from(vx);
+    let nz = i128::from(wz) * i128::from(c2) - i128::from(c1) * i128::from(vz);
+    let den = i128::from(c2) * i128::from(c2);
+    ((nx * nx + nz * nz) / den) as i64
 }
 
 /// Whether `(x, z)` is within `radius` of any edge of `verts` (closed).
@@ -272,4 +273,19 @@ pub fn poly_bounds(verts: &[(i32, i32)]) -> Option<Rect> {
 pub fn isqrt(dx: i32, dz: i32) -> i32 {
     let s = dist2(0, 0, dx, dz);
     (s as f64).sqrt() as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dist2_to_segment_does_not_overflow_long_roads() {
+        let d = dist2_to_segment(10, 121, 1349, 693, 10, 2048);
+        assert!(d >= 0);
+        let along = dist2_to_segment(0, 0, 0, 0, 100, 0);
+        assert_eq!(along, 0);
+        let off = dist2_to_segment(0, 10, 0, 0, 100, 0);
+        assert_eq!(off, 100);
+    }
 }

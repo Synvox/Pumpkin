@@ -156,31 +156,7 @@ fn corridor_hits_chunk(ax: i32, az: i32, bx: i32, bz: i32, chunk_x: i32, chunk_z
     if !Rect::new(ax, az, bx, bz).inflate(24).intersects(chunk) {
         return false;
     }
-    dist2_to_segment(cmin_x + 8, cmin_z + 8, ax, az, bx, bz) <= 28 * 28
-}
-
-fn dist2_to_segment(px: i32, pz: i32, ax: i32, az: i32, bx: i32, bz: i32) -> i64 {
-    let px = i64::from(px);
-    let pz = i64::from(pz);
-    let ax = i64::from(ax);
-    let az = i64::from(az);
-    let bx = i64::from(bx);
-    let bz = i64::from(bz);
-    let abx = bx - ax;
-    let abz = bz - az;
-    let apx = px - ax;
-    let apz = pz - az;
-    let ab2 = abx * abx + abz * abz;
-    if ab2 == 0 {
-        return apx * apx + apz * apz;
-    }
-    let t = (apx * abx + apz * abz).clamp(0, ab2);
-    let qx = ax * ab2 + abx * t;
-    let qz = az * ab2 + abz * t;
-    let dx = px * ab2 - qx;
-    let dz = pz * ab2 - qz;
-    let dist2_num = dx * dx + dz * dz;
-    dist2_num / (ab2 * ab2)
+    crate::geom::dist2_to_segment(cmin_x + 8, cmin_z + 8, ax, az, bx, bz) <= 28 * 28
 }
 
 /// Towns whose footprint may touch chunk `(chunk_x, chunk_z)`.

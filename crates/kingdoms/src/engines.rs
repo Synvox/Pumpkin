@@ -18,6 +18,7 @@ use pumpkin_util::math::vector3::Vector3;
 use pumpkin_world::world::BlockFlags;
 use std::sync::Arc;
 
+use crate::geom::Rect;
 use crate::scene::ScenePost;
 use crate::siege::WALL_WALK_LIFT;
 
@@ -28,8 +29,34 @@ pub const TREB_FLIGHT: u32 = 40;
 /// Director looses at most one shot this often.
 pub const TREB_PERIOD: u32 = 80;
 const IMPACT_RADIUS: i32 = 1;
+const IMPACT_DEPTH: i32 = 4;
 const LADDER_HEIGHT: i32 = WALL_WALK_LIFT;
 const TOWER_STEP: f64 = 0.12;
+
+/// One wall block the cobble cleared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PunchHit {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub was: u16,
+}
+
+/// True when the column is the keep / inner bailey, which trebuchets must not touch.
+#[must_use]
+pub fn punch_column_allowed(x: i32, z: i32, keep: Rect) -> bool {
+    !keep.contains(x, z)
+}
+
+/// Chests, barrels, and beds stay put even on a wall column.
+#[must_use]
+pub fn is_protected_block(block: &Block) -> bool {
+    block.id == Block::CHEST.id
+        || block.id == Block::TRAPPED_CHEST.id
+        || block.id == Block::BARREL.id
+        || block.id == Block::ENDER_CHEST.id
+        || block.name.ends_with("_bed")
+}
 
 /// One flying cobble (a block-display entity).
 #[derive(Clone, Debug)]
@@ -118,7 +145,7 @@ pub fn fire_trebuchet(world: &Arc<World>, origin: Vector3<f64>, target: Vector3<
 }
 
 /// Advance the shot. On impact, punch a hole in solid wall blocks.
-pub fn tick_shot(world: &Arc<World>, shot: &mut TrebShot) -> bool {
+pub fn tick_shot(world: &Arc<World>, shot: &mut TrebShot, keep: Rect) -> Option<Vec<PunchHit>> {
     let (x, y, z, vy) = step_arc(
         shot.x,
         shot.y,
@@ -139,17 +166,17 @@ pub fn tick_shot(world: &Arc<World>, shot: &mut TrebShot) -> bool {
         e.get_entity().set_pos(Vector3::new(x, y, z));
     }
     if !shot_done(shot.age, shot.y, shot.target_y, TREB_FLIGHT) {
-        return false;
+        return None;
     }
-    let hit = punch_wall(world, shot.x.floor() as i32, shot.z.floor() as i32);
+    let hits = punch_wall(world, shot.x.floor() as i32, shot.z.floor() as i32, keep);
     despawn_shot(world, shot);
     tracing::info!(
         x = shot.x,
         z = shot.z,
-        cleared = hit,
+        cleared = hits.len(),
         "kingdoms trebuchet impact"
     );
-    true
+    Some(hits)
 }
 
 fn despawn_shot(world: &World, shot: &TrebShot) {
@@ -161,30 +188,72 @@ fn despawn_shot(world: &World, shot: &TrebShot) {
 }
 
 /// Clear a small solid column so repair can put the plan back.
-pub fn punch_wall(world: &Arc<World>, x: i32, z: i32) -> u32 {
-    let mut cleared = 0u32;
+pub fn punch_wall(world: &Arc<World>, x: i32, z: i32, keep: Rect) -> Vec<PunchHit> {
+    let mut hits = Vec::new();
     for dz in -IMPACT_RADIUS..=IMPACT_RADIUS {
         for dx in -IMPACT_RADIUS..=IMPACT_RADIUS {
-            for dy in 0..=3 {
-                let pos = BlockPos::new(x + dx, shot_floor_y(world, x, z) + dy, z + dz);
-                let state = world.get_block_state(&pos);
+            let cx = x + dx;
+            let cz = z + dz;
+            if !punch_column_allowed(cx, cz, keep) {
+                tracing::info!(x = cx, z = cz, "kingdoms trebuchet skipped keep");
+                continue;
+            }
+            let top = solid_surface_y(world, cx, cz);
+            for dy in -IMPACT_DEPTH..=0 {
+                let pos = BlockPos::new(cx, top + dy, cz);
+                let (block, state) = world.get_block_and_state(&pos);
+                if is_protected_block(block) {
+                    tracing::info!(
+                        x = cx,
+                        y = pos.0.y,
+                        z = cz,
+                        block = block.name,
+                        "kingdoms trebuchet skipped protected"
+                    );
+                    continue;
+                }
                 if !state.is_solid() {
                     continue;
                 }
+                let was = state.id.as_u16();
                 world.set_block_state(
                     &pos,
                     Block::AIR.default_state.id,
                     BlockFlags::NOTIFY_LISTENERS | BlockFlags::SKIP_DROPS,
                 );
-                cleared += 1;
+                tracing::info!(
+                    "kingdoms trebuchet hole x={} y={} z={} was={was}",
+                    cx,
+                    pos.0.y,
+                    cz
+                );
+                hits.push(PunchHit {
+                    x: cx,
+                    y: pos.0.y,
+                    z: cz,
+                    was,
+                });
             }
         }
     }
-    cleared
+    hits
 }
 
 fn shot_floor_y(world: &World, x: i32, z: i32) -> i32 {
     world.sample_surface_height(x, z).unwrap_or(world.sea_level)
+}
+
+/// Highest solid block, walking down if the sampled surface is already air.
+fn solid_surface_y(world: &World, x: i32, z: i32) -> i32 {
+    let mut y = shot_floor_y(world, x, z);
+    let min_y = y - 24;
+    while y >= min_y {
+        if world.get_block_state(&BlockPos::new(x, y, z)).is_solid() {
+            return y;
+        }
+        y -= 1;
+    }
+    shot_floor_y(world, x, z)
 }
 
 /// Put ladders on the outer face of a wall column, camp-side.
@@ -367,5 +436,21 @@ mod tests {
                 .iter()
                 .any(|(_, _, _, b)| b.id == Block::LADDER.id)
         );
+    }
+
+    #[test]
+    fn trebuchet_skips_keep_and_loot_blocks() {
+        let keep = Rect::new(10, 10, 20, 20);
+        assert!(!punch_column_allowed(12, 15, keep));
+        assert!(punch_column_allowed(0, 0, keep));
+        assert!(punch_column_allowed(21, 15, keep));
+        assert!(is_protected_block(&Block::CHEST));
+        assert!(is_protected_block(&Block::TRAPPED_CHEST));
+        assert!(is_protected_block(&Block::BARREL));
+        assert!(is_protected_block(&Block::WHITE_BED));
+        assert!(is_protected_block(&Block::RED_BED));
+        assert!(!is_protected_block(&Block::STONE_BRICKS));
+        assert!(!is_protected_block(&Block::COBBLESTONE));
+        assert!(!is_protected_block(&Block::LADDER));
     }
 }

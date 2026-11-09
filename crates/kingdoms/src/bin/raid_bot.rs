@@ -37,8 +37,8 @@ use pumpkin_protocol::java::client::config::{CFinishConfig, CKnownPacks};
 use pumpkin_protocol::java::client::login::{CLoginSuccess, CSetCompression};
 use pumpkin_protocol::java::client::play::{
     CDamageEvent, CEntityPositionSync, CKeepAlive, CLogin, CPlayerPosition, CRemoveEntities,
-    CSetContainerContent, CSetEquipment, CSetHealth, CSetPlayerInventory, CSpawnEntity,
-    CSystemChatMessage,
+    CSetContainerContent, CSetContainerSlot, CSetEquipment, CSetHealth, CSetPlayerInventory,
+    CSpawnEntity, CSystemChatMessage,
 };
 use pumpkin_protocol::java::packet_decoder::TCPNetworkDecoder;
 use pumpkin_protocol::java::packet_encoder::TCPNetworkEncoder;
@@ -92,6 +92,7 @@ struct Args {
     seconds: u64,
     command: Option<String>,
     fight: bool,
+    prove: bool,
     kingdom: String,
 }
 
@@ -104,6 +105,7 @@ fn parse_args() -> Result<Args, String> {
     let mut seconds = 180u64;
     let mut command = None;
     let mut fight = false;
+    let mut prove = false;
     let mut kingdom = "alder".to_owned();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -121,10 +123,11 @@ fn parse_args() -> Result<Args, String> {
             }
             "--command" => command = Some(next("--command")?),
             "--fight" => fight = true,
+            "--prove" => prove = true,
             "--kingdom" => kingdom = next("--kingdom")?,
             "-h" | "--help" => {
                 println!(
-                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command \"kingdom join alder\"] [--fight --kingdom alder]"
+                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command \"kingdom join alder\"] [--fight|--prove --kingdom alder]"
                 );
                 std::process::exit(0);
             }
@@ -141,6 +144,7 @@ fn parse_args() -> Result<Args, String> {
         seconds,
         command,
         fight,
+        prove,
         kingdom,
     })
 }
@@ -492,6 +496,7 @@ impl Bot {
         let inv_id = CSetPlayerInventory::to_id(CURRENT_MC_VERSION);
         let eq_id = CSetEquipment::to_id(CURRENT_MC_VERSION);
         let content_id = CSetContainerContent::to_id(CURRENT_MC_VERSION);
+        let slot_id = CSetContainerSlot::to_id(CURRENT_MC_VERSION);
         if pkt.id == keep_id {
             let mut slice = &pkt.payload[..];
             let keep = CKeepAlive::read(&mut slice, &CURRENT_MC_VERSION)
@@ -578,17 +583,28 @@ impl Bot {
                 Err(err) => eprintln!("health decode: {err}"),
             }
         } else if pkt.id == eq_id {
+            if self.self_id > 0 {
+                println!("EQ-RAW self={} bytes={}", self.self_id, pkt.payload.len());
+            }
             let mut slice = &pkt.payload[..];
             match CSetEquipment::read(&mut slice, &CURRENT_MC_VERSION) {
-                Ok(eq) if eq.entity_id.0 == self.self_id || self.self_id < 0 => {
-                    for (slot, stack) in eq.equipment {
-                        dump_kit("eq", i32::from(slot), &stack);
+                Ok(eq) => {
+                    if eq.entity_id.0 == self.self_id || self.self_id == 0 {
+                        println!(
+                            "EQ entity={} self={} n={}",
+                            eq.entity_id.0,
+                            self.self_id,
+                            eq.equipment.len()
+                        );
+                        for (slot, stack) in eq.equipment {
+                            dump_kit("eq", i32::from(slot), &stack);
+                        }
                     }
                 }
-                Ok(_) => {}
                 Err(err) => eprintln!("eq decode: {err}"),
             }
         } else if pkt.id == inv_id {
+            println!("INV-RAW bytes={}", pkt.payload.len());
             let mut slice = &pkt.payload[..];
             if let Ok(slot) = slice.get_var_int()
                 && let Ok(stack) =
@@ -597,19 +613,10 @@ impl Bot {
                 dump_kit("inv", slot.0, &stack);
             }
         } else if pkt.id == content_id {
-            let mut slice = &pkt.payload[..];
-            let _ = slice.get_var_int();
-            let _ = slice.get_var_int();
-            if let Ok(count) = slice.get_var_int() {
-                for slot in 0..count.0.min(128) {
-                    let Ok(stack) =
-                        ItemStackSerializer::read_with_version(&mut slice, &CURRENT_MC_VERSION)
-                    else {
-                        break;
-                    };
-                    dump_kit("bag", slot, &stack);
-                }
-            }
+            println!("BAG-RAW bytes={}", pkt.payload.len());
+            dump_bag(&pkt.payload);
+        } else if pkt.id == slot_id {
+            dump_container_slot(&pkt.payload);
         }
         Ok(())
     }
@@ -635,19 +642,55 @@ impl Bot {
     }
 }
 
-fn kit_interesting(key: &str) -> bool {
-    key.contains("sword")
-        || key.contains("shield")
-        || key.contains("leather")
-        || key.contains("chainmail")
-        || key.contains("iron_")
-}
-
 fn dump_kit(tag: &str, slot: i32, stack: &ItemStackSerializer<'_>) {
     let key = stack.0.item.registry_key;
-    if kit_interesting(key) {
-        println!("KIT {tag} slot={slot} {key} x{}", stack.0.item_count);
+    if stack.0.item_count == 0 || key.is_empty() || key.ends_with(":air") {
+        return;
     }
+    println!("KIT {tag} slot={slot} {key} x{}", stack.0.item_count);
+    if key.contains("wooden_sword") || key.ends_with(":shield") || key.contains("stone_sword") {
+        println!("KIT-PROVE {tag} slot={slot} {key}");
+    }
+}
+
+fn dump_bag(payload: &[u8]) {
+    let mut slice = payload;
+    let Ok(window) = slice.get_container_id(&CURRENT_MC_VERSION) else {
+        eprintln!("bag decode: window");
+        return;
+    };
+    if slice.get_var_int().is_err() {
+        eprintln!("bag decode: state");
+        return;
+    }
+    let Ok(count) = slice.get_var_int() else {
+        eprintln!("bag decode: count");
+        return;
+    };
+    println!("BAG window={} n={}", window.0, count.0);
+    for slot in 0..count.0.min(128) {
+        let Ok(stack) = ItemStackSerializer::read_with_version(&mut slice, &CURRENT_MC_VERSION)
+        else {
+            eprintln!("bag decode: slot {slot}");
+            break;
+        };
+        dump_kit("bag", slot, &stack);
+    }
+}
+
+fn dump_container_slot(payload: &[u8]) {
+    let mut slice = payload;
+    if slice.get_container_id(&CURRENT_MC_VERSION).is_err() {
+        return;
+    }
+    let _ = slice.get_var_int();
+    let Ok(slot) = slice.get_i16_be() else {
+        return;
+    };
+    let Ok(stack) = ItemStackSerializer::read_with_version(&mut slice, &CURRENT_MC_VERSION) else {
+        return;
+    };
+    dump_kit("slot", i32::from(slot), &stack);
 }
 
 fn extract_text(payload: &[u8]) -> String {
@@ -905,6 +948,144 @@ async fn fight_loop(
     Ok(())
 }
 
+async fn prove_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    println!(
+        "PROVE-JOIN pos={:.1},{:.1},{:.1}",
+        bot.position.x, bot.position.y, bot.position.z
+    );
+    bot.chat_command(&format!("kingdom join {kingdom}")).await?;
+    bot.pump(Duration::from_secs(3)).await?;
+    println!(
+        "PROVE-AFTER-JOIN pos={:.1},{:.1},{:.1}",
+        bot.position.x, bot.position.y, bot.position.z
+    );
+    for attempt in 0..90 {
+        bot.pump(Duration::from_secs(1)).await?;
+        let dist = bot.position.x.hypot(bot.position.z);
+        println!(
+            "PROVE-KEEP-WAIT attempt={attempt} dist={dist:.0} pos={:.1},{:.1},{:.1}",
+            bot.position.x, bot.position.y, bot.position.z
+        );
+        if dist > 400.0 {
+            println!(
+                "PROVE-KEEP-TP pos={:.1},{:.1},{:.1}",
+                bot.position.x, bot.position.y, bot.position.z
+            );
+            break;
+        }
+    }
+    println!(
+        "PROVE-PRE-KILL pos={:.1},{:.1},{:.1}",
+        bot.position.x, bot.position.y, bot.position.z
+    );
+    bot.chat_command("kill").await?;
+    bot.pump(Duration::from_millis(400)).await?;
+    let mut saw_death = false;
+    let kill_deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < kill_deadline {
+        bot.pump(Duration::from_millis(200)).await?;
+        if bot.dead {
+            if !saw_death {
+                println!(
+                    "PROVE-DIED pos={:.1},{:.1},{:.1}",
+                    bot.position.x, bot.position.y, bot.position.z
+                );
+            }
+            saw_death = true;
+            if bot.last_respawn_cmd.elapsed() >= Duration::from_secs(2) {
+                let _ = bot
+                    .send_packet(&SClientCommand {
+                        action_id: VarInt(SClientCommand::PERFORM_RESPAWN),
+                    })
+                    .await;
+                bot.last_respawn_cmd = Instant::now();
+            }
+        } else if saw_death {
+            println!(
+                "PROVE-RESPAWN pos={:.1},{:.1},{:.1}",
+                bot.position.x, bot.position.y, bot.position.z
+            );
+            break;
+        }
+    }
+    if !saw_death {
+        println!("PROVE-NO-KILL continuing");
+    }
+    for attempt in 0..16 {
+        bot.chat_command("kingdom fronts").await?;
+        bot.pump(Duration::from_secs(2)).await?;
+        if bot.chat.iter().rev().take(8).any(|line| {
+            line.contains("raid_active") || line.contains("live=") || line.contains("side=")
+        }) {
+            println!("PROVE-FRONTS attempt={attempt}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    bot.chat_command("kingdom deploy").await?;
+    bot.pump(Duration::from_secs(2)).await?;
+    println!(
+        "PROVE-DEPLOY pos={:.1},{:.1},{:.1}",
+        bot.position.x, bot.position.y, bot.position.z
+    );
+    bot.chat_command("kingdom fire").await?;
+    bot.pump(Duration::from_millis(400)).await?;
+    let mut last_fire = Instant::now();
+    let mut last_stats = Instant::now();
+    while Instant::now() < deadline {
+        bot.pump(Duration::from_millis(50)).await?;
+        if bot.dead {
+            if bot.last_respawn_cmd.elapsed() >= Duration::from_secs(2) {
+                let _ = bot
+                    .send_packet(&SClientCommand {
+                        action_id: VarInt(SClientCommand::PERFORM_RESPAWN),
+                    })
+                    .await;
+                bot.last_respawn_cmd = Instant::now();
+            }
+            continue;
+        }
+        if last_fire.elapsed() >= Duration::from_secs(90) {
+            bot.chat_command("kingdom fire").await?;
+            last_fire = Instant::now();
+        }
+        if last_stats.elapsed() >= Duration::from_secs(10) {
+            last_stats = Instant::now();
+            println!(
+                "PROVE-SEEN hostiles={} soldiers={} unknown={} pos={:.1},{:.1},{:.1}",
+                bot.hostiles.len(),
+                bot.soldiers.len(),
+                bot.unknown.len(),
+                bot.position.x,
+                bot.position.y,
+                bot.position.z
+            );
+            if let Some((_, pos, dist)) = bot.nearest_target(true, true) {
+                println!(
+                    "PROVE-NEAR id-dist={dist:.1} at {:.1},{:.1},{:.1}",
+                    pos.x, pos.y, pos.z
+                );
+            }
+            bot.chat_command("war stats").await?;
+        }
+        bot.move_to(bot.position).await?;
+    }
+    bot.chat_command("war stats").await?;
+    bot.pump(Duration::from_secs(1)).await?;
+    println!(
+        "PROVE-DONE pos={:.1},{:.1},{:.1} hostiles={} soldiers={}",
+        bot.position.x,
+        bot.position.y,
+        bot.position.z,
+        bot.hostiles.len(),
+        bot.soldiers.len()
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = match parse_args() {
@@ -918,6 +1099,13 @@ async fn main() -> ExitCode {
         "joining {} as {} then standing at {}, {}, {}",
         args.host, args.name, args.x, args.y, args.z
     );
+    println!(
+        "PKT-IDS eq={} inv={} bag={} slot={}",
+        CSetEquipment::to_id(CURRENT_MC_VERSION),
+        CSetPlayerInventory::to_id(CURRENT_MC_VERSION),
+        CSetContainerContent::to_id(CURRENT_MC_VERSION),
+        CSetContainerSlot::to_id(CURRENT_MC_VERSION)
+    );
     let mut bot = match Bot::connect(args.host, &args.name).await {
         Ok(bot) => bot,
         Err(err) => {
@@ -930,6 +1118,14 @@ async fn main() -> ExitCode {
         bot.position.x, bot.position.y, bot.position.z
     );
     let stand = Vector3::new(args.x, args.y, args.z);
+    if args.prove {
+        if let Err(err) = prove_loop(&mut bot, &args.kingdom, args.seconds).await {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+        println!("done");
+        return ExitCode::SUCCESS;
+    }
     if let Err(err) = bot.move_to(stand).await {
         eprintln!("move failed: {err}");
         return ExitCode::from(1);

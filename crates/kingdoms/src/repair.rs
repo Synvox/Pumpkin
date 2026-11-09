@@ -110,6 +110,12 @@ pub fn collect_jobs(
     jobs
 }
 
+/// A repair job when live world state does not match the plan.
+#[must_use]
+pub fn job_if_mismatch(live: u16, planned: crate::stamp::PlannedBlock) -> Option<RepairJob> {
+    (live != planned.state).then(|| RepairJob::from_planned(planned))
+}
+
 /// Place one planned block. Returns true if the world changed.
 pub fn place_one(world: &Arc<World>, job: RepairJob) -> bool {
     let pos = job.pos();
@@ -166,5 +172,22 @@ mod tests {
         if let (Some(w), Some(h)) = (first_wall, first_house) {
             assert!(w < h, "walls before houses");
         }
+    }
+
+    #[test]
+    fn punched_air_becomes_a_repair_job() {
+        let planned = crate::stamp::PlannedBlock {
+            x: 4,
+            y: 80,
+            z: 6,
+            state: pumpkin_data::Block::STONE_BRICKS.default_state.id.as_u16(),
+        };
+        let air = pumpkin_data::Block::AIR.default_state.id.as_u16();
+        let job = job_if_mismatch(air, planned).expect("hole should queue repair");
+        assert_eq!(job.x, 4);
+        assert_eq!(job.y, 80);
+        assert_eq!(job.z, 6);
+        assert_eq!(job.state, planned.state);
+        assert!(job_if_mismatch(planned.state, planned).is_none());
     }
 }

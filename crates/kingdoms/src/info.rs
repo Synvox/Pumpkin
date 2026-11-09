@@ -294,17 +294,21 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
                                 spawns.push(at(SpawnRole::PillagerSpawn, x, z));
                                 tents += 1;
                             }
-                            crate::cells::CellKind::SiegeRam if rams < 8 && (x + z) % 3 == 0 => {
+                            crate::cells::CellKind::SiegeRam
+                                if rams < 8 && ((x + z) % 3 == 0 || rams == 0) =>
+                            {
                                 spawns.push(at(SpawnRole::SiegeRam, x, z));
                                 rams += 1;
                             }
                             crate::cells::CellKind::SiegeLadder
-                                if ladders < 16 && (x + z) % 2 == 0 =>
+                                if ladders < 16 && ((x + z) % 2 == 0 || ladders == 0) =>
                             {
                                 spawns.push(at(SpawnRole::SiegeLadder, x, z));
                                 ladders += 1;
                             }
-                            crate::cells::CellKind::SiegeTreb if trebs < 4 && (x + z) % 4 == 0 => {
+                            crate::cells::CellKind::SiegeTreb
+                                if trebs < 4 && ((x + z) % 4 == 0 || trebs == 0) =>
+                            {
                                 spawns.push(at(SpawnRole::SiegeTreb, x, z));
                                 trebs += 1;
                             }
