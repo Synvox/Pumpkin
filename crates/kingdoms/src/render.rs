@@ -132,23 +132,13 @@ fn write_scene_renders(
             | SceneKind::Ruin
             | SceneKind::Tourney
             | SceneKind::Frontier
-            | SceneKind::Manor => 6,
+            | SceneKind::Manor
+            | SceneKind::Vineyard => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
-        if scene.kind == SceneKind::Harbour
-            && let Some(hull) = largest_blob(plan, CellKind::Ship)
-        {
-            rect = Rect::new(
-                hull.min_x.min(rect.min_x),
-                hull.min_z.min(rect.min_z),
-                hull.max_x.max(rect.max_x),
-                hull.max_z.max(rect.max_z),
-            );
-            let (cx, cz) = hull.center();
-            if rect.width() > 56 || rect.depth() > 56 {
-                rect = Rect::new(cx - 22, cz - 18, cx + 21, cz + 17);
-            }
+        if scene.kind == SceneKind::Harbour {
+            rect = harbour_scene_rect(plan, rect);
         } else if rect.width() > 56 || rect.depth() > 56 {
             let (cx, cz) = rect.center();
             rect = Rect::new(cx - 28, cz - 28, cx + 27, cz + 27);
@@ -180,8 +170,12 @@ fn write_scene_renders(
         .find(|lot| lot.kind == BuildingKind::Watermill)
     {
         let mut rect = mill.rect.inflate(12);
-        if let Some(wheel) = largest_blob(plan, CellKind::WaterWheel) {
-            rect = union_rect(rect, wheel.inflate(6));
+        if let Some(wheel) = wheel_for_mill(plan, mill.rect) {
+            rect = union_rect(rect, wheel.inflate(8));
+            save(
+                &out_dir.join(format!("{stem}-scene-water-wheel.png")),
+                &render_wheel_elevation(volume, wheel, "Water wheel"),
+            )?;
         }
         save(
             &out_dir.join(format!("{stem}-scene-watermill.png")),
@@ -210,6 +204,30 @@ fn write_scene_renders(
         )?;
     }
     Ok(())
+}
+
+fn wheel_for_mill(plan: &TownPlan, mill: Rect) -> Option<Rect> {
+    let pad = mill.inflate(4);
+    let mut found: Option<Rect> = None;
+    for z in pad.min_z..=pad.max_z {
+        for x in pad.min_x..=pad.max_x {
+            if plan.occ.kind(x, z) != CellKind::WaterWheel {
+                continue;
+            }
+            found = Some(found.map_or_else(
+                || Rect::new(x, z, x, z),
+                |rect| {
+                    Rect::new(
+                        rect.min_x.min(x),
+                        rect.min_z.min(z),
+                        rect.max_x.max(x),
+                        rect.max_z.max(z),
+                    )
+                },
+            ));
+        }
+    }
+    found
 }
 
 fn largest_blob(plan: &TownPlan, kind: CellKind) -> Option<Rect> {
@@ -257,11 +275,11 @@ fn blob_kind(plan: &TownPlan, x: i32, z: i32, kind: CellKind) -> Rect {
 pub fn overview_bounds(plan: &TownPlan) -> Rect {
     let mut bounds = plan.castle.bounds.inflate(8);
     bounds = union_rect(bounds, plan.market.inflate(24));
+    bounds = union_rect(bounds, plan.town.inflate(8));
     for scene in &plan.scenes {
-        if scene.kind == SceneKind::Harbour && (scene.rect.width() > 64 || scene.rect.depth() > 64)
-        {
-            if let Some(hull) = largest_blob(plan, CellKind::Ship) {
-                bounds = union_rect(bounds, hull.inflate(20));
+        if scene.kind == SceneKind::Harbour {
+            if let Some(quay) = largest_blob(plan, CellKind::Quay) {
+                bounds = union_rect(bounds, quay.inflate(12));
             }
             continue;
         }
@@ -482,10 +500,10 @@ fn write_cutaways(
                 &render_elevation_west(
                     volume,
                     nave.min_x,
-                    nave.min_z - 1,
-                    nave.max_z + 1,
+                    nave.min_z - 6,
+                    nave.max_z + 6,
                     floor,
-                    floor + 24,
+                    floor + 36,
                     floor + 21,
                     "West front",
                 ),
@@ -528,6 +546,105 @@ fn render_room(
     )
 }
 
+fn harbour_scene_rect(plan: &TownPlan, scene: Rect) -> Rect {
+    let quay = largest_blob(plan, CellKind::Quay).unwrap_or(scene);
+    let mut rect = quay.inflate(14);
+    if let Some(hull) = largest_blob(plan, CellKind::Ship) {
+        rect = union_rect(rect, hull.inflate(8));
+    }
+    if let Some(light) = largest_blob(plan, CellKind::Lighthouse) {
+        rect = union_rect(rect, light.inflate(6));
+    }
+    let (sx, sz) = quay.center();
+    if rect.width() > 72 {
+        rect = Rect::new(sx - 36, rect.min_z, sx + 35, rect.max_z);
+    }
+    if rect.depth() > 72 {
+        rect = Rect::new(rect.min_x, sz - 36, rect.max_x, sz + 35);
+    }
+    rect
+}
+
+fn render_wheel_elevation(volume: &VolumeSink, wheel: Rect, title: &str) -> RgbImage {
+    let along_x = wheel.width() >= wheel.depth();
+    let (along0, along1) = if along_x {
+        (wheel.min_x, wheel.max_x)
+    } else {
+        (wheel.min_z, wheel.max_z)
+    };
+    let (cross0, cross1) = if along_x {
+        (wheel.min_z, wheel.max_z)
+    } else {
+        (wheel.min_x, wheel.max_x)
+    };
+    let mut min_y = i32::MAX;
+    let mut max_y = i32::MIN;
+    for along in along0..=along1 {
+        for cross in cross0..=cross1 {
+            let (x, z) = if along_x {
+                (along, cross)
+            } else {
+                (cross, along)
+            };
+            if let Some((top, _)) = volume.top(x, z) {
+                max_y = max_y.max(top);
+                min_y = min_y.min(top - 12);
+            }
+        }
+    }
+    if min_y > max_y {
+        min_y = 0;
+        max_y = 16;
+    }
+    let scale = 14u32;
+    let span = (along1 - along0 + 3).max(1) as u32;
+    let span_y = (max_y - min_y + 1).max(1) as u32;
+    let label_h = 28u32;
+    let width = (span * scale + 8).max(220);
+    let height = span_y * scale + 8 + label_h;
+    let mut image = ImageBuffer::from_pixel(width, height, Rgb([168u8, 198, 230]));
+    for along in along0..=along1 {
+        for y in min_y..=max_y {
+            let mut chosen = None;
+            for cross in cross0..=cross1 {
+                let (x, z) = if along_x {
+                    (along, cross)
+                } else {
+                    (cross, along)
+                };
+                let Some(state) = volume.get(x, y, z).filter(|s| !s.is_air()) else {
+                    continue;
+                };
+                let id = Block::from_state_id(state.id).id;
+                let wooden = id == Block::STRIPPED_OAK_LOG.id
+                    || id == Block::OAK_LOG.id
+                    || id == Block::OAK_PLANKS.id
+                    || id == Block::OAK_FENCE.id;
+                if wooden {
+                    chosen = Some(state);
+                    break;
+                }
+                if chosen.is_none() {
+                    chosen = Some(state);
+                }
+            }
+            let Some(state) = chosen else {
+                continue;
+            };
+            let rgb = block_rgb(state);
+            let px = ((along - along0 + 1) as u32) * scale + 4;
+            let py = ((max_y - y) as u32) * scale + 4 + label_h;
+            for sy in 0..scale {
+                for sx in 0..scale {
+                    image.put_pixel(px + sx, py + sy, Rgb(rgb));
+                }
+            }
+        }
+    }
+    blit_label(&mut image, title);
+    image
+}
+
 fn render_elevation_west(
     volume: &VolumeSink,
     wall_x: i32,
@@ -547,7 +664,7 @@ fn render_elevation_west(
     let mut image = ImageBuffer::from_pixel(width, height, Rgb([168u8, 198, 230]));
     for z in min_z..=max_z {
         for y in min_y..=max_y {
-            let Some(state) = volume.get(wall_x, y, z).filter(|s| !s.is_air()) else {
+            let Some(state) = facade_state(volume, wall_x, y, z) else {
                 continue;
             };
             let id = Block::from_state_id(state.id).id;
@@ -570,6 +687,15 @@ fn render_elevation_west(
     }
     blit_label(&mut image, title);
     image
+}
+
+fn facade_state(volume: &VolumeSink, wall_x: i32, y: i32, z: i32) -> Option<&BlockState> {
+    for dx in -1..=4 {
+        if let Some(state) = volume.get(wall_x + dx, y, z).filter(|s| !s.is_air()) {
+            return Some(state);
+        }
+    }
+    None
 }
 
 fn render_exterior(
@@ -640,6 +766,12 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     if id == Block::PURPLE_STAINED_GLASS_PANE.id || id == Block::PURPLE_STAINED_GLASS.id {
         return [118, 46, 156];
     }
+    if id == Block::BLUE_STAINED_GLASS_PANE.id || id == Block::BLUE_STAINED_GLASS.id {
+        return [46, 78, 178];
+    }
+    if id == Block::RED_STAINED_GLASS.id {
+        return [170, 40, 40];
+    }
     if id == Block::YELLOW_STAINED_GLASS_PANE.id || id == Block::YELLOW_STAINED_GLASS.id {
         return [216, 178, 56];
     }
@@ -677,6 +809,12 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     }
     if id == Block::BROWN_WOOL.id {
         return [114, 71, 40];
+    }
+    if id == Block::PURPLE_WOOL.id {
+        return [118, 46, 156];
+    }
+    if id == Block::IRON_CHAIN.id {
+        return [70, 70, 78];
     }
     if id == Block::CAMPFIRE.id {
         return [220, 110, 32];

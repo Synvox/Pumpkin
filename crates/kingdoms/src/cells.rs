@@ -138,6 +138,10 @@ pub enum CellKind {
     Sluice,
     /// Cobble retaining wall beside a switchback.
     Retaining,
+    /// Terraced grape vines on a hillside abbey.
+    Vine,
+    /// Harbour lighthouse on the breakwater end.
+    Lighthouse,
 }
 
 impl CellKind {
