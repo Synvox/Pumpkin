@@ -76,6 +76,174 @@ impl TownCheck {
     }
 }
 
+/// Leaves or plants with air below that are not next to a log, plus feature
+/// trees (log+leaves) overlapping a scene yard. Lily pads in a scene fail even
+/// when they sit on water.
+#[must_use]
+pub fn check_scene_vegetation(plan: &TownPlan, volume: &VolumeSink) -> Vec<String> {
+    use crate::scenes::SCENE_YARD_MARGIN;
+
+    let mut fails = Vec::new();
+    for scene in &plan.scenes {
+        let pad = scene.rect.inflate(SCENE_YARD_MARGIN);
+        for z in pad.min_z.max(volume.min_z)..=pad.max_z.min(volume.min_z + volume.sz - 1) {
+            for x in pad.min_x.max(volume.min_x)..=pad.max_x.min(volume.min_x + volume.sx - 1) {
+                let kind = plan.occ.kind(x, z);
+                for y in volume.min_y..volume.min_y + volume.sy {
+                    let Some(state) = volume.get(x, y, z) else {
+                        continue;
+                    };
+                    if state.is_air() {
+                        continue;
+                    }
+                    let block = Block::from_state_id(state.id);
+                    if is_water_plant(block.id) {
+                        fails.push(format!(
+                            "{:?} water-plant {} at {x},{y},{z}",
+                            scene.kind, block.name
+                        ));
+                        continue;
+                    }
+                    if is_leaf_or_plant(block.id) {
+                        let below_air = volume
+                            .get(x, y - 1, z)
+                            .is_none_or(pumpkin_data::BlockState::is_air);
+                        if below_air
+                            && !adjacent_log(volume, x, y, z)
+                            && y + 4 >= plan.heights.height(x, z)
+                        {
+                            fails.push(format!(
+                                "{:?} floating {} at {x},{y},{z}",
+                                scene.kind, block.name
+                            ));
+                        }
+                    }
+                    if is_log(block.id)
+                        && !planned_timber(kind)
+                        && nearby_leaves(volume, x, y, z)
+                        && y + 4 >= plan.heights.height(x, z)
+                    {
+                        fails.push(format!(
+                            "{:?} feature tree at {x},{y},{z} kind={kind:?}",
+                            scene.kind
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    fails
+}
+
+fn is_leaf_or_plant(id: pumpkin_data::BlockId) -> bool {
+    id == Block::OAK_LEAVES.id
+        || id == Block::SPRUCE_LEAVES.id
+        || id == Block::BIRCH_LEAVES.id
+        || id == Block::JUNGLE_LEAVES.id
+        || id == Block::ACACIA_LEAVES.id
+        || id == Block::DARK_OAK_LEAVES.id
+        || id == Block::CHERRY_LEAVES.id
+        || id == Block::MANGROVE_LEAVES.id
+        || id == Block::AZALEA_LEAVES.id
+        || id == Block::FLOWERING_AZALEA_LEAVES.id
+        || id == Block::OAK_SAPLING.id
+        || id == Block::SPRUCE_SAPLING.id
+        || id == Block::BIRCH_SAPLING.id
+        || id == Block::JUNGLE_SAPLING.id
+        || id == Block::ACACIA_SAPLING.id
+        || id == Block::DARK_OAK_SAPLING.id
+}
+
+fn is_water_plant(id: pumpkin_data::BlockId) -> bool {
+    id == Block::LILY_PAD.id
+        || id == Block::SEAGRASS.id
+        || id == Block::TALL_SEAGRASS.id
+        || id == Block::KELP.id
+        || id == Block::KELP_PLANT.id
+}
+
+fn is_log(id: pumpkin_data::BlockId) -> bool {
+    id == Block::OAK_LOG.id
+        || id == Block::SPRUCE_LOG.id
+        || id == Block::BIRCH_LOG.id
+        || id == Block::JUNGLE_LOG.id
+        || id == Block::ACACIA_LOG.id
+        || id == Block::DARK_OAK_LOG.id
+        || id == Block::CHERRY_LOG.id
+        || id == Block::MANGROVE_LOG.id
+}
+
+fn planned_timber(kind: CellKind) -> bool {
+    matches!(
+        kind,
+        CellKind::Building
+            | CellKind::Ship
+            | CellKind::Boat
+            | CellKind::Crane
+            | CellKind::Dock
+            | CellKind::MineHead
+            | CellKind::MineAdit
+            | CellKind::MineRail
+            | CellKind::Palisade
+            | CellKind::PalisadeWalk
+            | CellKind::PalisadeGate
+            | CellKind::WindSail
+            | CellKind::WatchPost
+            | CellKind::Orchard
+            | CellKind::Grave
+            | CellKind::Lychgate
+            | CellKind::Arcade
+            | CellKind::Hedge
+            | CellKind::Tent
+            | CellKind::WarTent
+            | CellKind::SiegeTreb
+            | CellKind::SiegeRam
+            | CellKind::SiegeLadder
+            | CellKind::Burnt
+            | CellKind::Eave
+    )
+}
+
+fn adjacent_log(volume: &VolumeSink, x: i32, y: i32, z: i32) -> bool {
+    for (dx, dy, dz) in [
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ] {
+        if let Some(state) = volume.get(x + dx, y + dy, z + dz)
+            && is_log(Block::from_state_id(state.id).id)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn nearby_leaves(volume: &VolumeSink, x: i32, y: i32, z: i32) -> bool {
+    for dy in -1..=3 {
+        for dz in -2..=2 {
+            for dx in -2..=2 {
+                if let Some(state) = volume.get(x + dx, y + dy, z + dz) {
+                    let id = Block::from_state_id(state.id).id;
+                    if id == Block::OAK_LEAVES.id
+                        || id == Block::SPRUCE_LEAVES.id
+                        || id == Block::BIRCH_LEAVES.id
+                        || id == Block::JUNGLE_LEAVES.id
+                        || id == Block::ACACIA_LEAVES.id
+                        || id == Block::DARK_OAK_LEAVES.id
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Runs the flood-fill and roof-support checks for every roofed building.
 #[must_use]
 pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
@@ -1240,5 +1408,192 @@ mod tests {
             "desert dome should be at least 5 wide, span={}",
             dome_span + 1
         );
+    }
+
+    #[test]
+    fn scene_yards_have_no_floating_plants_or_feature_trees() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let volume = fill_volume(&plan);
+        let fails = check_scene_vegetation(&plan, &volume);
+        assert!(fails.is_empty(), "scene vegetation:\n{}", fails.join("\n"));
+    }
+
+    #[test]
+    fn west_front_rose_has_no_roof_tiles_in_the_wheel() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let Some(scene) = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == crate::scenes::SceneKind::Cathedral)
+        else {
+            return;
+        };
+        let mut nave: Option<Rect> = None;
+        for z in scene.rect.min_z..=scene.rect.max_z {
+            for x in scene.rect.min_x..=scene.rect.max_x {
+                if plan.occ.kind(x, z) != CellKind::CathedralNave {
+                    continue;
+                }
+                nave = Some(nave.map_or_else(
+                    || Rect::new(x, z, x, z),
+                    |rect| {
+                        Rect::new(
+                            rect.min_x.min(x),
+                            rect.min_z.min(z),
+                            rect.max_x.max(x),
+                            rect.max_z.max(z),
+                        )
+                    },
+                ));
+            }
+        }
+        let Some(nave) = nave else {
+            return;
+        };
+        let volume = fill_volume(&plan);
+        let floor = crate::stamp::ridge_floor(&plan, nave);
+        let cz = nave.center().1;
+        let wall_x = nave.min_x;
+        let mut dark = 0;
+        for z in cz - 5..=cz + 5 {
+            for y in floor + 6..=floor + 16 {
+                if let Some(state) = volume.get(wall_x, y, z) {
+                    let id = Block::from_state_id(state.id).id;
+                    if id == Block::DEEPSLATE_TILES.id
+                        || id == Block::DEEPSLATE_TILE_STAIRS.id
+                        || id == Block::DEEPSLATE_TILE_SLAB.id
+                    {
+                        dark += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(dark, 0, "deepslate roof tiles inside the west-front rose");
+    }
+
+    #[test]
+    fn feature_trees_are_stripped_from_world_scene_yards() {
+        use pumpkin_data::dimension::Dimension;
+        use pumpkin_util::world_seed::Seed;
+        use pumpkin_world::generation::get_world_gen;
+        use std::sync::Arc;
+
+        let seed = 20_261_025u64;
+        let boxed = get_world_gen(
+            Seed(seed),
+            Dimension::OVERWORLD,
+            false,
+            Vec::new(),
+            String::new(),
+        );
+        let world_gen = Arc::from(boxed);
+        crate::height::register_world_gen(Arc::clone(&world_gen));
+        crate::marker::register_hooks(world_gen.extensions());
+        let plan = crate::plan::plan_for(seed, 0, 0, &world_gen);
+        let mut region = plan.market.inflate(8);
+        for scene in &plan.scenes {
+            if !matches!(
+                scene.kind,
+                crate::scenes::SceneKind::Harbour
+                    | crate::scenes::SceneKind::Mine
+                    | crate::scenes::SceneKind::Tourney
+                    | crate::scenes::SceneKind::Plaza
+                    | crate::scenes::SceneKind::Frontier
+            ) {
+                continue;
+            }
+            let mut rect = scene.rect;
+            if scene.kind == crate::scenes::SceneKind::Harbour {
+                if let Some(hull) = largest_ship(&plan) {
+                    rect = hull.inflate(12);
+                } else if rect.width() > 48 || rect.depth() > 48 {
+                    let (cx, cz) = rect.center();
+                    rect = Rect::new(cx - 24, cz - 24, cx + 23, cz + 23);
+                }
+            } else if rect.width() > 48 || rect.depth() > 48 {
+                let (cx, cz) = rect.center();
+                rect = Rect::new(cx - 24, cz - 24, cx + 23, cz + 23);
+            }
+            region = Rect::new(
+                region.min_x.min(rect.min_x),
+                region.min_z.min(rect.min_z),
+                region.max_x.max(rect.max_x),
+                region.max_z.max(rect.max_z),
+            );
+        }
+        let volume = crate::chunk_fill::fill_volume_from_chunks_in(&plan, &world_gen, region);
+        let fails: Vec<String> = check_scene_vegetation(&plan, &volume)
+            .into_iter()
+            .filter(|line| {
+                line.contains("Harbour")
+                    || line.contains("Plaza")
+                    || line.contains("Mine")
+                    || line.contains("Tourney")
+                    || line.contains("Frontier")
+            })
+            .collect();
+        assert!(
+            fails.is_empty(),
+            "feature trees / floating plants in scene yards:\n{}",
+            fails.join("\n")
+        );
+    }
+
+    fn largest_ship(plan: &crate::plan::TownPlan) -> Option<Rect> {
+        let mut best: Option<Rect> = None;
+        let mut best_n = 0;
+        for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
+            for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
+                if plan.occ.kind(x, z) != CellKind::Ship {
+                    continue;
+                }
+                if best.is_some_and(|rect| rect.contains(x, z)) {
+                    continue;
+                }
+                let mut min_x = x;
+                let mut max_x = x;
+                let mut min_z = z;
+                let mut max_z = z;
+                for dz in -10..=10 {
+                    for dx in -10..=10 {
+                        if plan.occ.kind(x + dx, z + dz) == CellKind::Ship {
+                            min_x = min_x.min(x + dx);
+                            max_x = max_x.max(x + dx);
+                            min_z = min_z.min(z + dz);
+                            max_z = max_z.max(z + dz);
+                        }
+                    }
+                }
+                let blob = Rect::new(min_x, min_z, max_x, max_z);
+                let n = blob.width() * blob.depth();
+                if n > best_n {
+                    best_n = n;
+                    best = Some(blob);
+                }
+            }
+        }
+        best
     }
 }

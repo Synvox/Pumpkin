@@ -19,7 +19,9 @@ use crate::height::{HeightGrid, SAMPLE_STEP, world_gen_for};
 use crate::info::{GateInfo, GateKind, RoadInfo};
 use crate::palette::PaletteKind;
 use crate::rng::TownRng;
-use crate::scenes::{Scene, SceneKind, paint_harbour_town, place_scenes, try_lot};
+use crate::scenes::{
+    Scene, SceneKind, force_lot, paint_harbour_town, paint_scene_yards, place_scenes,
+};
 use crate::town::{CELL_SIZE, TownPos, border_crossing, border_goal, town_in_cell};
 
 /// Pad around castle+town so hinterland farms, hamlets and camps fit.
@@ -70,6 +72,17 @@ impl TownPlan {
             .iter()
             .copied()
             .find(|scene| scene.rect.contains(x, z))
+    }
+
+    /// True inside any scene footprint plus [`crate::scenes::SCENE_YARD_MARGIN`].
+    #[must_use]
+    pub fn in_scene_yard(&self, x: i32, z: i32) -> bool {
+        self.scenes.iter().any(|scene| {
+            scene
+                .rect
+                .inflate(crate::scenes::SCENE_YARD_MARGIN)
+                .contains(x, z)
+        })
     }
 }
 
@@ -194,7 +207,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     );
 
     let mut lots = place_lots(&mut occ, &grid, town_rect, market, &mut rng, seed, palette);
-    paint_civic_square(&mut occ, &grid, &mut lots, seed, market, town_rect);
+    paint_civic_square(&mut occ, &grid, &mut lots, seed, market, town_rect, palette);
     paint_hedges_and_gardens(&mut occ, town_rect);
     place_farms(&mut occ, &grid, town_rect, castle_rect, &mut rng);
     let mut scenes = place_scenes(
@@ -202,6 +215,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &grid,
         castle_rect,
         town_rect,
+        origin,
         &mut lots,
         seed,
         &mut rng,
@@ -222,6 +236,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &mut rng,
         &mut scenes,
     );
+    paint_scene_yards(&mut occ, &grid, &scenes);
 
     debug_assert!(castle.bounds.width() >= CASTLE_MIN);
     debug_assert!(castle.bounds.depth() >= CASTLE_MIN);
@@ -487,6 +502,7 @@ fn paint_civic_square(
     seed: u64,
     market: Rect,
     town: Rect,
+    palette: PaletteKind,
 ) {
     let cobble = market.inflate(3);
     for z in cobble.min_z..=cobble.max_z {
@@ -502,30 +518,10 @@ fn paint_civic_square(
             }
         }
     }
-    let hedge = market.inflate(5);
-    for z in hedge.min_z..=hedge.max_z {
-        for x in hedge.min_x..=hedge.max_x {
-            if cobble.contains(x, z) || !town.contains(x, z) {
-                continue;
-            }
-            if matches!(occ.kind(x, z), CellKind::Empty | CellKind::Green)
-                && (x == hedge.min_x
-                    || x == hedge.max_x
-                    || z == hedge.min_z
-                    || z == hedge.max_z
-                    || (x + z).rem_euclid(4) == 0)
-            {
-                occ.set(x, z, CellKind::Hedge, true);
-            }
-        }
-    }
-    let hall = Rect::new(
-        market.min_x + 1,
-        market.min_z - 13,
-        market.min_x + 13,
-        market.min_z - 2,
-    );
-    if try_lot(
+    let (mx, mz) = market.center();
+    let hall = Rect::new(mx - 7, market.min_z - 13, mx + 6, market.min_z - 2);
+    evict_lots(occ, lots, hall);
+    if !civic_lot(
         occ,
         grid,
         lots,
@@ -533,16 +529,11 @@ fn paint_civic_square(
         BuildingKind::TownHall,
         hall,
         Dir::South,
-    )
-    .is_none()
-    {
-        let west = Rect::new(
-            market.min_x - 14,
-            market.min_z + 2,
-            market.min_x - 2,
-            market.min_z + 13,
-        );
-        let _ = try_lot(
+        town,
+    ) {
+        let west = Rect::new(market.min_x - 14, mz - 6, market.min_x - 2, mz + 5);
+        evict_lots(occ, lots, west);
+        let _ = civic_lot(
             occ,
             grid,
             lots,
@@ -550,28 +541,200 @@ fn paint_civic_square(
             BuildingKind::TownHall,
             west,
             Dir::East,
+            town,
         );
     }
+    paint_market_frontage(occ, grid, lots, seed, market, town, palette);
     let mut stalls = 0;
     let mut z = market.min_z + 1;
-    while z + 5 < market.max_z && stalls < 14 {
+    while z + 3 <= market.max_z && stalls < 18 {
         let mut x = market.min_x + 1;
-        while x + 5 < market.max_x && stalls < 14 {
-            let rect = Rect::new(x, z, x + 4, z + 4);
-            x += 6;
-            if market.contains(market.center().0, market.center().1)
-                && rect
-                    .inflate(2)
-                    .contains(market.center().0, market.center().1)
-            {
+        while x + 3 <= market.max_x && stalls < 18 {
+            let rect = Rect::new(x, z, x + 3, z + 3);
+            x += 5;
+            if rect.inflate(2).contains(mx, mz) {
                 continue;
             }
-            if try_lot(occ, grid, lots, seed, BuildingKind::Stall, rect, Dir::South).is_some() {
+            if force_lot(occ, grid, lots, seed, BuildingKind::Stall, rect, Dir::South).is_some() {
                 stalls += 1;
             }
         }
-        z += 6;
+        z += 5;
     }
+}
+
+fn evict_lots(occ: &mut Occupancy, lots: &mut Vec<Lot>, rect: Rect) {
+    let ids: Vec<u16> = lots
+        .iter()
+        .filter(|lot| lot.rect.intersects(rect) && lot.kind != BuildingKind::TownHall)
+        .map(|lot| lot.id)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let gone: Vec<Rect> = lots
+        .iter()
+        .filter(|lot| ids.contains(&lot.id))
+        .map(|lot| lot.rect)
+        .collect();
+    lots.retain(|lot| !ids.contains(&lot.id));
+    for old in gone {
+        for z in old.min_z..=old.max_z {
+            for x in old.min_x..=old.max_x {
+                occ.set(x, z, CellKind::Empty, true);
+            }
+        }
+    }
+}
+
+fn civic_lot(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    kind: BuildingKind,
+    rect: Rect,
+    facing: Dir,
+    town: Rect,
+) -> bool {
+    if !town.contains(rect.min_x, rect.min_z) || !town.contains(rect.max_x, rect.max_z) {
+        return false;
+    }
+    force_lot(occ, grid, lots, seed, kind, rect, facing).is_some()
+}
+
+fn paint_market_frontage(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    market: Rect,
+    town: Rect,
+    palette: PaletteKind,
+) {
+    let house = if palette == PaletteKind::Sandstone {
+        BuildingKind::Townhouse
+    } else {
+        BuildingKind::Timber
+    };
+    let (w, d) = house.size();
+    let mut x = market.min_x;
+    while x + w - 1 <= market.max_x {
+        let north = Rect::new(x, market.min_z - d - 1, x + w - 1, market.min_z - 2);
+        evict_lots(occ, lots, north);
+        let _ = civic_lot(occ, grid, lots, seed, house, north, Dir::South, town);
+        let south = Rect::new(x, market.max_z + 2, x + w - 1, market.max_z + d + 1);
+        evict_lots(occ, lots, south);
+        let _ = civic_lot(occ, grid, lots, seed, house, south, Dir::North, town);
+        x += w + 1;
+    }
+    let mut z = market.min_z;
+    while z + w - 1 <= market.max_z {
+        let west = Rect::new(market.min_x - d - 1, z, market.min_x - 2, z + w - 1);
+        evict_lots(occ, lots, west);
+        let _ = civic_lot(occ, grid, lots, seed, house, west, Dir::East, town);
+        let east = Rect::new(market.max_x + 2, z, market.max_x + d + 1, z + w - 1);
+        evict_lots(occ, lots, east);
+        let _ = civic_lot(occ, grid, lots, seed, house, east, Dir::West, town);
+        z += w + 1;
+    }
+    // If a side sits against the town wall, drop a shallower row just inside
+    // the square so the frontage still reads on every face.
+    fill_inner_frontage(occ, grid, lots, seed, market, house, Dir::North);
+    fill_inner_frontage(occ, grid, lots, seed, market, house, Dir::South);
+    fill_inner_frontage(occ, grid, lots, seed, market, house, Dir::West);
+    fill_inner_frontage(occ, grid, lots, seed, market, house, Dir::East);
+}
+
+fn fill_inner_frontage(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    market: Rect,
+    house: BuildingKind,
+    side: Dir,
+) {
+    if frontage_on_side(lots, market, side) {
+        return;
+    }
+    let depth = 6;
+    let along = 9;
+    match side {
+        Dir::North => {
+            let mut x = market.min_x + 1;
+            while x + along - 1 <= market.max_x {
+                let rect = Rect::new(x, market.min_z, x + along - 1, market.min_z + depth - 1);
+                let _ = force_lot(occ, grid, lots, seed, house, rect, Dir::South);
+                x += along + 1;
+            }
+        }
+        Dir::South => {
+            let mut x = market.min_x + 1;
+            while x + along - 1 <= market.max_x {
+                let rect = Rect::new(x, market.max_z - depth + 1, x + along - 1, market.max_z);
+                let _ = force_lot(occ, grid, lots, seed, house, rect, Dir::North);
+                x += along + 1;
+            }
+        }
+        Dir::West => {
+            let mut z = market.min_z + 1;
+            while z + along - 1 <= market.max_z {
+                let rect = Rect::new(market.min_x, z, market.min_x + depth - 1, z + along - 1);
+                let _ = force_lot(occ, grid, lots, seed, house, rect, Dir::East);
+                z += along + 1;
+            }
+        }
+        Dir::East => {
+            let mut z = market.min_z + 1;
+            while z + along - 1 <= market.max_z {
+                let rect = Rect::new(market.max_x - depth + 1, z, market.max_x, z + along - 1);
+                let _ = force_lot(occ, grid, lots, seed, house, rect, Dir::West);
+                z += along + 1;
+            }
+        }
+    }
+}
+
+fn frontage_on_side(lots: &[Lot], market: Rect, side: Dir) -> bool {
+    lots.iter().any(|lot| {
+        if !matches!(
+            lot.kind,
+            BuildingKind::Timber | BuildingKind::Townhouse | BuildingKind::TownHall
+        ) {
+            return false;
+        }
+        match side {
+            Dir::North => {
+                lot.rect.min_z <= market.min_z + 6
+                    && lot.rect.max_z >= market.min_z - 16
+                    && lot.rect.max_z <= market.min_z + 8
+                    && lot.rect.max_x >= market.min_x
+                    && lot.rect.min_x <= market.max_x
+            }
+            Dir::South => {
+                lot.rect.max_z >= market.max_z - 6
+                    && lot.rect.min_z <= market.max_z + 16
+                    && lot.rect.min_z >= market.max_z - 8
+                    && lot.rect.max_x >= market.min_x
+                    && lot.rect.min_x <= market.max_x
+            }
+            Dir::West => {
+                lot.rect.min_x <= market.min_x + 6
+                    && lot.rect.max_x >= market.min_x - 16
+                    && lot.rect.max_x <= market.min_x + 8
+                    && lot.rect.max_z >= market.min_z
+                    && lot.rect.min_z <= market.max_z
+            }
+            Dir::East => {
+                lot.rect.max_x >= market.max_x - 6
+                    && lot.rect.min_x <= market.max_x + 16
+                    && lot.rect.min_x >= market.max_x - 8
+                    && lot.rect.max_z >= market.min_z
+                    && lot.rect.min_z <= market.max_z
+            }
+        }
+    })
 }
 
 fn paint_hedges_and_gardens(occ: &mut Occupancy, town: Rect) {

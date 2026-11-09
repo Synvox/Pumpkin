@@ -130,11 +130,25 @@ fn write_scene_renders(
             | SceneKind::Monastery
             | SceneKind::Mine
             | SceneKind::Ruin
-            | SceneKind::Tourney => 6,
+            | SceneKind::Tourney
+            | SceneKind::Frontier => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
-        if rect.width() > 56 || rect.depth() > 56 {
+        if scene.kind == SceneKind::Harbour
+            && let Some(hull) = largest_blob(plan, CellKind::Ship)
+        {
+            rect = Rect::new(
+                hull.min_x.min(rect.min_x),
+                hull.min_z.min(rect.min_z),
+                hull.max_x.max(rect.max_x),
+                hull.max_z.max(rect.max_z),
+            );
+            let (cx, cz) = hull.center();
+            if rect.width() > 56 || rect.depth() > 56 {
+                rect = Rect::new(cx - 22, cz - 18, cx + 21, cz + 17);
+            }
+        } else if rect.width() > 56 || rect.depth() > 56 {
             let (cx, cz) = rect.center();
             rect = Rect::new(cx - 28, cz - 28, cx + 27, cz + 27);
         }
@@ -454,6 +468,7 @@ fn write_cutaways(
                     nave.max_z + 6,
                     floor + 2,
                     floor + 28,
+                    floor + 16,
                     "Cathedral · west front",
                 ),
             )?;
@@ -502,6 +517,7 @@ fn render_elevation_west(
     max_z: i32,
     min_y: i32,
     max_y: i32,
+    rose_top: i32,
     title: &str,
 ) -> RgbImage {
     let scale = 14u32;
@@ -518,6 +534,14 @@ fn render_elevation_west(
                 if let Some(state) = volume.get(x, y, z)
                     && !state.is_air()
                 {
+                    let id = Block::from_state_id(state.id).id;
+                    if y <= rose_top
+                        && (id == Block::DEEPSLATE_TILES.id
+                            || id == Block::DEEPSLATE_TILE_STAIRS.id
+                            || id == Block::DEEPSLATE_TILE_SLAB.id)
+                    {
+                        continue;
+                    }
                     rgb = Some(block_rgb(state));
                     break;
                 }
