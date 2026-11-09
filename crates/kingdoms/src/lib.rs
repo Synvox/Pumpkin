@@ -35,6 +35,7 @@ use pumpkin_core::world::World;
 use pumpkin_data::dimension::Dimension;
 use tracing::info;
 
+pub mod abstract_combat;
 pub mod buildings;
 pub mod castle;
 pub mod cells;
@@ -113,6 +114,9 @@ pub fn install(server: &Server) {
     register_world_init_handler(server);
     events::register(server);
     crate::http::spawn_if_enabled();
+    // Opt-in pumpkin-core hook: grow a new player's view cylinder one ring
+    // per tick instead of filling view-distance in a single hitch.
+    pumpkin_core::world::chunker::set_join_view_grow(1);
     info!("Kingdoms plugin installed (towns, villagers, raids)");
 }
 

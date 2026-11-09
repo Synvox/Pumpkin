@@ -31,6 +31,10 @@ use pumpkin_util::text::TextComponent;
 use pumpkin_util::text::color::NamedColor;
 use uuid::Uuid;
 
+use crate::abstract_combat::{
+    ABSTRACT_MARCH_TICKS, ABSTRACT_PERIOD, AbstractState, PLAYER_LIVE_RANGE, body_budget,
+    near_camp, step_abstract,
+};
 use crate::chat::{self, ShoutKind};
 use crate::faction::{
     Faction, KingdomId, TAG_CAPTAIN, TAG_RAIDER, TAG_ROUTED, TAG_TEMP, faction_of_entity, has_tag,
@@ -54,7 +58,7 @@ use crate::roles::{PopulationSpec, VillagerRole, citizen_slots};
 use crate::scene::{ScenePost, TownInfoScene, TownScene};
 use crate::schedule::{self, CivilianPost};
 use crate::siege::{
-    self, HOLD_TICKS, MarchJob, TownOwner, WALL_WALK_LIFT, capture_need, in_courtyard, tick_hold,
+    self, HOLD_TICKS, MarchJob, TownOwner, WALL_WALK_LIFT, capture_need, in_courtyard, tick_hold_n,
 };
 use crate::sim::{SimSnapshot, write_named_snapshots_with_kills};
 use crate::town::town_containing;
@@ -141,6 +145,7 @@ pub struct WarTownLine {
     pub raiders: u32,
     pub raid_side: Option<String>,
     pub repair_until: u32,
+    pub live: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -256,6 +261,10 @@ struct ActiveRaid {
     spawn_cursor: u16,
     extra_left: u16,
     ram_spawned: bool,
+    materialized: bool,
+    virt_raiders: u16,
+    virt_defenders: u16,
+    virt_march: u32,
 }
 
 impl Director {
@@ -342,6 +351,22 @@ impl Director {
         *self.scores.entry(name.to_owned()).or_insert(0) += delta;
     }
 
+    fn live_body_count(&self) -> usize {
+        self.towns
+            .values()
+            .map(|w| {
+                let Some(raid) = w.raid.as_ref() else {
+                    return 0;
+                };
+                if raid.materialized {
+                    w.wired.len() + raid.living.len()
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+
     fn persist_owner(&mut self, town_id: &str, owner: TownOwner) {
         self.owners.insert(town_id.to_owned(), owner.clone());
         if let Some(war) = self.towns.get_mut(town_id) {
@@ -426,7 +451,20 @@ impl Director {
         let id = RaidId(self.next_raid_id);
         self.next_raid_id += 1;
         let tick = self.tick;
-        let warm_until = tick.saturating_add(WARM_TICKS);
+        let keep = self.towns.get(town_id).map_or(camp, |w| w.scene.keep());
+        let near = player_near_posts(
+            world,
+            &[camp, keep, gate.unwrap_or(keep)],
+            PLAYER_LIVE_RANGE,
+        );
+        let materialized = near && self.live_body_count() < body_budget();
+        let warm_until = if materialized {
+            tick.saturating_add(WARM_TICKS)
+        } else {
+            tick
+        };
+        let virt_raiders = spec.raiders;
+        let virt_defenders = spec.extra_defenders;
         if let Some(war) = self.towns.get_mut(town_id) {
             war.raid = Some(ActiveRaid {
                 id,
@@ -441,8 +479,12 @@ impl Director {
                 pending_members: Vec::new(),
                 pending_retake: 0,
                 spawn_cursor: 0,
-                extra_left: spec.extra_defenders,
+                extra_left: virt_defenders,
                 ram_spawned: false,
+                materialized,
+                virt_raiders,
+                virt_defenders,
+                virt_march: 0,
             });
             war.alarm = true;
             war.gates_closed = false;
@@ -554,14 +596,31 @@ impl Director {
                     true,
                     u32::from(r.wave) + 1,
                     u32::from(r.spec.waves),
-                    r.living.len() as u32,
+                    if r.materialized {
+                        r.living.len() as u32
+                    } else {
+                        u32::from(r.virt_raiders)
+                    },
                 )
             });
-        let defenders_alive = war
-            .wired
-            .values()
-            .filter(|w| w.faction.is_kingdom())
-            .count() as u32;
+        let defenders_alive = war.raid.as_ref().map_or_else(
+            || {
+                war.wired
+                    .values()
+                    .filter(|w| w.faction.is_kingdom())
+                    .count() as u32
+            },
+            |r| {
+                if r.materialized {
+                    war.wired
+                        .values()
+                        .filter(|w| w.faction.is_kingdom())
+                        .count() as u32
+                } else {
+                    u32::from(r.virt_defenders)
+                }
+            },
+        );
         Some(BattleState {
             town_id: war.info_id.clone(),
             kingdom: war.kingdom.as_str().to_owned(),
@@ -577,10 +636,13 @@ impl Director {
             owner: war.owner.as_str().to_owned(),
             gate_breached: war.gate_breached,
             occupy_hold: war.occupy_hold,
-            occupy_need: war
-                .raid
-                .as_ref()
-                .map_or(8, |r| capture_need(r.living.len() as u32)),
+            occupy_need: war.raid.as_ref().map_or(8, |r| {
+                capture_need(if r.materialized {
+                    r.living.len() as u32
+                } else {
+                    u32::from(r.virt_raiders)
+                })
+            }),
             ram_hp: war.ram.as_ref().map_or(0.0, |r| r.hp),
         })
     }
@@ -604,12 +666,22 @@ impl Director {
                     .threatened
                     .map(|p| (p.x, p.z))
                     .or_else(|| war.scene.gates().first().map(|g| (g.x, g.z)));
-                let raiders = war.raid.as_ref().map_or(0, |r| r.living.len() as u32);
-                let defenders = war
-                    .wired
-                    .values()
-                    .filter(|w| w.faction.is_kingdom())
-                    .count() as u32;
+                let live = war.raid.as_ref().is_some_and(|r| r.materialized);
+                let raiders = war.raid.as_ref().map_or(0, |r| {
+                    if r.materialized {
+                        r.living.len() as u32
+                    } else {
+                        u32::from(r.virt_raiders)
+                    }
+                });
+                let defenders = if live {
+                    war.wired
+                        .values()
+                        .filter(|w| w.faction.is_kingdom())
+                        .count() as u32
+                } else {
+                    war.raid.as_ref().map_or(0, |r| u32::from(r.virt_defenders))
+                };
                 WarTownLine {
                     id: war.info_id.clone(),
                     kingdom: war.kingdom.as_str().to_owned(),
@@ -620,14 +692,18 @@ impl Director {
                     keep: (keep.x, keep.z),
                     gate,
                     occupy_hold: war.occupy_hold,
-                    occupy_need: war
-                        .raid
-                        .as_ref()
-                        .map_or(8, |r| capture_need(r.living.len() as u32)),
+                    occupy_need: war.raid.as_ref().map_or(8, |r| {
+                        capture_need(if r.materialized {
+                            r.living.len() as u32
+                        } else {
+                            u32::from(r.virt_raiders)
+                        })
+                    }),
                     defenders,
                     raiders,
                     raid_side: war.raid.as_ref().map(|r| r.spec.side.as_str().to_owned()),
                     repair_until: war.repair_until,
+                    live,
                 }
             })
             .collect();
@@ -1106,9 +1182,11 @@ pub fn tick_world(world: &Arc<World>) {
     let town_ids: Vec<String> = dir.towns.keys().cloned().collect();
     drop(dir);
 
+    let towns_started = Instant::now();
     for town_id in town_ids {
         tick_one_town(world, &town_id, tick);
     }
+    let towns_us = towns_started.elapsed().as_micros();
     maybe_war_clock(world, tick);
 
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -1124,7 +1202,8 @@ pub fn tick_world(world: &Arc<World>) {
         .upgrade()
         .map_or((0.0, ms), |s| (s.get_tps(), s.get_mspt()));
     note_hitch(tick, mspt, ms);
-    maybe_soak_sample(world, tick, mspt, ms);
+    maybe_soak_sample(world, tick, mspt, ms, towns_us);
+    maybe_profile(world, tick, mspt, ms, towns_us);
     if tick.is_multiple_of(100) {
         let dir = lock();
         let (def_k, raid_k, def_n, raid_n, gate_d) = dir.towns.values().fold(
@@ -1152,7 +1231,7 @@ pub fn tick_world(world: &Arc<World>) {
     }
 }
 
-fn maybe_soak_sample(world: &World, tick: u32, mspt: f64, director_ms: f64) {
+fn maybe_soak_sample(world: &World, tick: u32, mspt: f64, director_ms: f64, towns_us: u128) {
     if !tick.is_multiple_of(20) {
         return;
     }
@@ -1166,15 +1245,22 @@ fn maybe_soak_sample(world: &World, tick: u32, mspt: f64, director_ms: f64) {
     let dir = lock();
     let tickets: usize = dir.towns.values().map(|w| w.ticketed.len()).sum();
     let raids = dir.towns.values().filter(|w| w.raid.is_some()).count();
+    let live_fronts = dir
+        .towns
+        .values()
+        .filter(|w| w.raid.as_ref().is_some_and(|r| r.materialized))
+        .count();
+    let abstract_fronts = raids.saturating_sub(live_fronts);
     let bodies: usize = dir
         .towns
         .values()
         .map(|w| w.wired.len() + w.raid.as_ref().map_or(0, |r| r.living.len()))
         .sum();
+    let live_bodies = dir.live_body_count();
     drop(dir);
     let rss_kb = process_rss_kb();
     let line = format!(
-        "{tick},{mspt:.2},{director_ms:.2},{entities},{tickets},{rss_kb},{raids},{bodies}\n"
+        "{tick},{mspt:.2},{director_ms:.2},{entities},{tickets},{rss_kb},{raids},{bodies},{live_fronts},{abstract_fronts},{live_bodies},{towns_us}\n"
     );
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -1208,6 +1294,36 @@ fn note_hitch(tick: u32, mspt: f64, director_ms: f64) {
     }
 }
 
+fn maybe_profile(world: &World, tick: u32, mspt: f64, director_ms: f64, towns_us: u128) {
+    if !tick.is_multiple_of(100) {
+        return;
+    }
+    let profile =
+        std::env::var("KINGDOMS_PROFILE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    if !profile {
+        return;
+    }
+    let entities = world.entities.load().len();
+    let dir = lock();
+    let tickets: usize = dir.towns.values().map(|w| w.ticketed.len()).sum();
+    let live_fronts = dir
+        .towns
+        .values()
+        .filter(|w| w.raid.as_ref().is_some_and(|r| r.materialized))
+        .count();
+    let abstract_fronts = dir
+        .towns
+        .values()
+        .filter(|w| w.raid.as_ref().is_some_and(|r| !r.materialized))
+        .count();
+    let live_bodies = dir.live_body_count();
+    drop(dir);
+    tracing::info!(
+        "kingdoms profile tick={tick} director_ms={director_ms:.2} towns_us={towns_us} mspt={mspt:.2} live_fronts={live_fronts} abstract_fronts={abstract_fronts} live_bodies={live_bodies} tickets={tickets} entities={entities} rss_kb={}",
+        process_rss_kb()
+    );
+}
+
 fn nearby_cached_towns(seed: u64, world: &World) -> Vec<TownInfo> {
     // Players tell us which cells are hot. Console-only worlds still get raids
     // via /raid start, which caches the town explicitly.
@@ -1226,6 +1342,20 @@ fn nearby_cached_towns(seed: u64, world: &World) -> Vec<TownInfo> {
 }
 
 fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
+    sync_front_lod(world, town_id, tick);
+    let materialized = {
+        let dir = lock();
+        dir.towns
+            .get(town_id)
+            .is_some_and(|w| w.raid.as_ref().is_some_and(|r| r.materialized))
+    };
+    let near = town_has_nearby_player(world, town_id);
+    if !materialized {
+        tick_abstract_raid(world, town_id, tick);
+        if !near {
+            return;
+        }
+    }
     tick_raid_warmup(world, town_id, tick);
     let (bounds, kingdom, alarm_before, camps, gates) = {
         let dir = lock();
@@ -1233,7 +1363,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             return;
         };
         (
-            war.scene.bounds(),
+            inhabited_bounds(&war.scene),
             war.kingdom.clone(),
             war.alarm,
             war.scene.raid_camps().to_vec(),
@@ -1245,10 +1375,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         )
     };
 
-    let mut min_x = bounds.min_x - 160;
-    let mut min_z = bounds.min_z - 160;
-    let mut max_x = bounds.max_x + 160;
-    let mut max_z = bounds.max_z + 160;
+    let mut min_x = bounds.min_x - 48;
+    let mut min_z = bounds.min_z - 48;
+    let mut max_x = bounds.max_x + 48;
+    let mut max_z = bounds.max_z + 48;
     for p in camps.iter().chain(gates.iter()) {
         min_x = min_x.min(p.x - 48);
         min_z = min_z.min(p.z - 48);
@@ -1289,12 +1419,21 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         if let Some(war) = dir.towns.get(town_id) {
             let owner_faction = owner_faction(&war.owner, &war.kingdom);
             let bounds = inhabited_bounds(&war.scene);
+            let camps: Vec<(i32, i32)> = war
+                .scene
+                .raid_camps()
+                .iter()
+                .map(|c| (c.x, c.z))
+                .chain(war.raid.as_ref().map(|r| (r.camp.x, r.camp.z)))
+                .collect();
             for (entity, faction) in &snapshots {
                 if !is_hostile(faction, &owner_faction) {
                     continue;
                 }
                 let p = entity.get_entity().pos.load();
-                if bounds.contains(p.x.floor() as i32, p.z.floor() as i32) {
+                let x = p.x.floor() as i32;
+                let z = p.z.floor() as i32;
+                if bounds.contains(x, z) && !near_camp(&camps, x, z) {
                     hostiles_in_town = true;
                     break;
                 }
@@ -1353,11 +1492,20 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             }
             if !hostiles_in_town {
                 let bounds = inhabited_bounds(&war.scene);
+                let camps: Vec<(i32, i32)> = war
+                    .scene
+                    .raid_camps()
+                    .iter()
+                    .map(|c| (c.x, c.z))
+                    .chain(war.raid.as_ref().map(|r| (r.camp.x, r.camp.z)))
+                    .collect();
                 let raid_over = war.raid.is_none();
                 for (entity, _) in &snapshots {
                     let base = entity.get_entity();
                     let p = base.pos.load();
-                    let outside = !bounds.contains(p.x.floor() as i32, p.z.floor() as i32);
+                    let x = p.x.floor() as i32;
+                    let z = p.z.floor() as i32;
+                    let outside = !bounds.contains(x, z) || near_camp(&camps, x, z);
                     if (has_tag(base, TAG_ROUTED) && outside)
                         || (raid_over && has_tag(base, TAG_RAIDER))
                     {
@@ -1832,6 +1980,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         raiders_in_keep,
         defenders_in_keep,
         occupier_from_keep(&snapshots, keep_rect, &owner_faction),
+        1,
     );
     update_capture_meter(
         world,
@@ -1865,7 +2014,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             war.live_snaps.push(snap);
         }
     }
-    if tick.is_multiple_of(400) && alarm {
+    if tick.is_multiple_of(400) && alarm && !soaking() {
         let town = town_id.to_owned();
         std::thread::spawn(move || dump_live_plots(Some(&town)));
     }
@@ -1886,6 +2035,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
 }
 
 fn spawn_soldiers_this_tick(world: &Arc<World>, town_id: &str, tick: u32) {
+    if lock().live_body_count() >= body_budget() {
+        return;
+    }
     spawn_extra_defenders(world, town_id, SPAWNS_PER_TICK as u16);
     spawn_wave_batch(world, town_id, tick);
 }
@@ -2128,7 +2280,14 @@ pub fn rebind_if_needed(entity: &dyn EntityBase) {
 /// Public start-raid used by commands and a future HTTP director.
 pub fn start_raid(world: &Arc<World>, town_id: &str, spec: RaidSpec) -> Result<RaidId, String> {
     let id = lock().start_raid(world, town_id, spec)?;
-    queue_raid_warmup(world, town_id);
+    let live = lock()
+        .towns
+        .get(town_id)
+        .and_then(|w| w.raid.as_ref())
+        .is_some_and(|r| r.materialized);
+    if live {
+        queue_raid_warmup(world, town_id);
+    }
     Ok(id)
 }
 
@@ -2273,13 +2432,13 @@ fn raid_chunk_list(town_id: &str) -> Option<(Vec<Vector2<i32>>, ScenePost, Scene
         .or_else(|| war.scene.road_approach())
         .unwrap_or(keep);
     let mut samples = vec![keep, camp];
-    samples.extend(war.scene.raid_camps().iter().copied());
-    for g in war.scene.gates() {
-        samples.push(ScenePost::new(g.x, g.z));
-    }
-    // Corridor from camp to the threatened gate so marchers tick.
-    let gate = war.threatened.unwrap_or(keep);
-    let steps = 16;
+    // Battle line only: threatened gate plus a thin camp→gate→keep corridor.
+    let gate = war
+        .threatened
+        .or_else(|| war.scene.gates().first().map(|g| ScenePost::new(g.x, g.z)))
+        .unwrap_or(keep);
+    samples.push(gate);
+    let steps = 8;
     for i in 0..=steps {
         let t = f64::from(i) / f64::from(steps);
         samples.push(ScenePost::new(
@@ -2296,8 +2455,8 @@ fn raid_chunk_list(town_id: &str) -> Option<(Vec<Vector2<i32>>, ScenePost, Scene
     for p in samples {
         let cx = p.x >> 4;
         let cz = p.z >> 4;
-        for dx in -2..=2 {
-            for dz in -2..=2 {
+        for dx in -1..=1 {
+            for dz in -1..=1 {
                 set.insert((cx + dx, cz + dz));
             }
         }
@@ -2871,39 +3030,49 @@ fn maybe_war_clock(world: &Arc<World>, tick: u32) {
             return;
         }
     }
-    let Some((town_id, side)) = pick_clock_front(tick, fronts) else {
-        return;
-    };
-    let spec = RaidSpec::new(war_clock_size())
-        .with_extra_defenders(war_clock_defenders())
-        .with_side(side);
-    match start_raid(world, &town_id, spec) {
-        Ok(id) => {
-            let mut dir = lock();
-            dir.last_clock_tick = tick;
-            dir.persist();
-            dir.push_event(CombatEvent {
-                tick,
-                kind: CombatKind::WarClock,
-                actor: id.0 as i32,
-                other: None,
-                x: 0.0,
-                z: 0.0,
-                note: format!(
-                    "war clock raid {} side {} on {town_id}",
-                    id.0,
-                    side.as_str()
-                ),
-            });
-            drop(dir);
-            tracing::info!(
-                raid = id.0,
-                town = town_id.as_str(),
-                side = side.as_str(),
-                "kingdoms war clock started raid"
-            );
+    let mut started = 0u32;
+    for _ in 0..fronts {
+        let Some((town_id, side)) = pick_clock_front(tick, fronts) else {
+            break;
+        };
+        let spec = RaidSpec::new(war_clock_size())
+            .with_extra_defenders(war_clock_defenders())
+            .with_side(side);
+        match start_raid(world, &town_id, spec) {
+            Ok(id) => {
+                started += 1;
+                let mut dir = lock();
+                dir.push_event(CombatEvent {
+                    tick,
+                    kind: CombatKind::WarClock,
+                    actor: id.0 as i32,
+                    other: None,
+                    x: 0.0,
+                    z: 0.0,
+                    note: format!(
+                        "war clock raid {} side {} on {town_id}",
+                        id.0,
+                        side.as_str()
+                    ),
+                });
+                drop(dir);
+                tracing::info!(
+                    raid = id.0,
+                    town = town_id.as_str(),
+                    side = side.as_str(),
+                    "kingdoms war clock started raid"
+                );
+            }
+            Err(err) => {
+                tracing::debug!(town = town_id.as_str(), %err, "war clock skipped");
+                break;
+            }
         }
-        Err(err) => tracing::debug!(town = town_id.as_str(), %err, "war clock skipped"),
+    }
+    if started > 0 {
+        let mut dir = lock();
+        dir.last_clock_tick = tick;
+        dir.persist();
     }
 }
 
@@ -3073,6 +3242,7 @@ fn apply_capture(
     raiders_in_keep: u32,
     defenders_in_keep: u32,
     occupier: TownOwner,
+    delta: u32,
 ) {
     let (captured, retaken, kingdom, keep, need, leftover, _hold) = {
         let mut dir = lock();
@@ -3083,15 +3253,25 @@ fn apply_capture(
             return;
         }
         let owner_fac = owner_faction(&war.owner, &war.kingdom);
-        let surviving = war.raid.as_ref().map_or(0, |r| r.living.len() as u32);
+        let (surviving, virt_defenders, live_raid) = war.raid.as_ref().map_or((0, 0, true), |r| {
+            if r.materialized {
+                (r.living.len() as u32, 0, true)
+            } else {
+                (
+                    u32::from(r.virt_raiders),
+                    u32::from(r.virt_defenders),
+                    false,
+                )
+            }
+        });
         let occupy_need = capture_need(surviving.max(raiders_in_keep));
-        let retake_need = capture_need(
-            war.wired
-                .values()
-                .filter(|w| is_allied(&w.faction, &owner_fac))
-                .count() as u32,
-        );
-        let update = tick_hold(
+        let allied = war
+            .wired
+            .values()
+            .filter(|w| is_allied(&w.faction, &owner_fac))
+            .count() as u32;
+        let retake_need = capture_need(if live_raid { allied } else { virt_defenders });
+        let update = tick_hold_n(
             &war.owner,
             raiders_in_keep,
             defenders_in_keep,
@@ -3099,6 +3279,7 @@ fn apply_capture(
             war.retake_hold,
             occupy_need,
             retake_need,
+            delta,
         );
         war.occupy_hold = update.occupy_hold;
         war.retake_hold = update.retake_hold;
@@ -3190,6 +3371,226 @@ fn apply_capture(
     }
 }
 
+fn player_near_posts(world: &World, posts: &[ScenePost], range: f64) -> bool {
+    world.players.load().iter().any(|p| {
+        let pos = p.living_entity.entity.pos.load();
+        posts
+            .iter()
+            .any(|post| (pos.x - f64::from(post.x)).hypot(pos.z - f64::from(post.z)) <= range)
+    })
+}
+
+fn town_has_nearby_player(world: &World, town_id: &str) -> bool {
+    let posts = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return false;
+        };
+        let keep = war.scene.keep();
+        let mut posts = vec![keep];
+        posts.extend(war.scene.gates().iter().map(|g| ScenePost::new(g.x, g.z)));
+        if let Some(raid) = &war.raid {
+            posts.push(raid.camp);
+        }
+        posts
+    };
+    player_near_posts(world, &posts, PLAYER_LIVE_RANGE)
+}
+
+fn sync_front_lod(world: &Arc<World>, town_id: &str, tick: u32) {
+    let (has_raid, was_live) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        (
+            war.raid.is_some(),
+            war.raid.as_ref().is_some_and(|r| r.materialized),
+        )
+    };
+    if !has_raid {
+        return;
+    }
+    let near = town_has_nearby_player(world, town_id);
+    let under_budget = {
+        let dir = lock();
+        dir.live_body_count() < body_budget()
+    };
+    let want = near && (was_live || under_budget);
+    if want && !was_live {
+        materialize_raid(world, town_id, tick);
+    } else if !want && was_live {
+        dematerialize_raid(world, town_id);
+    }
+}
+
+fn materialize_raid(world: &Arc<World>, town_id: &str, tick: u32) {
+    {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        let Some(raid) = war.raid.as_mut() else {
+            return;
+        };
+        raid.materialized = true;
+        raid.warm_until = tick.saturating_add(WARM_TICKS);
+        raid.spawned_this_wave = 0;
+        raid.wave = 0;
+        raid.last_wave_tick = tick;
+        raid.extra_left = raid.virt_defenders;
+        if raid.spec.side.is_kingdom_army() {
+            raid.pending_retake = raid.virt_raiders;
+            raid.pending_members.clear();
+        } else {
+            raid.pending_members = compose_wave(raid.virt_raiders, 0);
+            raid.pending_retake = 0;
+        }
+    }
+    queue_raid_warmup(world, town_id);
+    tracing::info!(town = town_id, tick, "kingdoms raid materialised");
+}
+
+fn dematerialize_raid(world: &Arc<World>, town_id: &str) {
+    let (despawn, tickets) = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        let Some(raid) = war.raid.as_mut() else {
+            return;
+        };
+        raid.virt_raiders = u16::try_from(raid.living.len()).unwrap_or(u16::MAX);
+        raid.virt_defenders = u16::try_from(
+            war.wired
+                .values()
+                .filter(|w| w.faction.is_kingdom())
+                .count(),
+        )
+        .unwrap_or(u16::MAX);
+        if war.occupy_hold > 0 {
+            raid.virt_march = ABSTRACT_MARCH_TICKS;
+        }
+        raid.materialized = false;
+        raid.pending_members.clear();
+        raid.pending_retake = 0;
+        raid.extra_left = 0;
+        let mut despawn = std::mem::take(&mut raid.living);
+        despawn.append(&mut raid.temps);
+        if let Some(ram) = war.ram.take() {
+            despawn.extend(ram.parts);
+        }
+        let tickets = std::mem::take(&mut war.ticketed);
+        war.pending_tickets.clear();
+        war.ticket_cursor = 0;
+        war.wired.clear();
+        (despawn, tickets)
+    };
+    despawn_entities(world, &despawn);
+    apply_force_tickets(world, &tickets, false);
+    tracing::info!(
+        town = town_id,
+        leftover = despawn.len(),
+        "kingdoms raid dematerialised"
+    );
+}
+
+fn tick_abstract_raid(world: &Arc<World>, town_id: &str, tick: u32) {
+    if !tick.is_multiple_of(ABSTRACT_PERIOD) {
+        return;
+    }
+    let (state, side, kingdom) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        let Some(raid) = &war.raid else {
+            return;
+        };
+        if raid.materialized {
+            return;
+        }
+        (
+            AbstractState {
+                raiders: raid.virt_raiders,
+                defenders: raid.virt_defenders,
+                march: raid.virt_march,
+            },
+            raid.spec.side,
+            war.kingdom.clone(),
+        )
+    };
+    let next = step_abstract(state, ABSTRACT_PERIOD);
+    {
+        let mut dir = lock();
+        if let Some(raid) = dir.towns.get_mut(town_id).and_then(|w| w.raid.as_mut()) {
+            raid.virt_raiders = next.raiders;
+            raid.virt_defenders = next.defenders;
+            raid.virt_march = next.march;
+        }
+    }
+    if next.raiders == 0 {
+        finish_abstract_victory(world, town_id, tick);
+        return;
+    }
+    let raiders_in_keep = if next.march >= ABSTRACT_MARCH_TICKS && next.defenders == 0 {
+        u32::from(next.raiders)
+    } else {
+        0
+    };
+    let defenders_in_keep = if next.march >= ABSTRACT_MARCH_TICKS {
+        u32::from(next.defenders)
+    } else {
+        0
+    };
+    apply_capture(
+        town_id,
+        tick,
+        raiders_in_keep,
+        defenders_in_keep,
+        occupier_from_side(side, &kingdom),
+        ABSTRACT_PERIOD,
+    );
+}
+
+fn finish_abstract_victory(world: &Arc<World>, town_id: &str, tick: u32) {
+    let tickets = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        let Some(raid) = war.raid.take() else {
+            return;
+        };
+        war.alarm = false;
+        let tickets = std::mem::take(&mut war.ticketed);
+        dir.push_event(CombatEvent {
+            tick,
+            kind: CombatKind::Victory,
+            actor: 0,
+            other: None,
+            x: 0.0,
+            z: 0.0,
+            note: format!(
+                "{town_id} abstract raid defeated raiders=0 defenders={}",
+                raid.virt_defenders
+            ),
+        });
+        tickets
+    };
+    apply_force_tickets(world, &tickets, false);
+    tracing::info!(town = town_id, "kingdoms abstract raid defeated");
+}
+
+fn occupier_from_side(side: RaidSide, home: &KingdomId) -> TownOwner {
+    match side {
+        RaidSide::Pillager => TownOwner::Pillager,
+        RaidSide::Alder => TownOwner::Kingdom("alder".to_owned()),
+        RaidSide::Raven => TownOwner::Kingdom("raven".to_owned()),
+        RaidSide::Kingdom => TownOwner::kingdom(home),
+    }
+}
+
 /// Walled town plus a short pad. Hinterland camps sit outside this, so leftover
 /// palisade pillagers do not keep the alarm ringing after a raid.
 fn inhabited_bounds(scene: &TownInfoScene) -> crate::geom::Rect {
@@ -3263,6 +3664,10 @@ fn occupier_from_keep(
     } else {
         TownOwner::Pillager
     }
+}
+
+fn soaking() -> bool {
+    std::env::var("KINGDOMS_SOAK_LOG").is_ok_and(|s| !s.is_empty())
 }
 
 fn plot_dir() -> Option<PathBuf> {
@@ -3492,12 +3897,13 @@ pub fn format_war_status() -> String {
     )];
     for t in &front.towns {
         lines.push(format!(
-            "{} owner={} home={} alarm={} raid={} side={} hold={}/{} repair_until={}",
+            "{} owner={} home={} alarm={} raid={} live={} side={} hold={}/{} repair_until={}",
             t.id,
             t.owner,
             t.kingdom,
             t.alarm,
             t.raid_active,
+            t.live,
             t.raid_side.as_deref().unwrap_or("-"),
             t.occupy_hold,
             t.occupy_need,
@@ -3588,6 +3994,16 @@ mod tests {
         assert_eq!(clock_side(&raven, 2), RaidSide::Alder);
         assert_eq!(REPAIR_WINDOW_TICKS, 400);
         assert_eq!(HOLD_LOCKOUT_TICKS + REPAIR_WINDOW_TICKS, 800);
+    }
+
+    #[test]
+    fn war_front_marks_unmaterialised_raids_as_not_live() {
+        let mut dir = Director::new();
+        dir.tick = 10;
+        let front = dir.war_front();
+        assert!(front.towns.iter().all(|t| !t.live));
+        assert_eq!(crate::abstract_combat::DEFAULT_BODY_BUDGET, 240);
+        assert_eq!(crate::abstract_combat::PLAYER_LIVE_RANGE, 128.0);
     }
 
     #[test]
