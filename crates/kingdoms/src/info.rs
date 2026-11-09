@@ -338,9 +338,16 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
 }
 
 /// Snapshot of a cached plan, if one has been built for this cell.
+///
+/// Never generates on the caller. A miss queues background planning and
+/// returns `None` so the tick can skip that town.
 #[must_use]
 pub fn town_info(seed: u64, cell_x: i32, cell_z: i32) -> Option<TownInfo> {
-    crate::plan::plan_from_cache(seed, cell_x, cell_z).map(|plan| TownInfo::from_plan(&plan))
+    if let Some(info) = crate::plan::cached_town_info(seed, cell_x, cell_z) {
+        return Some(info);
+    }
+    crate::plan::request_plan(seed, cell_x, cell_z);
+    None
 }
 
 /// Parse `seed:cell_x:cell_z` and return the cached snapshot.

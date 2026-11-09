@@ -46,9 +46,9 @@ use crate::goals::{
 };
 use crate::info::TownInfo;
 use crate::lod::{
-    ACQUIRE_RANGE, ALARM_RANGE, DEFAULT_PATH_CAP, LodTier, PathBudget, SpatialBuckets,
+    ACQUIRE_RANGE, ALARM_RANGE, CIVILIAN_SLEEP_RANGE, DEFAULT_PATH_CAP, LodTier, PathBudget,
+    SpatialBuckets,
 };
-use crate::plan::plan_from_cache;
 use crate::raid::{
     RaidSide, RaidSpec, WAVE_ADVANCE_REMAINING, WAVE_SPACING_TICKS, WaveMember, compose_wave,
     spawn_offset,
@@ -102,6 +102,11 @@ const HOLD_LOCKOUT_TICKS: u32 = 400;
 static WORST_MSPT_CENTS: AtomicU32 = AtomicU32::new(0);
 static WORST_DIRECTOR_CENTS: AtomicU32 = AtomicU32::new(0);
 
+fn post_y_cache() -> &'static Mutex<HashMap<(i32, i32), i32>> {
+    static CACHE: OnceLock<Mutex<HashMap<(i32, i32), i32>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 static RUNTIME: OnceLock<Mutex<Director>> = OnceLock::new();
 
 /// Process-wide director. Tests can replace the lock contents.
@@ -110,6 +115,16 @@ pub fn lock() -> std::sync::MutexGuard<'static, Director> {
         .get_or_init(|| Mutex::new(Director::new()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Cell coordinates of towns already in the ownership file (for plan warmup).
+#[must_use]
+pub fn owned_cells() -> Vec<(i32, i32)> {
+    lock()
+        .owners
+        .keys()
+        .filter_map(|id| parse_town_id(id).map(|(_, cx, cz)| (cx, cz)))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -770,9 +785,14 @@ impl Director {
                 .ok_or_else(|| "town vanished".to_owned());
         }
         let seed = world.level.seed.0;
-        let info = lookup_town_info(seed, town_id)
-            .or_else(|| build_town_info(world, town_id))
-            .ok_or_else(|| format!("no planned town {town_id}"))?;
+        let info = lookup_town_info(seed, town_id).ok_or_else(|| {
+            if let Some((s, cx, cz)) = parse_town_id(town_id) {
+                crate::plan::request_plan(s, cx, cz);
+            } else if let Some((cx, cz)) = parse_cell(town_id) {
+                crate::plan::request_plan(seed, cx, cz);
+            }
+            format!("town plan not ready {town_id}")
+        })?;
         let scene = TownInfoScene::from_info(info);
         let owner = self
             .owners
@@ -921,18 +941,6 @@ fn parse_town_id(town_id: &str) -> Option<(u64, i32, i32)> {
     Some((seed, cell_x, cell_z))
 }
 
-fn build_town_info(world: &World, town_id: &str) -> Option<TownInfo> {
-    let seed = world.level.seed.0;
-    let (use_seed, cell_x, cell_z) = if let Some(cell) = parse_cell(town_id) {
-        (seed, cell.0, cell.1)
-    } else {
-        parse_town_id(town_id)?
-    };
-    let world_gen = world.level.world_gen();
-    let plan = crate::plan::plan_for(use_seed, cell_x, cell_z, world_gen.as_ref());
-    Some(TownInfo::from_plan(&plan))
-}
-
 /// Public: destination a citizen goal should walk to.
 #[must_use]
 pub fn post_for_role(mob: &dyn Mob, town_id: &str, role: VillagerRole) -> Option<PostTarget> {
@@ -1011,12 +1019,27 @@ pub fn raid_march_post(mob: &dyn Mob, town_id: &str) -> Option<PostTarget> {
 }
 
 fn standing_y(world: &World, post: ScenePost) -> i32 {
-    post.height_or(
-        world
-            .sample_surface_height(post.x, post.z)
-            .unwrap_or(world.sea_level)
-            + 1,
-    )
+    if post.y != 0 {
+        return post.y;
+    }
+    let key = (post.x, post.z);
+    {
+        let cache = post_y_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(y) = cache.get(&key) {
+            return *y;
+        }
+    }
+    let y = world
+        .sample_surface_height(post.x, post.z)
+        .unwrap_or(world.sea_level)
+        + 1;
+    post_y_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, y);
+    y
 }
 
 fn pick_home(mob: &dyn Mob, posts: &[ScenePost], fallback: ScenePost) -> ScenePost {
@@ -1173,7 +1196,13 @@ pub fn tick_world(world: &Arc<World>) {
     dir.path_budget.reset();
     let tick = dir.tick;
 
-    // Discover planned towns that have a cached plan (generated chunks).
+    // Spawn cell is pre-warmed in the plan cache. Do not register every
+    // neighbour or the director ticks nine idle capitals each tick.
+    let spawn = world.level_info.load();
+    let home = town_containing(seed, spawn.spawn_x, spawn.spawn_z);
+    if let Some(info) = crate::info::town_info(seed, home.cell_x, home.cell_z) {
+        dir.ensure_town_from_info(info);
+    }
     let cached: Vec<TownInfo> = nearby_cached_towns(seed, world);
     for info in cached {
         dir.ensure_town_from_info(info);
@@ -1334,8 +1363,6 @@ fn nearby_cached_towns(seed: u64, world: &World) -> Vec<TownInfo> {
         let town = town_containing(seed, pos.x.floor() as i32, pos.z.floor() as i32);
         if let Some(info) = crate::info::town_info(seed, town.cell_x, town.cell_z) {
             out.push(info);
-        } else if let Some(plan) = plan_from_cache(seed, town.cell_x, town.cell_z) {
-            out.push(TownInfo::from_plan(&plan));
         }
     }
     out
@@ -1730,11 +1757,24 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         )
     };
     maybe_refill_repair(world, town_id, tick, alarm);
+    let work_dests = standing_dests(&work_posts, keep_dest.y, 0);
+    let home_dests = standing_dests(&home_posts, keep_dest.y, 0);
+    let wall_dests = standing_dests(&wall_posts, keep_dest.y, WALL_WALK_LIFT);
+    let player_xz: Vec<(f64, f64)> = world
+        .players
+        .load()
+        .iter()
+        .map(|p| {
+            let pos = p.living_entity.entity.pos.load();
+            (pos.x, pos.z)
+        })
+        .collect();
 
     let mut n_ticking = 0u32;
     let mut n_loaded = 0u32;
     let mut n_active = 0u32;
     let mut n_no_ai = 0u32;
+    let mut n_sleep = 0u32;
     let mut n_slid = 0u32;
     let mut n_melee = 0u32;
     let mut n_ranged = 0u32;
@@ -1743,19 +1783,27 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     let mut ram_at_gate = false;
     let mut raiders_in_keep = 0u32;
     let mut defenders_in_keep = 0u32;
-    let active_chunks = world
-        .active_chunks
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+    let count_chunks = tick.is_multiple_of(100);
+    let active_chunks = count_chunks.then(|| {
+        world
+            .active_chunks
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    });
     for (entity, faction) in &snapshots {
         let base = entity.get_entity();
         let chunk = base.chunk_pos.load();
-        if world.level.is_chunk_loaded(&chunk) {
-            n_loaded += 1;
-        }
-        if active_chunks.contains(&chunk) {
-            n_active += 1;
+        if count_chunks {
+            if world.level.is_chunk_loaded(&chunk) {
+                n_loaded += 1;
+            }
+            if active_chunks
+                .as_ref()
+                .is_some_and(|chunks| chunks.contains(&chunk))
+            {
+                n_active += 1;
+            }
         }
         if base.tick_count.load(Ordering::Relaxed) > 0 {
             n_ticking += 1;
@@ -1772,31 +1820,40 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 defenders_in_keep += 1;
             }
         }
+        let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
+        let is_builder = role == Some(VillagerRole::Builder);
+        let offscreen = !player_near_list(&player_xz, pos.x, pos.z, CIVILIAN_SLEEP_RANGE);
+        let idle_villager = matches!(role, Some(VillagerRole::Civilian | VillagerRole::Guard))
+            || (matches!(faction, Faction::Kingdom(_)) && role.is_none());
+        if offscreen && idle_villager && !is_builder {
+            mob.get_mob_entity().set_no_ai(true);
+            n_sleep += 1;
+            n_no_ai += 1;
+            continue;
+        }
         let hostile = buckets.nearest_hostile(pos.x, pos.z, faction, ACQUIRE_RANGE);
         let in_combat = hostile.is_some();
         let melee_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, LIVE_MELEE_RANGE);
         let ranged_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, LIVE_RANGED_RANGE);
-        let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
-        let is_builder = role == Some(VillagerRole::Builder);
         let tier = if in_combat {
             LodTier::Combat
         } else if alarm {
             LodTier::Alert
+        } else if offscreen {
+            LodTier::Far
         } else {
             LodTier::Idle
         };
         let id = base.entity_id;
-        // Raid soldiers never run vanilla AI. The director slides them.
-        let skip = if alarm || is_builder {
+        // Kingdoms-tagged mobs never run vanilla villager/pillager brains.
+        let skip = if alarm || is_builder || in_combat {
             false
         } else {
             !tier.should_tick(id, tick)
         };
-        mob.get_mob_entity().set_no_ai(alarm || skip);
-        if alarm {
-            n_no_ai += 1;
-        } else if skip {
-            n_no_ai += 1;
+        mob.get_mob_entity().set_no_ai(true);
+        n_no_ai += 1;
+        if skip {
             continue;
         }
         if !alarm {
@@ -1812,16 +1869,11 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 (Faction::Kingdom(_), _) if is_builder => {
                     assigned_repair_dest(town_id, id, world).unwrap_or(keep_dest)
                 }
-                (Faction::Kingdom(_), Some(VillagerRole::Civilian)) => schedule_civilian_dest(
-                    id,
-                    world_time,
-                    &work_posts,
-                    &home_posts,
-                    keep_dest,
-                    world,
-                ),
+                (Faction::Kingdom(_), Some(VillagerRole::Civilian)) => {
+                    schedule_civilian_ready(id, world_time, &work_dests, &home_dests, keep_dest)
+                }
                 (Faction::Kingdom(_), Some(VillagerRole::Guard)) => {
-                    patrol_dest(id, tick, &wall_posts, keep_dest, world)
+                    patrol_ready(id, tick, &wall_dests, keep_dest)
                 }
                 (Faction::Kingdom(_), _) => keep_dest,
                 (Faction::Neutral, _) => continue,
@@ -1851,16 +1903,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 && matches!(role, Some(VillagerRole::Civilian | VillagerRole::Guard));
             let (work_d, home_d, patrol_d) = if needs_schedule {
                 (
-                    schedule_civilian_dest(
-                        id,
-                        world_time,
-                        &work_posts,
-                        &home_posts,
-                        keep_dest,
-                        world,
-                    ),
-                    pick_post_dest(id, &home_posts, keep_dest, world),
-                    patrol_dest(id, tick, &wall_posts, keep_dest, world),
+                    schedule_civilian_ready(id, world_time, &work_dests, &home_dests, keep_dest),
+                    pick_ready_dest(id, &home_dests, keep_dest),
+                    patrol_ready(id, tick, &wall_dests, keep_dest),
                 )
             } else {
                 (keep_dest, keep_dest, keep_dest)
@@ -2021,7 +2066,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     if tick.is_multiple_of(100) && (alarm || n_repair > 0 || n_arrows > 0) {
         let n_entities = snapshots.len();
         tracing::info!(
-            "kingdoms raid entity tick town={town_id} ticking={n_ticking} loaded={n_loaded} active={n_active} no_ai={n_no_ai} slid={n_slid} melee={n_melee} ranged={n_ranged} arrows={n_arrows} repair={n_repair} loop_us={loop_us} keep_r={raiders_in_keep} keep_d={defenders_in_keep} entities={n_entities}"
+            "kingdoms raid entity tick town={town_id} ticking={n_ticking} loaded={n_loaded} active={n_active} no_ai={n_no_ai} sleep={n_sleep} slid={n_slid} melee={n_melee} ranged={n_ranged} arrows={n_arrows} repair={n_repair} loop_us={loop_us} keep_r={raiders_in_keep} keep_d={defenders_in_keep} entities={n_entities}"
         );
     }
 
@@ -2529,7 +2574,8 @@ fn maybe_refill_repair(world: &World, town_id: &str, tick: u32, alarm: bool) {
         return;
     };
     let seed = world.level.seed.0;
-    let Some(plan) = plan_from_cache(seed, cx, cz) else {
+    let Some(plan) = crate::plan::cached_plan(seed, cx, cz) else {
+        crate::plan::request_plan(seed, cx, cz);
         return;
     };
     let cols = repair::repair_columns(&scene, threatened);
@@ -3189,51 +3235,54 @@ fn dest_for(
     }
 }
 
-fn pick_post_dest(
-    entity_id: i32,
-    posts: &[ScenePost],
-    fallback: PostTarget,
-    world: &World,
-) -> PostTarget {
-    if posts.is_empty() {
-        return fallback;
-    }
-    let post = posts[entity_id.unsigned_abs() as usize % posts.len()];
-    PostTarget::from_post(post, standing_y(world, post))
+fn standing_dests(posts: &[ScenePost], fallback_y: i32, lift: i32) -> Vec<PostTarget> {
+    posts
+        .iter()
+        .map(|post| PostTarget {
+            x: post.x,
+            y: post.height_or(fallback_y) + lift,
+            z: post.z,
+        })
+        .collect()
 }
 
-fn schedule_civilian_dest(
+fn pick_ready_dest(entity_id: i32, dests: &[PostTarget], fallback: PostTarget) -> PostTarget {
+    if dests.is_empty() {
+        return fallback;
+    }
+    dests[entity_id.unsigned_abs() as usize % dests.len()]
+}
+
+fn schedule_civilian_ready(
     entity_id: i32,
     world_time: i64,
-    work_posts: &[ScenePost],
-    home_posts: &[ScenePost],
+    work_dests: &[PostTarget],
+    home_dests: &[PostTarget],
     keep_dest: PostTarget,
-    world: &World,
 ) -> PostTarget {
     match schedule::civilian_post(false, world_time) {
         CivilianPost::Keep => keep_dest,
-        CivilianPost::Work => pick_post_dest(entity_id, work_posts, keep_dest, world),
-        CivilianPost::Home => pick_post_dest(entity_id, home_posts, keep_dest, world),
+        CivilianPost::Work => pick_ready_dest(entity_id, work_dests, keep_dest),
+        CivilianPost::Home => pick_ready_dest(entity_id, home_dests, keep_dest),
     }
 }
 
-fn patrol_dest(
+fn patrol_ready(
     entity_id: i32,
     tick: u32,
-    wall: &[ScenePost],
+    wall: &[PostTarget],
     fallback: PostTarget,
-    world: &World,
 ) -> PostTarget {
     if wall.is_empty() {
         return fallback;
     }
-    let i = schedule::patrol_index(entity_id, tick, wall.len());
-    let post = wall[i];
-    PostTarget {
-        x: post.x,
-        y: standing_y(world, post) + WALL_WALK_LIFT,
-        z: post.z,
-    }
+    wall[schedule::patrol_index(entity_id, tick, wall.len())]
+}
+
+fn player_near_list(players: &[(f64, f64)], x: f64, z: f64, range: f64) -> bool {
+    players
+        .iter()
+        .any(|(px, pz)| (*px - x).hypot(*pz - z) <= range)
 }
 
 fn apply_capture(
@@ -4004,6 +4053,7 @@ mod tests {
         assert!(front.towns.iter().all(|t| !t.live));
         assert_eq!(crate::abstract_combat::DEFAULT_BODY_BUDGET, 240);
         assert_eq!(crate::abstract_combat::PLAYER_LIVE_RANGE, 128.0);
+        assert_eq!(crate::lod::CIVILIAN_SLEEP_RANGE, 64.0);
     }
 
     #[test]

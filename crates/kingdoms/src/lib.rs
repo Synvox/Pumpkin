@@ -114,9 +114,6 @@ pub fn install(server: &Server) {
     register_world_init_handler(server);
     events::register(server);
     crate::http::spawn_if_enabled();
-    // Opt-in pumpkin-core hook: grow a new player's view cylinder one ring
-    // per tick instead of filling view-distance in a single hitch.
-    pumpkin_core::world::chunker::set_join_view_grow(1);
     info!("Kingdoms plugin installed (towns, villagers, raids)");
 }
 
@@ -137,6 +134,11 @@ pub fn attach_world_arc(world: &Arc<World>) {
     }
     attach_world(world);
     director::lock().attach_world(world);
+    let seed = world.level.seed.0;
+    let root = world.level.level_folder.root_folder.clone();
+    let info = world.level_info.load();
+    let extra = director::owned_cells();
+    plan::bind_and_warmup(seed, root, info.spawn_x, info.spawn_z, &extra);
 }
 
 fn register_world_init_handler(server: &Server) {

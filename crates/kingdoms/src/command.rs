@@ -10,7 +10,7 @@ use pumpkin_util::text::TextComponent;
 use pumpkin_util::text::color::NamedColor;
 
 use crate::director;
-use crate::plan::plan_from_cache;
+use crate::plan::cached_plan;
 use crate::raid::{RaidSide, RaidSpec};
 use crate::town::nearest_town;
 
@@ -42,15 +42,20 @@ impl CommandExecutor for LocateTownExecutor {
             .sample_surface_height(town.x, town.z)
             .unwrap_or(world.sea_level);
 
-        let extra =
-            plan_from_cache(seed, town.cell_x, town.cell_z).map_or_else(String::new, |plan| {
+        let extra = cached_plan(seed, town.cell_x, town.cell_z).map_or_else(
+            || {
+                crate::plan::request_plan(seed, town.cell_x, town.cell_z);
+                String::new()
+            },
+            |plan| {
                 let (cx, cz) = plan.castle.bounds.center();
                 let (w, d) = plan.castle_footprint();
                 format!(
                     " castle {cx} {cz} ({w}x{d}) well {} {}",
                     plan.well.0, plan.well.1
                 )
-            });
+            },
+        );
 
         context.source.send_feedback(
             TextComponent::text(format!(
@@ -75,7 +80,10 @@ impl CommandExecutor for KingdomInfoExecutor {
         let town_id = crate::info::town_id(seed, town.cell_x, town.cell_z);
         let kingdom = crate::faction::KingdomId::for_cell(town.cell_x, town.cell_z);
         let battle = director::battle_state(&town_id);
-        let plan = plan_from_cache(seed, town.cell_x, town.cell_z);
+        let plan = cached_plan(seed, town.cell_x, town.cell_z);
+        if plan.is_none() {
+            crate::plan::request_plan(seed, town.cell_x, town.cell_z);
+        }
         let mut lines = vec![format!(
             "Town {town_id}  kingdom {}  origin {} {}",
             kingdom.as_str(),
