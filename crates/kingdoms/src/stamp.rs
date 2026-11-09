@@ -52,13 +52,102 @@ pub fn stamp_plan_in_chunk(ctx: &mut ChunkDecorationContext<'_>, plan: &TownPlan
     for z in min_z..min_z + 16 {
         for x in min_x..min_x + 16 {
             if !plan.bounds.contains(x, z) && !plan.border_roads.contains_key(&(x, z)) {
+                if plan.strips_trees(x, z) {
+                    let surface = ctx.surface_height_exclusive(x, z);
+                    strip_feature_vegetation(ctx, plan, x, z, surface);
+                }
                 continue;
             }
             let surface = ctx.surface_height_exclusive(x, z);
             let biome = ctx.get_biome(x, surface, z);
             stamp_column(ctx, plan, x, z, surface, Some(biome));
+            strip_feature_vegetation(ctx, plan, x, z, surface);
         }
     }
+}
+
+/// Features can hang leaves into a column after the surface snapshot. Air out
+/// leftover vanilla trees on tree-strip columns that are not planned timber.
+fn strip_feature_vegetation(
+    ctx: &mut ChunkDecorationContext<'_>,
+    plan: &TownPlan,
+    x: i32,
+    z: i32,
+    surface: i32,
+) {
+    if !plan.strips_trees(x, z) {
+        return;
+    }
+    if keeps_planned_timber(column_kind(plan, x, z)) {
+        return;
+    }
+    let planned = plan.heights.height(x, z).max(plan.heights.sea_level);
+    // Fancy oak / 2×2 spruce hang side logs well above ground on neighbour
+    // columns, where `surface` is dirt not canopy. Match TREE_STRIP height.
+    let top = surface.max(planned) + 24;
+    let air = Block::AIR.default_state;
+    for y in planned.saturating_sub(4)..=top {
+        let id = Block::from_state_id(ctx.get_block_state(x, y, z)).id;
+        if is_vanilla_tree_part(id) {
+            ctx.set_block_state(x, y, z, air);
+        }
+    }
+}
+
+fn keeps_planned_timber(kind: CellKind) -> bool {
+    matches!(
+        kind,
+        CellKind::Building
+            | CellKind::Ship
+            | CellKind::Boat
+            | CellKind::Crane
+            | CellKind::Dock
+            | CellKind::MineHead
+            | CellKind::MineAdit
+            | CellKind::MineRail
+            | CellKind::Palisade
+            | CellKind::PalisadeWalk
+            | CellKind::PalisadeGate
+            | CellKind::WindSail
+            | CellKind::WatchPost
+            | CellKind::Orchard
+            | CellKind::Grave
+            | CellKind::Lychgate
+            | CellKind::Arcade
+            | CellKind::Hedge
+            | CellKind::Tent
+            | CellKind::WarTent
+            | CellKind::SiegeTreb
+            | CellKind::SiegeRam
+            | CellKind::SiegeLadder
+            | CellKind::Burnt
+            | CellKind::Eave
+    )
+}
+
+fn is_vanilla_tree_part(id: pumpkin_data::BlockId) -> bool {
+    id == Block::OAK_LEAVES.id
+        || id == Block::SPRUCE_LEAVES.id
+        || id == Block::BIRCH_LEAVES.id
+        || id == Block::JUNGLE_LEAVES.id
+        || id == Block::ACACIA_LEAVES.id
+        || id == Block::DARK_OAK_LEAVES.id
+        || id == Block::CHERRY_LEAVES.id
+        || id == Block::MANGROVE_LEAVES.id
+        || id == Block::AZALEA_LEAVES.id
+        || id == Block::FLOWERING_AZALEA_LEAVES.id
+        || id == Block::OAK_LOG.id
+        || id == Block::SPRUCE_LOG.id
+        || id == Block::BIRCH_LOG.id
+        || id == Block::JUNGLE_LOG.id
+        || id == Block::ACACIA_LOG.id
+        || id == Block::DARK_OAK_LOG.id
+        || id == Block::CHERRY_LOG.id
+        || id == Block::MANGROVE_LOG.id
+        || id == Block::OAK_SAPLING.id
+        || id == Block::BIRCH_SAPLING.id
+        || id == Block::SPRUCE_SAPLING.id
+        || id == Block::LILY_PAD.id
 }
 
 /// Places one planned column into `sink`.
@@ -76,11 +165,12 @@ pub fn stamp_column(
     if ground <= sink.floor_min() + 2 {
         return;
     }
-    // Features trees make `surface` the canopy. Snap scene-yard columns
-    // back to the planner height so trunks and hanging leaves are cleared.
+    // Features trees make `surface` the canopy. Snap tree-strip columns
+    // (scene yards, walled town, market crop, building keepout) back to
+    // the planner height so trunks and hanging leaves are cleared.
     // fill_volume has `ground + 1 == planned`; only then skip the
     // tree-height strip, or halls get a cave the watertight flood follows.
-    if plan.in_scene_yard(x, z) {
+    if plan.strips_trees(x, z) {
         let planned = plan.heights.height(x, z).max(plan.heights.sea_level);
         let sea = plan.heights.sea_level;
         let top = ground.max(planned);
@@ -133,7 +223,9 @@ pub fn stamp_column(
                 | CellKind::TourneyStand
                 | CellKind::Quay
                 | CellKind::Crane
-        ) || plan.in_scene_yard(x, z)
+                | CellKind::Breakwater
+                | CellKind::SiegeTrench
+        ) || plan.strips_trees(x, z)
         {
             ground + 40
         } else {
@@ -143,7 +235,7 @@ pub fn stamp_column(
     }
     if matches!(
         kind,
-        CellKind::Harbor | CellKind::Dock | CellKind::Ship | CellKind::Boat
+        CellKind::Harbor | CellKind::Dock | CellKind::Ship | CellKind::Boat | CellKind::Breakwater
     ) {
         let planned = plan.heights.height(x, z);
         let sea = plan.heights.sea_level;
@@ -157,12 +249,16 @@ pub fn stamp_column(
             clear_above(sink, x, sea, sea + 24, z);
         }
     }
-    if plan.in_scene_yard(x, z) {
+    if plan.strips_trees(x, z) {
         let sea = plan.heights.sea_level;
         if !plan.heights.is_dry(x, z)
             || matches!(
                 kind,
-                CellKind::Harbor | CellKind::Dock | CellKind::Ship | CellKind::Boat
+                CellKind::Harbor
+                    | CellKind::Dock
+                    | CellKind::Ship
+                    | CellKind::Boat
+                    | CellKind::Breakwater
             )
         {
             clear_above(sink, x, sea.saturating_sub(4), sea.max(ground) + 24, z);
@@ -201,8 +297,20 @@ pub fn stamp_column(
         CellKind::Ruin => place_ruin(sink, plan, x, ground, z, &palette),
         CellKind::WatchPost => place_watch_post(sink, x, floor, ground, z, &palette),
         CellKind::Well => place_well(sink, plan, x, ground, z, &palette),
-        CellKind::TownWall => place_curtain(sink, plan, x, floor, ground, z, &palette, 6, false),
-        CellKind::TownTower => place_tower(sink, plan, x, floor, ground, z, &palette, 5, 14),
+        CellKind::TownWall => {
+            if in_frontier(plan, x, z) {
+                place_scarred_curtain(sink, plan, x, floor, ground, z, &palette);
+            } else {
+                place_curtain(sink, plan, x, floor, ground, z, &palette, 6, false);
+            }
+        }
+        CellKind::TownTower => {
+            if in_frontier(plan, x, z) {
+                place_collapsed_tower(sink, plan, x, floor, ground, z, &palette);
+            } else {
+                place_tower(sink, plan, x, floor, ground, z, &palette, 5, 14);
+            }
+        }
         CellKind::TownGate => place_gate(sink, plan, x, floor, ground, z, &palette, 8),
         CellKind::Building => {
             if let Some(lot) = plan.lots.iter().find(|l| l.id == plan.occ.lot(x, z)) {
@@ -341,11 +449,16 @@ pub fn stamp_column(
         CellKind::Ship => place_ship(sink, plan, x, ground, z, &palette),
         CellKind::Boat => place_fishing_boat(sink, plan, x, ground, z, &palette),
         CellKind::Quay => place_quay(sink, x, ground, z, plan.heights.sea_level, &palette),
-        CellKind::Crane => place_crane(sink, x, ground, z, plan.heights.sea_level, &palette),
+        CellKind::Crane => place_crane(sink, plan, x, ground, z, plan.heights.sea_level, &palette),
         CellKind::TourneyList => place_tourney_list(sink, x, ground, z, &palette),
         CellKind::TourneyStand => place_tourney_stand(sink, plan, x, ground, z, &palette),
         CellKind::Burnt => place_burnt(sink, plan, x, ground, z, &palette),
+        CellKind::Breakwater => {
+            place_breakwater(sink, x, ground, z, plan.heights.sea_level, &palette);
+        }
+        CellKind::SiegeTrench => place_siege_trench(sink, x, ground, z, &palette),
     }
+    apply_column_damage(sink, plan, x, z, kind, floor, ground, &palette);
     for mill in plan
         .lots
         .iter()
@@ -394,6 +507,8 @@ fn occupy_raises(kind: CellKind) -> bool {
             | CellKind::Bridge
             | CellKind::Ship
             | CellKind::Boat
+            | CellKind::Breakwater
+            | CellKind::SiegeTrench
     )
 }
 
@@ -2319,8 +2434,8 @@ fn place_dome(
 }
 
 fn place_rose_window(sink: &mut impl BlockSink, x: i32, floor: i32, z: i32, cz: i32) {
-    let cy = floor + 11;
-    let radius = 5;
+    let cy = floor + 13;
+    let radius = 6;
     for y in cy - radius..=cy + radius {
         let dy = y - cy;
         let dz = z - cz;
@@ -2328,16 +2443,17 @@ fn place_rose_window(sink: &mut impl BlockSink, x: i32, floor: i32, z: i32, cz: 
         if d2 > radius * radius {
             continue;
         }
-        let spoke = dy == 0 || dz == 0 || dy.abs() == dz.abs();
-        let ring = d2 >= radius * radius - 5;
-        let petal = !spoke && !ring && (dy.abs() == 2 || dz.abs() == 2);
+        // 12 petals: 4 cardinals plus 8 at ~30°/60° (|2a|==|b|).
+        let spoke = dy == 0 || dz == 0 || dy.abs() * 2 == dz.abs() || dz.abs() * 2 == dy.abs();
+        let ring = d2 >= radius * radius - 8 || (14..=18).contains(&d2) || d2 <= 2;
+        let petal = !spoke && !ring && (dy.abs() == 3 || dz.abs() == 3);
         sink.put(
             x,
             y,
             z,
             if ring || spoke || petal {
                 Block::CALCITE.default_state
-            } else if (y + z) % 2 == 0 {
+            } else if dz > 0 {
                 Block::PURPLE_STAINED_GLASS.default_state
             } else {
                 Block::YELLOW_STAINED_GLASS.default_state
@@ -2956,19 +3072,19 @@ fn place_gothic_mass(
         return;
     }
     let west_front = kind == CellKind::CathedralNave && x == rect.min_x;
-    let rose_col = west_front && (z - rect.center().1).abs() <= 5;
-    let rose_top = floor + 16;
-    // Gable sits above the wheel so deepslate bands cannot cross it.
-    let eaves = if west_front { floor + 20 } else { floor + 16 };
+    let rose_col = west_front && (z - rect.center().1).abs() <= 6;
+    let rose_top = floor + 19;
+    // Gable sits above the 13-wide wheel so deepslate bands cannot cross it.
+    let eaves = if west_front { floor + 22 } else { floor + 16 };
     let (roof_y, roof_dir) = gothic_roof_y(rect, x, z, eaves);
     let edge = gothic_shell_edge(plan, x, z);
     let (cx, cz) = rect.center();
     if edge {
         let base = ground.min(floor);
         for y in base..roof_y {
-            let dy = y - (floor + 11);
+            let dy = y - (floor + 13);
             let dz = z - cz;
-            if rose_col && dy * dy + dz * dz <= 25 {
+            if rose_col && dy * dy + dz * dz <= 36 {
                 continue;
             }
             sink.put(x, y, z, gothic_stone(x, y, z, floor));
@@ -3219,7 +3335,7 @@ fn y_open_belfry(x: i32, z: i32) -> bool {
 }
 
 fn near_extractive(plan: &TownPlan, x: i32, z: i32) -> bool {
-    if plan.in_scene_yard(x, z) {
+    if plan.strips_trees(x, z) {
         return true;
     }
     for dz in -2..=2 {
@@ -3239,6 +3355,8 @@ fn near_extractive(plan: &TownPlan, x: i32, z: i32) -> bool {
                     | CellKind::Boat
                     | CellKind::Quay
                     | CellKind::Crane
+                    | CellKind::Breakwater
+                    | CellKind::SiegeTrench
             ) {
                 return true;
             }
@@ -3258,7 +3376,7 @@ fn place_green(
     sink.put(x, ground, z, palette.grass);
     terrace_edge(sink, plan, x, ground, z, palette);
     clear_above(sink, x, ground + 1, ground + 4, z);
-    if near_extractive(plan, x, z) || in_mill_disc(plan, x, z) || plan.in_scene_yard(x, z) {
+    if near_extractive(plan, x, z) || in_mill_disc(plan, x, z) || plan.strips_trees(x, z) {
         return;
     }
     let mix = (x.wrapping_mul(17) + z.wrapping_mul(31) + plan.seed as i32).unsigned_abs();
@@ -3546,22 +3664,27 @@ fn place_fishing_boat(
 
 fn place_quay(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, sea: i32, palette: &Palette) {
     let y = ground.max(sea);
-    sink.put(x, y, z, palette.cobble);
+    sink.put(x, y - 1, z, palette.andesite);
+    sink.put(x, y, z, Block::STONE_BRICKS.default_state);
+    sink.put(x, y + 1, z, palette.cobble);
     if ground < sea {
         for yy in ground + 1..=sea {
             sink.put(x, yy, z, palette.cobble);
         }
     }
-    if (x + z) % 5 == 0 {
-        sink.put(x, y + 1, z, palette.brick_wall);
-        sink.put(x, y + 2, z, Block::LANTERN.default_state);
-    } else if (x + z) % 4 == 0 {
-        sink.put(x, y + 1, z, Block::CHEST.default_state);
+    if (x + z) % 4 == 0 {
+        sink.put(x, y + 2, z, palette.brick_wall);
+        sink.put(x, y + 3, z, Block::LANTERN.default_state);
+    } else if (x + z) % 3 == 0 {
+        sink.put(x, y + 2, z, Block::CHEST.default_state);
+    } else {
+        sink.put(x, y + 2, z, palette.brick_wall);
     }
 }
 
 fn place_crane(
     sink: &mut impl BlockSink,
+    plan: &TownPlan,
     x: i32,
     ground: i32,
     z: i32,
@@ -3569,15 +3692,187 @@ fn place_crane(
     palette: &Palette,
 ) {
     let y = ground.max(sea);
-    sink.put(x, y, z, palette.cobble);
-    for h in 1..=8 {
-        sink.put(x, y + h, z, Block::OAK_LOG.default_state);
+    let mut pad = 0;
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            if plan.occ.kind(x + dx, z + dz) == CellKind::Crane {
+                pad += 1;
+            }
+        }
     }
-    sink.put(x, y + 9, z, Block::OAK_FENCE.default_state);
-    sink.put(x, y + 8, z, Block::OAK_TRAPDOOR.default_state);
-    sink.put(x, y + 7, z, Block::WHITE_WOOL.default_state);
-    sink.put(x, y + 6, z, Block::OAK_FENCE.default_state);
-    sink.put(x, y + 10, z, Block::LANTERN.default_state);
+    sink.put(x, y, z, Block::STONE_BRICKS.default_state);
+    sink.put(x, y + 1, z, palette.cobble);
+    if plan.heights.is_dry(x, z) && pad >= 8 {
+        for h in 2..=12 {
+            sink.put(x, y + h, z, Block::OAK_LOG.default_state);
+        }
+        sink.put(x, y + 13, z, Block::OAK_FENCE.default_state);
+        sink.put(x, y + 12, z, Block::OAK_TRAPDOOR.default_state);
+        sink.put(x, y + 11, z, Block::WHITE_WOOL.default_state);
+        sink.put(x, y + 14, z, Block::LANTERN.default_state);
+    } else {
+        sink.put(x, y + 11, z, Block::OAK_LOG.default_state);
+        sink.put(x, y + 12, z, Block::OAK_FENCE.default_state);
+        if (x + z) % 2 == 0 {
+            sink.put(x, y + 10, z, Block::OAK_FENCE.default_state);
+        }
+    }
+}
+
+fn place_breakwater(
+    sink: &mut impl BlockSink,
+    x: i32,
+    ground: i32,
+    z: i32,
+    sea: i32,
+    palette: &Palette,
+) {
+    let top = sea.max(ground);
+    for y in (top - 2).max(sink.floor_min() + 2)..=top + 1 {
+        let mix = (x.wrapping_mul(5) + z + y) as u8 % 3;
+        sink.put(
+            x,
+            y,
+            z,
+            if mix == 0 {
+                Block::STONE_BRICKS.default_state
+            } else if mix == 1 {
+                palette.cobble
+            } else {
+                palette.andesite
+            },
+        );
+    }
+    if (x + z) % 4 == 0 {
+        sink.put(x, top + 2, z, palette.brick_wall);
+    }
+}
+
+fn place_siege_trench(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+    sink.put(x, ground - 2, z, palette.andesite);
+    sink.put(x, ground - 1, z, Block::COARSE_DIRT.default_state);
+    sink.put(x, ground, z, Block::AIR.default_state);
+    if (x + z) % 3 == 0 {
+        sink.put(x, ground - 1, z, Block::COBBLESTONE.default_state);
+    }
+    clear_above(sink, x, ground + 1, ground + 6, z);
+}
+
+fn in_frontier(plan: &TownPlan, x: i32, z: i32) -> bool {
+    plan.scenes
+        .iter()
+        .any(|scene| scene.kind == crate::scenes::SceneKind::Frontier && scene.rect.contains(x, z))
+}
+
+fn place_scarred_curtain(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    foundation(sink, x, floor, ground, z, palette);
+    let mix = (x.wrapping_mul(17) + z.wrapping_mul(11) + plan.seed as i32).unsigned_abs();
+    let height = if mix % 5 == 0 { 3 } else { 6 };
+    let top = floor + height;
+    for y in floor..=top {
+        let v = ((x.wrapping_mul(3) + z + y) as u8) & 15;
+        sink.put(x, y, z, palette.foundation(v % 5 == 0));
+    }
+    if mix % 4 == 0 {
+        for y in floor + 2..=floor + 4 {
+            sink.put(x, y, z, Block::AIR.default_state);
+        }
+        sink.put(x, floor + 1, z, Block::COBBLESTONE.default_state);
+        sink.put(x, ground + 1, z, Block::COBBLESTONE.default_state);
+    }
+    if mix % 3 == 0 {
+        sink.put(x, ground, z, Block::COAL_BLOCK.default_state);
+        sink.put(x, ground + 1, z, Block::CAMPFIRE.default_state);
+    }
+    if mix % 2 == 0 {
+        sink.put(x, top + 1, z, palette.brick_wall);
+    }
+}
+
+fn place_collapsed_tower(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    foundation(sink, x, floor, ground, z, palette);
+    let mix = (x.wrapping_mul(23) + z.wrapping_mul(5) + plan.seed as i32).unsigned_abs();
+    let top = floor + 5 + (mix % 4) as i32;
+    let edge = Dir::ALL
+        .iter()
+        .any(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) != CellKind::TownTower);
+    if edge {
+        for y in floor..=top {
+            if mix % 3 == 0 && y >= top - 2 {
+                sink.put(x, y, z, Block::COBBLESTONE.default_state);
+            } else {
+                sink.put(x, y, z, palette.foundation(false));
+            }
+        }
+        if mix % 2 == 0 {
+            sink.put(x, ground + 1, z, Block::COBBLESTONE.default_state);
+        }
+    } else {
+        sink.put(x, floor, z, palette.planks);
+        clear_above(sink, x, floor + 1, top - 1, z);
+        sink.put(x, top, z, Block::COBBLESTONE.default_state);
+    }
+}
+
+fn apply_column_damage(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    z: i32,
+    kind: CellKind,
+    floor: i32,
+    ground: i32,
+    palette: &Palette,
+) {
+    let state = crate::damage::damage_state_for_plan(plan);
+    if !state.is_damaged() {
+        return;
+    }
+    let ruined = state == crate::damage::DamageState::Ruined;
+    let mix = (x.wrapping_mul(29) + z.wrapping_mul(13) + plan.seed as i32).unsigned_abs();
+    let hole = if ruined { mix % 3 == 0 } else { mix % 5 == 0 };
+    match kind {
+        CellKind::TownWall
+        | CellKind::CastleWall
+        | CellKind::CastleInnerWall
+        | CellKind::TownTower
+        | CellKind::CastleTower => {
+            if hole {
+                for y in floor + 2..=floor + 4 {
+                    sink.put(x, y, z, Block::AIR.default_state);
+                }
+                sink.put(x, ground + 1, z, Block::COBBLESTONE.default_state);
+            }
+            if mix % 4 == 0 {
+                sink.put(x, ground, z, Block::COAL_BLOCK.default_state);
+            }
+        }
+        CellKind::Building if hole => {
+            sink.put(x, ground, z, Block::COAL_BLOCK.default_state);
+            if ruined {
+                sink.put(x, floor + 3, z, Block::AIR.default_state);
+                sink.put(x, floor + 4, z, Block::AIR.default_state);
+            }
+        }
+        _ => {}
+    }
+    let _ = palette;
 }
 
 fn place_tourney_list(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {

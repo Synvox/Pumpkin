@@ -126,6 +126,10 @@ pub enum CellKind {
     MineAdit,
     /// Charred house shell in a siege-scarred frontier town.
     Burnt,
+    /// Stone breakwater in harbour water.
+    Breakwater,
+    /// Siege trench / ditch outside a damaged curtain.
+    SiegeTrench,
 }
 
 impl CellKind {

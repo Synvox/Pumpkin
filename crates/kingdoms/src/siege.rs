@@ -189,6 +189,8 @@ struct OwnershipFile {
     #[serde(default)]
     last_clock_tick: u32,
     #[serde(default)]
+    damage: HashMap<String, String>,
+    #[serde(default)]
     stats: HashMap<String, PlayerStats>,
 }
 
@@ -207,6 +209,7 @@ pub struct SavedState {
     pub clock_tick: u32,
     pub next_raid_id: u32,
     pub last_clock_tick: u32,
+    pub damage: HashMap<String, crate::damage::DamageState>,
     pub stats: HashMap<String, PlayerStats>,
 }
 
@@ -237,6 +240,11 @@ pub fn load_state(path: &Path) -> SavedState {
         clock_tick: file.clock_tick,
         next_raid_id: file.next_raid_id,
         last_clock_tick: file.last_clock_tick,
+        damage: file
+            .damage
+            .into_iter()
+            .map(|(id, raw)| (id, crate::damage::DamageState::parse(&raw)))
+            .collect(),
         stats: file.stats,
     }
 }
@@ -269,6 +277,11 @@ pub fn save_state(path: &Path, state: &SavedState) -> std::io::Result<()> {
         clock_tick: state.clock_tick,
         next_raid_id: state.next_raid_id,
         last_clock_tick: state.last_clock_tick,
+        damage: state
+            .damage
+            .iter()
+            .map(|(id, state)| (id.clone(), state.as_str().to_owned()))
+            .collect(),
         stats: state.stats.clone(),
     };
     let json = serde_json::to_string_pretty(&file).unwrap_or_else(|_| "{}".to_owned());
@@ -495,6 +508,7 @@ mod tests {
                 clock_tick: 4800,
                 next_raid_id: 7,
                 last_clock_tick: 2400,
+                damage: HashMap::new(),
                 stats: HashMap::new(),
             },
         )

@@ -42,6 +42,7 @@ pub mod cells;
 pub mod chat;
 pub mod chunk_fill;
 pub mod command;
+pub mod damage;
 pub mod director;
 pub mod events;
 pub mod faction;
@@ -76,6 +77,7 @@ pub mod watertight;
 pub mod wfc;
 
 pub use chat::ShoutKind;
+pub use damage::{DamageState, damage_state, set_damage_state};
 pub use director::{
     BattleState, RaidId, battle_state, join_kingdom, query_battle_state, set_target_town,
     start_raid, stop_raid,
