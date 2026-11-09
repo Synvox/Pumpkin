@@ -183,7 +183,17 @@ pub fn save_state(
     std::fs::write(path, json)
 }
 
+/// Attackers needed in the courtyard: at least 8, or 10% of the surviving force.
+#[must_use]
+pub const fn capture_need(surviving: u32) -> u32 {
+    let tenth = surviving.div_ceil(10);
+    if tenth < 8 { 8 } else { tenth }
+}
+
 /// Advance a courtyard hold. Returns the new hold counter and a flip, if any.
+///
+/// Attackers must meet [`capture_need`] in the keep with defenders there wiped
+/// out or routed (`defenders_in_keep == 0`).
 #[must_use]
 pub fn tick_hold(
     current: &TownOwner,
@@ -191,10 +201,12 @@ pub fn tick_hold(
     defenders_in_keep: u32,
     occupy_hold: u32,
     retake_hold: u32,
+    occupy_need: u32,
+    retake_need: u32,
 ) -> HoldUpdate {
     let mut occupy = occupy_hold;
     let mut retake = retake_hold;
-    if raiders_in_keep >= 3 && defenders_in_keep == 0 {
+    if raiders_in_keep >= occupy_need && defenders_in_keep == 0 {
         occupy = occupy.saturating_add(1);
         retake = 0;
         if occupy >= HOLD_TICKS && !current.is_pillager() {
@@ -205,7 +217,7 @@ pub fn tick_hold(
                 retaken: false,
             };
         }
-    } else if defenders_in_keep >= 3 && raiders_in_keep == 0 {
+    } else if defenders_in_keep >= retake_need && raiders_in_keep == 0 {
         retake = retake.saturating_add(1);
         occupy = 0;
         if retake >= HOLD_TICKS && current.is_pillager() {
@@ -268,11 +280,13 @@ pub fn breach_gate(world: &Arc<World>, gate: GateInfo, floor_y: i32) -> u32 {
             cleared += 1;
         }
     }
-    tracing::info!(
-        "kingdoms ram breached the gate x={} z={} cleared={cleared}",
-        gate.x,
-        gate.z
-    );
+    if cleared > 0 {
+        tracing::info!(
+            "kingdoms ram breached the gate x={} z={} cleared={cleared}",
+            gate.x,
+            gate.z
+        );
+    }
     cleared
 }
 
@@ -327,14 +341,42 @@ mod tests {
     }
 
     #[test]
+    fn capture_need_is_max_of_eight_and_ten_percent() {
+        assert_eq!(capture_need(0), 8);
+        assert_eq!(capture_need(50), 8);
+        assert_eq!(capture_need(80), 8);
+        assert_eq!(capture_need(400), 40);
+    }
+
+    #[test]
+    fn four_raiders_do_not_flip_a_town() {
+        let owner = TownOwner::Kingdom("alder".to_owned());
+        let need = capture_need(400);
+        let mut hold = 0;
+        let mut update = HoldUpdate {
+            occupy_hold: 0,
+            retake_hold: 0,
+            captured: false,
+            retaken: false,
+        };
+        for _ in 0..HOLD_TICKS {
+            update = tick_hold(&owner, 4, 0, hold, 0, need, 8);
+            hold = update.occupy_hold;
+        }
+        assert!(!update.captured);
+        assert_eq!(update.occupy_hold, 0);
+    }
+
+    #[test]
     fn capture_needs_raiders_in_the_keep_and_no_defenders() {
         let owner = TownOwner::Kingdom("alder".to_owned());
+        let need = capture_need(80);
         let mut hold = 0;
-        let mut update = tick_hold(&owner, 2, 0, hold, 0);
+        let mut update = tick_hold(&owner, 2, 0, hold, 0, need, 8);
         assert!(!update.captured);
         hold = update.occupy_hold;
         for _ in 0..HOLD_TICKS {
-            update = tick_hold(&owner, 5, 0, hold, 0);
+            update = tick_hold(&owner, need, 0, hold, 0, need, 8);
             hold = update.occupy_hold;
         }
         assert!(update.captured);
@@ -344,7 +386,7 @@ mod tests {
     #[test]
     fn defenders_in_the_keep_block_capture() {
         let owner = TownOwner::Kingdom("alder".to_owned());
-        let update = tick_hold(&owner, 10, 1, HOLD_TICKS - 1, 0);
+        let update = tick_hold(&owner, 40, 1, HOLD_TICKS - 1, 0, 8, 8);
         assert!(!update.captured);
         assert_eq!(update.occupy_hold, HOLD_TICKS - 2);
     }
@@ -360,7 +402,7 @@ mod tests {
             retaken: false,
         };
         for _ in 0..HOLD_TICKS {
-            update = tick_hold(&owner, 0, 4, 0, hold);
+            update = tick_hold(&owner, 0, 8, 0, hold, 8, 8);
             hold = update.retake_hold;
         }
         assert!(update.retaken);

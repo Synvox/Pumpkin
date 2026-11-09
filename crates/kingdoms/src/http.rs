@@ -1,14 +1,18 @@
 //! Optional authenticated HTTP director for an external game director.
 //!
-//! Off by default. Enable with `KINGDOMS_HTTP=1` and a bearer token in
-//! `KINGDOMS_HTTP_TOKEN`. Binds `127.0.0.1:8742` unless `KINGDOMS_HTTP_BIND`
-//! says otherwise. Outbound webhooks POST JSON with `X-Kingdoms-Signature`.
+//! Off by default. Enable with `KINGDOMS_HTTP=1` and a bearer token of at
+//! least [`MIN_TOKEN_LEN`] characters in `KINGDOMS_HTTP_TOKEN`. Binds
+//! `127.0.0.1:8742` unless `KINGDOMS_HTTP_BIND` says otherwise. Outbound
+//! webhooks POST JSON with `X-Kingdoms-Signature`.
 
-use std::sync::OnceLock;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -18,6 +22,7 @@ use pumpkin_util::text::TextComponent;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 
 use crate::director::{self, CombatEvent, CombatKind, RaidId};
@@ -27,8 +32,17 @@ type HmacSha256 = Hmac<Sha256>;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8742";
 const SIG_HEADER: &str = "x-kingdoms-signature";
+/// Bearer tokens shorter than this refuse to bind.
+pub const MIN_TOKEN_LEN: usize = 32;
+/// Reject request bodies larger than this (also set as axum's limit).
+pub const MAX_BODY: usize = 16 * 1024;
+/// Simple sliding-window cap per process.
+pub const RATE_PER_SEC: u32 = 20;
+/// An HTTP director that has talked to us this recently overrides the war clock.
+const DIRECTOR_SEEN_SECS: u64 = 30;
 
-static CONFIG: OnceLock<HttpConfig> = OnceLock::new();
+static CONFIG: std::sync::OnceLock<HttpConfig> = std::sync::OnceLock::new();
+static LAST_SEEN_SECS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 struct HttpConfig {
@@ -40,9 +54,46 @@ struct HttpConfig {
 #[derive(Clone)]
 struct AppState {
     token: String,
+    limiter: Arc<RateLimit>,
 }
 
-/// True when `KINGDOMS_HTTP` / `KINGDOMS_DIRECTOR_HTTP` is set and a token exists.
+/// Sliding-window rate limiter. One bucket for the whole listener.
+pub struct RateLimit {
+    hits: Mutex<VecDeque<Instant>>,
+    per_sec: u32,
+}
+
+impl RateLimit {
+    #[must_use]
+    pub fn new(per_sec: u32) -> Self {
+        Self {
+            hits: Mutex::new(VecDeque::new()),
+            per_sec,
+        }
+    }
+
+    /// True if this call is under the cap.
+    pub fn allow(&self) -> bool {
+        let now = Instant::now();
+        let mut q = self
+            .hits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while q
+            .front()
+            .is_some_and(|t| now.duration_since(*t).as_secs() >= 1)
+        {
+            q.pop_front();
+        }
+        if q.len() as u32 >= self.per_sec {
+            return false;
+        }
+        q.push_back(now);
+        true
+    }
+}
+
+/// True when `KINGDOMS_HTTP` / `KINGDOMS_DIRECTOR_HTTP` is set.
 #[must_use]
 pub fn enabled() -> bool {
     env_flag("KINGDOMS_HTTP") || env_flag("KINGDOMS_DIRECTOR_HTTP")
@@ -60,12 +111,62 @@ fn env_nonempty(name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Constant-time compare. Different lengths are rejected without leaking the token.
+#[must_use]
+pub fn token_matches(got: &str, expected: &str) -> bool {
+    if got.is_empty() || got.len() != expected.len() {
+        return false;
+    }
+    got.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
+/// True when a token is long enough to bind the HTTP server.
+#[must_use]
+pub const fn token_is_strong(token: &str) -> bool {
+    token.len() >= MIN_TOKEN_LEN
+}
+
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Record that an authenticated HTTP director just talked to us.
+pub fn mark_director_seen() {
+    LAST_SEEN_SECS.store(unix_secs(), Ordering::Relaxed);
+}
+
+/// True when an external HTTP director has used the API recently.
+#[must_use]
+pub fn external_director_connected() -> bool {
+    let last = LAST_SEEN_SECS.load(Ordering::Relaxed);
+    if last == 0 {
+        return false;
+    }
+    unix_secs().saturating_sub(last) <= DIRECTOR_SEEN_SECS
+}
+
 fn load_config() -> Option<HttpConfig> {
     if !enabled() {
         return None;
     }
     let token =
-        env_nonempty("KINGDOMS_HTTP_TOKEN").or_else(|| env_nonempty("KINGDOMS_DIRECTOR_TOKEN"))?;
+        env_nonempty("KINGDOMS_HTTP_TOKEN").or_else(|| env_nonempty("KINGDOMS_DIRECTOR_TOKEN"));
+    let Some(token) = token else {
+        tracing::error!(
+            "kingdoms HTTP refused: set KINGDOMS_HTTP_TOKEN to at least {MIN_TOKEN_LEN} characters"
+        );
+        return None;
+    };
+    if !token_is_strong(&token) {
+        tracing::error!(
+            len = token.len(),
+            min = MIN_TOKEN_LEN,
+            "kingdoms HTTP refused: token shorter than {MIN_TOKEN_LEN} characters"
+        );
+        return None;
+    }
     let webhook = env_nonempty("KINGDOMS_HTTP_WEBHOOK");
     let webhook_secret = env_nonempty("KINGDOMS_HTTP_WEBHOOK_SECRET")
         .or_else(|| env_nonempty("KINGDOMS_HTTP_TOKEN"))
@@ -85,6 +186,7 @@ pub fn spawn_if_enabled() {
     let bind = env_nonempty("KINGDOMS_HTTP_BIND").unwrap_or_else(|| DEFAULT_BIND.to_owned());
     let state = AppState {
         token: cfg.token.clone(),
+        limiter: Arc::new(RateLimit::new(RATE_PER_SEC)),
     };
     let _ = CONFIG.set(cfg);
     tracing::info!(bind, "kingdoms director HTTP listening");
@@ -110,11 +212,20 @@ fn router(state: AppState) -> Router {
         .route("/raids", post(post_raid))
         .route("/raids/{id}/stop", post(stop_raid))
         .route("/chat", post(post_chat))
+        .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
 }
 
 fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response()
+}
+
+fn too_large() -> Response {
+    (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response()
+}
+
+fn too_many() -> Response {
+    (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response()
 }
 
 fn json_ok(value: Value) -> Response {
@@ -131,12 +242,27 @@ fn check_auth(headers: &HeaderMap, token: &str) -> bool {
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .is_some_and(|got| got == token)
+        .is_some_and(|got| token_matches(got, token))
+}
+
+/// Shared gate: rate limit, body size, then bearer token.
+fn gate(headers: &HeaderMap, state: &AppState, body_len: usize) -> Option<Response> {
+    if !state.limiter.allow() {
+        return Some(too_many());
+    }
+    if body_len > MAX_BODY {
+        return Some(too_large());
+    }
+    if !check_auth(headers, &state.token) {
+        return Some(unauthorized());
+    }
+    mark_director_seen();
+    None
 }
 
 async fn get_state(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return unauthorized();
+    if let Some(err) = gate(&headers, &state, 0) {
+        return err;
     }
     json_ok(director_state())
 }
@@ -146,8 +272,8 @@ async fn get_town(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return unauthorized();
+    if let Some(err) = gate(&headers, &state, 0) {
+        return err;
     }
     director::battle_state(&id).map_or_else(
         || (StatusCode::NOT_FOUND, format!("unknown town {id}")).into_response(),
@@ -175,8 +301,8 @@ const fn default_size() -> u16 {
 }
 
 async fn post_raid(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return unauthorized();
+    if let Some(err) = gate(&headers, &state, body.len()) {
+        return err;
     }
     let body: RaidBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
@@ -215,8 +341,8 @@ async fn stop_raid(
     Path(id): Path<u32>,
     headers: HeaderMap,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return unauthorized();
+    if let Some(err) = gate(&headers, &state, 0) {
+        return err;
     }
     let n = director::stop_raid_by_id(RaidId(id));
     json_ok(json!({ "stopped": n, "id": id }))
@@ -229,8 +355,8 @@ struct ChatBody {
 }
 
 async fn post_chat(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return unauthorized();
+    if let Some(err) = gate(&headers, &state, body.len()) {
+        return err;
     }
     let body: ChatBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
@@ -262,6 +388,9 @@ fn battle_json(b: &director::BattleState) -> Value {
         "raiders_killed": b.raiders_killed,
         "threatened_gate": b.threatened_gate,
         "gate_breached": b.gate_breached,
+        "occupy_hold": b.occupy_hold,
+        "occupy_need": b.occupy_need,
+        "ram_hp": b.ram_hp,
     })
 }
 
@@ -299,6 +428,7 @@ fn director_state() -> Value {
         "towns": towns,
         "players": players,
         "troops": { "defenders": defenders, "raiders": raiders },
+        "war_clock": !external_director_connected(),
     })
 }
 
@@ -318,6 +448,8 @@ fn webhook_name(kind: CombatKind) -> Option<&'static str> {
         CombatKind::Breach => Some("gate_breached"),
         CombatKind::Capture => Some("town_captured"),
         CombatKind::Retake => Some("town_captured"),
+        CombatKind::RamDestroyed => Some("ram_destroyed"),
+        CombatKind::Rout => Some("rout"),
         _ => None,
     }
 }
@@ -389,6 +521,7 @@ fn emit(name: &str, payload: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
     fn hmac_is_stable_for_known_bytes() {
@@ -403,6 +536,58 @@ mod tests {
         assert_eq!(webhook_name(CombatKind::RaidStart), Some("raid_started"));
         assert_eq!(webhook_name(CombatKind::Breach), Some("gate_breached"));
         assert_eq!(webhook_name(CombatKind::Capture), Some("town_captured"));
+        assert_eq!(
+            webhook_name(CombatKind::RamDestroyed),
+            Some("ram_destroyed")
+        );
         assert!(webhook_name(CombatKind::Kill).is_none());
+    }
+
+    #[test]
+    fn token_compare_is_length_checked_and_equal() {
+        let token = "a".repeat(MIN_TOKEN_LEN);
+        assert!(token_matches(&token, &token));
+        assert!(!token_matches("short", &token));
+        assert!(!token_matches(&"b".repeat(MIN_TOKEN_LEN), &token));
+        assert!(!token_matches("", &token));
+        assert!(!token_is_strong("dev-token"));
+        assert!(token_is_strong(&token));
+    }
+
+    #[test]
+    fn rate_limit_trips_after_cap() {
+        let lim = RateLimit::new(3);
+        assert!(lim.allow());
+        assert!(lim.allow());
+        assert!(lim.allow());
+        assert!(!lim.allow());
+    }
+
+    #[test]
+    fn body_over_max_is_rejected_by_gate() {
+        let token = "a".repeat(MIN_TOKEN_LEN);
+        let state = AppState {
+            token: token.clone(),
+            limiter: Arc::new(RateLimit::new(100)),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let err = gate(&headers, &state, MAX_BODY + 1).unwrap();
+        assert_eq!(err.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(gate(&headers, &state, 16).is_none());
+    }
+
+    #[test]
+    fn missing_bearer_is_unauthorized() {
+        let token = "a".repeat(MIN_TOKEN_LEN);
+        let state = AppState {
+            token,
+            limiter: Arc::new(RateLimit::new(100)),
+        };
+        let err = gate(&HeaderMap::new(), &state, 0).unwrap();
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
     }
 }

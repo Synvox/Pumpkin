@@ -25,6 +25,8 @@ pub const TAG_KINGDOM: &str = "kingdoms:kingdom";
 pub const TAG_WIRED: &str = "kingdoms:wired";
 pub const TAG_JOB_RAM: &str = "kingdoms:job:ram";
 pub const TAG_JOB_LADDER: &str = "kingdoms:job:ladder";
+pub const TAG_ROUTED: &str = "kingdoms:routed";
+pub const TAG_TEMP: &str = "kingdoms:temp";
 
 /// Stable kingdom identity. Towns in even/odd cells share two starting kingdoms
 /// so a later director can pit them against each other; pillagers stay outside.
@@ -217,6 +219,16 @@ pub fn faction_from_tags(entity: &pumpkin_core::entity::Entity) -> Option<Factio
         return Some(Faction::Neutral);
     }
     None
+}
+
+/// True when `entity` carries `tag`.
+#[must_use]
+pub fn has_tag(entity: &pumpkin_core::entity::Entity, tag: &str) -> bool {
+    entity
+        .scoreboard_tags
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(tag)
 }
 
 /// True when this entity carries any kingdoms gameplay tag.
