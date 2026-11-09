@@ -52,6 +52,10 @@ pub fn stamp_plan_in_chunk(ctx: &mut ChunkDecorationContext<'_>, plan: &TownPlan
     for z in min_z..min_z + 16 {
         for x in min_x..min_x + 16 {
             if !plan.bounds.contains(x, z) && !plan.border_roads.contains_key(&(x, z)) {
+                if plan.strips_trees(x, z) {
+                    let surface = ctx.surface_height_exclusive(x, z);
+                    strip_feature_vegetation(ctx, plan, x, z, surface);
+                }
                 continue;
             }
             let surface = ctx.surface_height_exclusive(x, z);
@@ -78,7 +82,9 @@ fn strip_feature_vegetation(
         return;
     }
     let planned = plan.heights.height(x, z).max(plan.heights.sea_level);
-    let top = surface.max(planned) + 8;
+    // Fancy oak / 2×2 spruce hang side logs well above ground on neighbour
+    // columns, where `surface` is dirt not canopy. Match TREE_STRIP height.
+    let top = surface.max(planned) + 24;
     let air = Block::AIR.default_state;
     for y in planned.saturating_sub(4)..=top {
         let id = Block::from_state_id(ctx.get_block_state(x, y, z)).id;

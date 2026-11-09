@@ -1550,7 +1550,18 @@ mod tests {
             plan.town.max_z.max(market.max_z) + 4,
         );
         let volume = crate::chunk_fill::fill_volume_from_chunks_in(&plan, &world_gen, region);
-        let fails = check_scene_vegetation(&plan, &volume);
+        let mut fails = check_scene_vegetation(&plan, &volume);
+        for scene in plan
+            .scenes
+            .iter()
+            .filter(|scene| scene.kind == crate::scenes::SceneKind::Frontier)
+        {
+            let pad = scene
+                .rect
+                .inflate(crate::scenes::SCENE_YARD_MARGIN + crate::scenes::FRONTIER_TREE_MARGIN);
+            let front = crate::chunk_fill::fill_volume_from_chunks_in(&plan, &world_gen, pad);
+            fails.extend(check_scene_vegetation(&plan, &front));
+        }
         assert!(
             fails.is_empty(),
             "feature trees / floating plants in the town plan:\n{}",

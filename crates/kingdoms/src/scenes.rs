@@ -17,6 +17,10 @@ use crate::town::TownPos;
 /// are stripped. Occupancy Green/Harbor fill plus stamp clear.
 pub const SCENE_YARD_MARGIN: i32 = 6;
 
+/// Extra strip around a frontier yard so hanging Features trunks and leaf
+/// strips cannot float over the curtain in the scene crop.
+pub const FRONTIER_TREE_MARGIN: i32 = 10;
+
 /// Keep feature trees this far from a roofed lot so trunks do not punch eaves.
 pub const BUILDING_TREE_MARGIN: i32 = 4;
 
@@ -422,7 +426,12 @@ pub fn paint_tree_keepout(
 /// lily pads cannot survive the stamper.
 pub fn paint_scene_yards(occ: &mut Occupancy, grid: &HeightGrid, scenes: &[Scene]) {
     for scene in scenes {
-        let pad = scene.rect.inflate(SCENE_YARD_MARGIN);
+        let extra = if scene.kind == SceneKind::Frontier {
+            SCENE_YARD_MARGIN + FRONTIER_TREE_MARGIN
+        } else {
+            SCENE_YARD_MARGIN
+        };
+        let pad = scene.rect.inflate(extra);
         for z in pad.min_z..=pad.max_z {
             for x in pad.min_x..=pad.max_x {
                 if !occ.bounds.contains(x, z) {

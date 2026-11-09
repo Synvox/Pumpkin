@@ -34,7 +34,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 2;
+pub const PLAN_CACHE_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -441,13 +441,17 @@ impl TownPlan {
     }
 
     /// True inside any scene footprint plus [`crate::scenes::SCENE_YARD_MARGIN`].
+    /// Frontier yards take [`crate::scenes::FRONTIER_TREE_MARGIN`] extra so
+    /// hanging Features canopies do not float over the curtain crop.
     #[must_use]
     pub fn in_scene_yard(&self, x: i32, z: i32) -> bool {
         self.scenes.iter().any(|scene| {
-            scene
-                .rect
-                .inflate(crate::scenes::SCENE_YARD_MARGIN)
-                .contains(x, z)
+            let extra = if scene.kind == crate::scenes::SceneKind::Frontier {
+                crate::scenes::SCENE_YARD_MARGIN + crate::scenes::FRONTIER_TREE_MARGIN
+            } else {
+                crate::scenes::SCENE_YARD_MARGIN
+            };
+            scene.rect.inflate(extra).contains(x, z)
         })
     }
 
@@ -471,6 +475,64 @@ impl TownPlan {
             || self.town.contains(x, z)
             || self.market.inflate(16).contains(x, z)
             || self.near_building(x, z)
+    }
+
+    /// Stable FNV-1a of occupancy, lots and scenes. Tests pin this next to
+    /// [`PLAN_CACHE_VERSION`] so a layout change cannot ship on a stale cache.
+    #[must_use]
+    pub fn layout_fingerprint(&self) -> u64 {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0100_0000_01b3;
+        let mut hash = OFFSET;
+        let mix = |hash: &mut u64, value: u64| {
+            *hash ^= value;
+            *hash = hash.wrapping_mul(PRIME);
+        };
+        let mix_i32 = |hash: &mut u64, value: i32| mix(hash, value as u32 as u64);
+        mix(
+            &mut hash,
+            match self.palette {
+                PaletteKind::Oak => 1,
+                PaletteKind::Spruce => 2,
+                PaletteKind::Sandstone => 3,
+            },
+        );
+        mix_i32(&mut hash, self.origin.cell_x);
+        mix_i32(&mut hash, self.origin.cell_z);
+        mix_i32(&mut hash, self.bounds.min_x);
+        mix_i32(&mut hash, self.bounds.min_z);
+        mix_i32(&mut hash, self.bounds.max_x);
+        mix_i32(&mut hash, self.bounds.max_z);
+        mix_i32(&mut hash, self.town.min_x);
+        mix_i32(&mut hash, self.town.min_z);
+        mix_i32(&mut hash, self.town.max_x);
+        mix_i32(&mut hash, self.town.max_z);
+        mix_i32(&mut hash, self.market.min_x);
+        mix_i32(&mut hash, self.market.min_z);
+        mix_i32(&mut hash, self.market.max_x);
+        mix_i32(&mut hash, self.market.max_z);
+        mix(&mut hash, self.lots.len() as u64);
+        for lot in &self.lots {
+            mix(&mut hash, lot.kind as u8 as u64);
+            mix_i32(&mut hash, lot.rect.min_x);
+            mix_i32(&mut hash, lot.rect.min_z);
+            mix_i32(&mut hash, lot.rect.max_x);
+            mix_i32(&mut hash, lot.rect.max_z);
+        }
+        mix(&mut hash, self.scenes.len() as u64);
+        for scene in &self.scenes {
+            mix(&mut hash, scene.kind as u8 as u64);
+            mix_i32(&mut hash, scene.rect.min_x);
+            mix_i32(&mut hash, scene.rect.min_z);
+            mix_i32(&mut hash, scene.rect.max_x);
+            mix_i32(&mut hash, scene.rect.max_z);
+        }
+        for z in self.bounds.min_z..=self.bounds.max_z {
+            for x in self.bounds.min_x..=self.bounds.max_x {
+                mix(&mut hash, u64::from(self.occ.kind(x, z) as u8));
+            }
+        }
+        hash
     }
 }
 
@@ -1962,7 +2024,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 2);
+        assert_eq!(PLAN_CACHE_VERSION, 3);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -1996,5 +2058,35 @@ mod tests {
         forget_memory_for_test(9_999_003, 0, 0);
         assert!(cached_town_info(9_999_003, 0, 0).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
+    /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
+    const PLAN_LAYOUT_VERSION: u32 = 3;
+    const PLAN_LAYOUT_HASH: u64 = 0x9c26_32f4_103a_6fd6;
+
+    #[test]
+    fn plan_cache_version_tracks_layout() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            6,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let hash = plan.layout_fingerprint();
+        assert_eq!(
+            PLAN_CACHE_VERSION, PLAN_LAYOUT_VERSION,
+            "bump PLAN_CACHE_VERSION when plan output changes"
+        );
+        assert_eq!(
+            hash, PLAN_LAYOUT_HASH,
+            "plan output changed; bump PLAN_CACHE_VERSION (now {PLAN_CACHE_VERSION}) and PLAN_LAYOUT_HASH to {hash:#x}"
+        );
     }
 }
