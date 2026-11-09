@@ -513,24 +513,31 @@ Plots: `/opt/cursor/artifacts/soak-r9b-branch.csv`, `soak-r8-master.csv`, `raid-
 
 Round 10 (this PR) gives levy a wooden sword and alder/raven a shield on join and respawn, picks a standable keep courtyard (then the nearest friendly town) instead of a wall or world spawn, and dumps kit packets from the raid bot. Camps grow a player-usable trebuchet (director cadence or `/kingdom fire` / anvil) whose cobble arc punches wall holes repair can later fill; a walking siege tower and camp-side ladders let raiders scale the curtain. Archers stand on the wall walk and towers, a third of the guards sally at the ram, and the alarm drops the portcullis (iron bars, webhooked). `KINGDOMS.md` now has the full HTTP and webhook contract for a Sails war-map.
 
-Live `kingdoms-raid-bot --fight` (seed `20261025`, alder, HTTP raid 40/20 on `0,0`): join at world spawn then `/kingdom deploy` to the threatened gate `1504.5, 80, 597.5`; levy stats `rank=levy renown=0`; `/war` and `/lines` 200; gates closed (`kingdoms gate closed` ×2); ram moved 16 times; raid stayed live ~11k ticks, peak MSPT 12.21 / director 6.92. Kit inventory packets did not decode as ascii names (bot now reads `CSetEquipment` / inventory item ids). Rank-up did not fire this run (0 hostiles decoded, 0 kills). Early attempts that stuffed guessed attacker ids were kicked with `Wrong teleport id` and landed at world spawn `(10.5, 75)` before the keep-teleport path; the successful stay-alive run did not die so respawn-to-keep was not observed in-game. Trebuchet / tower / ladder log lines were 0 on this capital raid; ram and portcullis close were. `/kingdom fire` reached the server (`executed command /kingdom fire`) but the client brigadier tree still printed `command.unknown.argument`.
+Live `kingdoms-raid-bot --prove` after merging master `c0b8f38a` (seed `20261025`, alder, capital `0,0`):
 
-r8 config side-by-side (1 bot, 3 fronts, 30 min, seed `20261025`) vs master `d231669a`. Sequential, same machine, not overlapped.
+- Kit: `KIT-PROVE slot slot=36 wooden_sword` and slot 45 `shield` (plus leather). Server `kingdoms levy kit … weapon=wooden_sword shield=shield`.
+- `/kill` respawn: `kingdoms keep spawn player=alder1 x=1256 y=165 z=691` then `TELEPORT 1256.5, 165, 691.5`. Keep mass is `1255..1294 × 653..684` with roof ~173; this is south of the keep, 8 below the roof, not world spawn `(10.5, 75)`.
+- Trebuchet: `loosed` / `impact` / `trebuchet hole x=1504 y=65 z=535` (town-gate column, not the keep). Repair: `repair-by-diff refilled trebuchet hole placed=30 town=20261025:0:0` (then 38, 45, …). No `skipped keep` lines.
+- Tower + ladders: `siege tower spawned`, `assault ladders raised`, webhook `ladders_raised`. Curtain: `raider crossed curtain id=91 x=1275.3 y=161.0 z=682.8`.
+- Archers: `archer on wall walk id=193 x=1561.5 y=79.0 z=495.5`. Ram sally: `ram sally id=60 x=1327.5 z=669.5`. Portcullis: `gate closed x=1504 z=597` and `x=1327 z=669`; webhook `portcullis_dropped` on the short prove runs.
 
-| | branch (this PR) | master `d231669a` |
+r8 config side-by-side (1 bot, 3 fronts, 30 min, seed `20261025`) vs master `c0b8f38a` (PR #22). Sequential, same machine, not overlapped.
+
+| | branch (this PR) | master `c0b8f38a` |
 | --- | ---: | ---: |
-| MSPT p50 / p95 / max | **34.43 / 46.93 / 634.67** | 36.35 / 43.75 / 345.67 |
-| director_ms p50 / p95 / max | **0.35 / 0.67 / 1.45** | 0.58 / 0.85 / 3.89 |
-| director ticks ≥ 50 ms | **0** | **3** (hitch max **575**) |
-| captures | 32 | 32 |
-| `Can't keep up` | **5** | 9 |
+| MSPT p50 / p95 / max | 34.09 / **42.27** / 343.79 | 33.86 / 44.64 / 331.71 |
+| director_ms p50 / p95 / max | 0.24 / **0.36** / **1.17** | 0.21 / 0.53 / 5.76 |
+| director ticks ≥ 50 ms (CSV) | **0** | **0** |
+| hitch log (director_ms) | 1 (`tick=23119` **629.10**, mspt 35.12) | 0 |
+| captures | 30 | 30 |
+| `Can't keep up` | **2** | 7 |
 | tickets max | 85 | 85 |
-| live bodies max | 247 | 247 |
-| soldier shouts | 142 | 207 |
+| live bodies max | 262 | 252 |
+| soldier shouts | 193 | 183 |
 
-Branch director is not worse than master. Branch MSPT max 634.67 is tick 28360 with `director_ms=0.01` (vanilla hitch, not the director). Master hitch lines are director 575 / 66 / 501.
+Steady MSPT is within noise of master (p50 +0.23, p95 better). Director p95/max and `Can't keep up` are better. The one 629 ms director hitch did not move that tick's MSPT (35.12). Tickets did not leak (85 end = max).
 
-Plots: `/opt/cursor/artifacts/soak-r10-branch.csv`, `soak-r10-master.csv`, `raid-bot-r10.log`, `raid-bot-r10-live.txt`, `raid-bot-r10-server.log`.
+Plots: `/opt/cursor/artifacts/soak-r23-branch.csv`, `soak-r23-master.csv`, `raid-bot-prove-live-final.txt`, `soak-r23-branch.log`.
 
 ### Commands
 
