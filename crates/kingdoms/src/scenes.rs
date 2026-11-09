@@ -204,21 +204,13 @@ pub fn paint_harbour_town(
         }
     }
     if docks.is_empty() {
-        for &(x, z) in &harbors {
-            if Dir::ALL
-                .iter()
-                .any(|dir| grid.is_dry(x + dir.dx(), z + dir.dz()))
-            {
-                occ.set(x, z, CellKind::Dock, true);
-                docks.push((x, z));
-                if docks.len() >= 8 {
-                    break;
-                }
-            }
-        }
+        claim_large_water_docks(occ, grid, search, &harbors, &mut docks);
     }
     docks.retain(|&(x, z)| berth_on_large_water(occ, grid, search, x, z));
     harbors.retain(|&(x, z)| water_body_ok(grid, search, x, z));
+    if docks.is_empty() {
+        claim_large_water_docks(occ, grid, search, &harbors, &mut docks);
+    }
     if docks.is_empty() {
         return;
     }
@@ -287,7 +279,7 @@ pub fn paint_harbour_town(
         force_harbour_boat(occ, grid, search, &docks);
     }
     paint_harbour_buildings(occ, grid, lots, seed, town, min_x, min_z, max_x, max_z);
-    paint_lighthouse(occ, grid, search, &docks);
+    paint_lighthouse(occ, search);
     for z in search.min_z..=search.max_z {
         for x in search.min_x..=search.max_x {
             if matches!(
@@ -478,6 +470,25 @@ fn harbour_out(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> Option<Dir
         .find(|dir| wet_berth(occ, grid, x + dir.dx(), z + dir.dz()))
 }
 
+fn harbour_open_dir(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> Option<Dir> {
+    let mut best = None;
+    let mut best_n = 0;
+    for dir in Dir::ALL {
+        let mut n = 0;
+        for step in 1..=16 {
+            if !wet_berth(occ, grid, x + dir.dx() * step, z + dir.dz() * step) {
+                break;
+            }
+            n += 1;
+        }
+        if n > best_n {
+            best_n = n;
+            best = Some(dir);
+        }
+    }
+    best.filter(|_| best_n >= 8)
+}
+
 fn wet_berth(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> bool {
     !grid.is_dry(x, z)
         && matches!(
@@ -494,6 +505,31 @@ fn wet_berth(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> bool {
 fn berth_on_large_water(occ: &Occupancy, grid: &HeightGrid, search: Rect, x: i32, z: i32) -> bool {
     harbour_out(occ, grid, x, z)
         .is_some_and(|dir| water_body_ok(grid, search, x + dir.dx(), z + dir.dz()))
+}
+
+fn claim_large_water_docks(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    harbors: &[(i32, i32)],
+    docks: &mut Vec<(i32, i32)>,
+) {
+    for &(x, z) in harbors {
+        if !Dir::ALL
+            .iter()
+            .any(|dir| grid.is_dry(x + dir.dx(), z + dir.dz()))
+        {
+            continue;
+        }
+        if !berth_on_large_water(occ, grid, search, x, z) {
+            continue;
+        }
+        occ.set(x, z, CellKind::Dock, true);
+        docks.push((x, z));
+        if docks.len() >= 8 {
+            break;
+        }
+    }
 }
 
 /// Coast (wet flood hits the hinterland edge) or a lake at least 40×40 with
@@ -819,35 +855,40 @@ fn paint_quay_and_cranes(
 }
 
 fn paint_breakwater(occ: &mut Occupancy, grid: &HeightGrid, search: Rect, docks: &[(i32, i32)]) {
-    let Some(&(x, z)) = docks.first() else {
-        return;
-    };
-    let Some(out) = harbour_out(occ, grid, x, z) else {
-        return;
-    };
-    let along = match out {
-        Dir::North | Dir::South => Dir::East,
-        Dir::East | Dir::West => Dir::South,
-    };
-    let ox = x + out.dx() * 10;
-    let oz = z + out.dz() * 10;
-    for t in -10..=10 {
-        for thick in 0..=1 {
-            let bx = ox + along.dx() * t + out.dx() * thick;
-            let bz = oz + along.dz() * t + out.dz() * thick;
-            if !search.contains(bx, bz) || grid.is_dry(bx, bz) {
-                continue;
+    for &(x, z) in docks {
+        let Some(out) = harbour_open_dir(occ, grid, x, z).or_else(|| harbour_out(occ, grid, x, z))
+        else {
+            continue;
+        };
+        let along = match out {
+            Dir::North | Dir::South => Dir::East,
+            Dir::East | Dir::West => Dir::South,
+        };
+        let ox = x + out.dx() * 10;
+        let oz = z + out.dz() * 10;
+        let mut painted = 0;
+        for t in -10..=10 {
+            for thick in 0..=1 {
+                let bx = ox + along.dx() * t + out.dx() * thick;
+                let bz = oz + along.dz() * t + out.dz() * thick;
+                if !search.contains(bx, bz) || grid.is_dry(bx, bz) {
+                    continue;
+                }
+                if matches!(
+                    occ.kind(bx, bz),
+                    CellKind::Empty
+                        | CellKind::Harbor
+                        | CellKind::Green
+                        | CellKind::Dock
+                        | CellKind::Boat
+                ) {
+                    occ.set(bx, bz, CellKind::Breakwater, true);
+                    painted += 1;
+                }
             }
-            if matches!(
-                occ.kind(bx, bz),
-                CellKind::Empty
-                    | CellKind::Harbor
-                    | CellKind::Green
-                    | CellKind::Dock
-                    | CellKind::Boat
-            ) {
-                occ.set(bx, bz, CellKind::Breakwater, true);
-            }
+        }
+        if painted >= 8 {
+            return;
         }
     }
 }
@@ -950,47 +991,68 @@ fn paint_harbour_buildings(
     }
 }
 
-fn paint_lighthouse(occ: &mut Occupancy, grid: &HeightGrid, search: Rect, docks: &[(i32, i32)]) {
-    let Some(&(dx, dz)) = docks.first() else {
-        return;
-    };
-    let mut best: Option<(i32, i32)> = None;
-    let mut best_d = -1;
+fn paint_lighthouse(occ: &mut Occupancy, search: Rect) {
+    let ship = blob_in(occ, search, CellKind::Ship);
+    let quay = blob_in(occ, search, CellKind::Quay);
+    let (sx, sz) = ship.or(quay).map_or_else(|| search.center(), Rect::center);
+    let (qx, qz) = quay.map_or((sx, sz), Rect::center);
+    let keep_off_ship = ship.map(|rect| rect.inflate(12));
+    let keep_off_quay = quay.map(|rect| rect.inflate(8));
+    let mut best_break: Option<(i32, i32, i32)> = None;
+    let mut best_water: Option<(i32, i32, i32)> = None;
     for z in search.min_z..=search.max_z {
         for x in search.min_x..=search.max_x {
-            if occ.kind(x, z) != CellKind::Breakwater {
+            let kind = occ.kind(x, z);
+            if !matches!(kind, CellKind::Breakwater | CellKind::Harbor) {
                 continue;
             }
-            let d = (x - dx).abs() + (z - dz).abs();
-            if d > best_d {
-                best_d = d;
-                best = Some((x, z));
+            if keep_off_ship.is_some_and(|rect| rect.contains(x, z)) {
+                continue;
+            }
+            if keep_off_quay.is_some_and(|rect| rect.contains(x, z)) {
+                continue;
+            }
+            let score = (x - sx).abs() + (z - sz).abs() + (x - qx).abs() + (z - qz).abs();
+            if kind == CellKind::Breakwater && best_break.is_none_or(|(_, _, best)| score > best) {
+                best_break = Some((x, z, score));
+            }
+            if kind == CellKind::Harbor && best_water.is_none_or(|(_, _, best)| score > best) {
+                best_water = Some((x, z, score));
             }
         }
     }
-    let Some((lx, lz)) = best else {
+    let Some((lx, lz, _)) = best_break.or(best_water) else {
         return;
     };
-    for oz in -1..=1 {
-        for ox in -1..=1 {
+    for oz in -2i32..=2 {
+        for ox in -2i32..=2 {
+            if ox.abs() + oz.abs() > 3 {
+                continue;
+            }
             let x = lx + ox;
             let z = lz + oz;
             if !search.contains(x, z) {
                 continue;
             }
-            if grid.is_dry(x, z) {
+            let kind = occ.kind(x, z);
+            if matches!(
+                kind,
+                CellKind::Ship
+                    | CellKind::Boat
+                    | CellKind::Quay
+                    | CellKind::Building
+                    | CellKind::Crane
+                    | CellKind::TownWall
+                    | CellKind::TownTower
+                    | CellKind::TownGate
+            ) {
                 continue;
             }
-            if matches!(
-                occ.kind(x, z),
-                CellKind::Breakwater
-                    | CellKind::Harbor
-                    | CellKind::Empty
-                    | CellKind::Dock
-                    | CellKind::Green
-            ) {
-                occ.set(x, z, CellKind::Lighthouse, true);
+            // Keep the mole; only the tip cell of breakwater becomes the shaft.
+            if kind == CellKind::Breakwater && (ox != 0 || oz != 0) {
+                continue;
             }
+            occ.set(x, z, CellKind::Lighthouse, true);
         }
     }
 }
@@ -1675,24 +1737,78 @@ fn place_vineyard(
         cellar,
         gate_dir,
     );
-    for z in inner.min_z..=inner.max_z {
-        for x in inner.min_x..=inner.max_x {
+    let apron = vineyard_apron(yard, gate_dir);
+    for z in apron.min_z..=apron.max_z {
+        for x in apron.min_x..=apron.max_x {
+            if yard.contains(x, z) || !occ.bounds.contains(x, z) {
+                continue;
+            }
+            if !grid.is_dry(x, z)
+                || Dir::ALL
+                    .iter()
+                    .any(|dir| !grid.is_dry(x + dir.dx(), z + dir.dz()))
+            {
+                continue;
+            }
             if !riverside_reclaim(occ.kind(x, z)) && occ.kind(x, z) != CellKind::Green {
                 continue;
             }
-            if cloister.contains(x, z) {
-                continue;
+            let nx = x + gate_dir.dx();
+            let nz = z + gate_dir.dz();
+            let drop = grid.height(x, z) >= grid.height(nx, nz) + 2;
+            let step = match gate_dir {
+                Dir::North | Dir::South => (z - yard.min_z).rem_euclid(2) == 0,
+                Dir::East | Dir::West => (x - yard.min_x).rem_euclid(2) == 0,
+            };
+            if step || drop {
+                occ.set(x, z, CellKind::Retaining, true);
+            } else {
+                occ.set(x, z, CellKind::Vine, true);
             }
-            if press.inflate(1).contains(x, z) || cellar.inflate(1).contains(x, z) {
-                continue;
-            }
-            occ.set(x, z, CellKind::Vine, true);
         }
     }
     scenes.push(Scene {
         kind: SceneKind::Vineyard,
-        rect: yard.inflate(SCENE_YARD_MARGIN),
+        rect: union_scene_rect(yard, apron).inflate(SCENE_YARD_MARGIN),
     });
+}
+
+fn vineyard_apron(yard: Rect, dir: Dir) -> Rect {
+    match dir {
+        Dir::South => Rect::new(
+            yard.min_x - 2,
+            yard.max_z + 1,
+            yard.max_x + 2,
+            yard.max_z + 8,
+        ),
+        Dir::North => Rect::new(
+            yard.min_x - 2,
+            yard.min_z - 8,
+            yard.max_x + 2,
+            yard.min_z - 1,
+        ),
+        Dir::East => Rect::new(
+            yard.max_x + 1,
+            yard.min_z - 2,
+            yard.max_x + 8,
+            yard.max_z + 2,
+        ),
+        Dir::West => Rect::new(
+            yard.min_x - 8,
+            yard.min_z - 2,
+            yard.min_x - 1,
+            yard.max_z + 2,
+        ),
+    }
+}
+
+fn union_scene_rect(a: Rect, b: Rect) -> Rect {
+    Rect::new(
+        a.min_x.min(b.min_x),
+        a.min_z.min(b.min_z),
+        a.max_x.max(b.max_x),
+        a.max_z.max(b.max_z),
+    )
 }
 
 fn find_vineyard_site(
@@ -4706,6 +4822,133 @@ mod tests {
             .filter(|lot| lot.kind == BuildingKind::Watermill)
             .count();
         assert!(mills >= 1, "riverside watermills {mills}");
+    }
+
+    #[test]
+    fn round16_outer_vines_lighthouse_tip_and_ship_contrast() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let oak = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let yard = oak
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::Vineyard)
+            .expect("abbey vineyard");
+        let mut wall_min_x = i32::MAX;
+        let mut wall_max_x = i32::MIN;
+        let mut wall_min_z = i32::MAX;
+        let mut wall_max_z = i32::MIN;
+        let mut retaining = 0;
+        for z in yard.rect.min_z..=yard.rect.max_z {
+            for x in yard.rect.min_x..=yard.rect.max_x {
+                match oak.occ.kind(x, z) {
+                    CellKind::TownWall | CellKind::TownTower => {
+                        wall_min_x = wall_min_x.min(x);
+                        wall_max_x = wall_max_x.max(x);
+                        wall_min_z = wall_min_z.min(z);
+                        wall_max_z = wall_max_z.max(z);
+                    }
+                    CellKind::Retaining => retaining += 1,
+                    _ => {}
+                }
+            }
+        }
+        let mut outer_vines = 0;
+        for z in yard.rect.min_z..=yard.rect.max_z {
+            for x in yard.rect.min_x..=yard.rect.max_x {
+                if oak.occ.kind(x, z) != CellKind::Vine {
+                    continue;
+                }
+                if x < wall_min_x || x > wall_max_x || z < wall_min_z || z > wall_max_z {
+                    outer_vines += 1;
+                }
+            }
+        }
+        assert!(retaining >= 8, "vineyard retaining terraces {retaining}");
+        assert!(
+            outer_vines >= 16,
+            "vine rows should sit outside the cloister wall, outer={outer_vines} wall=({wall_min_x}..{wall_max_x},{wall_min_z}..{wall_max_z})"
+        );
+
+        let coast = HeightGrid::synthetic_coast(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            58,
+            origin.x - 40,
+        );
+        let harbour = build_plan(7, origin, coast, PaletteKind::Oak);
+        let mut ship_cells = Vec::new();
+        let mut light_cells = Vec::new();
+        for z in harbour.occ.bounds.min_z..=harbour.occ.bounds.max_z {
+            for x in harbour.occ.bounds.min_x..=harbour.occ.bounds.max_x {
+                match harbour.occ.kind(x, z) {
+                    CellKind::Ship => ship_cells.push((x, z)),
+                    CellKind::Lighthouse => light_cells.push((x, z)),
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            light_cells.len() >= 8,
+            "octagonal lighthouse {}",
+            light_cells.len()
+        );
+        let adjacent = light_cells.iter().any(|&(lx, lz)| {
+            ship_cells
+                .iter()
+                .any(|&(sx, sz)| (lx - sx).abs() <= 1 && (lz - sz).abs() <= 1)
+        });
+        assert!(!adjacent, "lighthouse should not sit against the cog");
+
+        let volume = crate::stamp::fill_volume(&harbour);
+        let mut dark_oak = 0;
+        let mut spruce = 0;
+        let mut white_wool = 0;
+        let mut banner = 0;
+        for &(x, z) in &ship_cells {
+            let ground = harbour.heights.height(x, z);
+            let sea = harbour.heights.sea_level;
+            for y in sea - 3..=sea.max(ground) + 14 {
+                let Some(state) = volume.get(x, y, z) else {
+                    continue;
+                };
+                let id = pumpkin_data::Block::from_state_id(state.id).id;
+                if id == pumpkin_data::Block::DARK_OAK_PLANKS.id
+                    || id == pumpkin_data::Block::DARK_OAK_LOG.id
+                {
+                    dark_oak += 1;
+                }
+                if id == pumpkin_data::Block::SPRUCE_SLAB.id
+                    || id == pumpkin_data::Block::SPRUCE_PLANKS.id
+                    || id == pumpkin_data::Block::SPRUCE_LOG.id
+                {
+                    spruce += 1;
+                }
+                if id == pumpkin_data::Block::WHITE_WOOL.id {
+                    white_wool += 1;
+                }
+                if id == pumpkin_data::Block::WHITE_BANNER.id {
+                    banner += 1;
+                }
+            }
+        }
+        assert!(dark_oak >= 12, "dark-oak cog hull {dark_oak}");
+        assert!(spruce >= 6, "spruce cog deck {spruce}");
+        assert!(white_wool >= 4, "white wool sail {white_wool}");
+        assert!(banner >= 1, "sail banner {banner}");
     }
 
     #[test]

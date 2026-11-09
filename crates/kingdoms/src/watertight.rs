@@ -1727,6 +1727,7 @@ mod tests {
             "watermill envelope should close except the barred wheel opening: {mill_fails:?}"
         );
         let mut rim = 0;
+        let mut below = 0;
         let mut spokes = 0;
         let sea = plan.heights.sea_level;
         for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
@@ -1734,13 +1735,16 @@ mod tests {
                 if plan.occ.kind(x, z) != CellKind::WaterWheel {
                     continue;
                 }
-                for y in sea - 5..=sea + 5 {
+                for y in sea - 7..=sea + 7 {
                     let Some(state) = volume.get(x, y, z) else {
                         continue;
                     };
                     let id = Block::from_state_id(state.id).id;
                     if id == Block::STRIPPED_OAK_LOG.id || id == Block::OAK_PLANKS.id {
                         rim += 1;
+                        if y < sea {
+                            below += 1;
+                        }
                     }
                     if id == Block::OAK_FENCE.id {
                         spokes += 1;
@@ -1748,7 +1752,11 @@ mod tests {
                 }
             }
         }
-        assert!(rim >= 8, "wheel rim/paddles {rim}");
+        assert!(rim > 30, "wheel rim/paddles {rim}");
+        assert!(
+            below >= rim / 3 && below * 2 <= rim + rim / 4,
+            "about half the wheel should sit below the waterline, rim={rim} below={below}"
+        );
         assert!(spokes >= 4, "wheel spokes {spokes}");
     }
 

@@ -3691,55 +3691,55 @@ fn place_ship(
             y - d,
             z,
             if from_keel == 0 {
-                Block::OAK_LOG.default_state
+                Block::DARK_OAK_LOG.default_state
             } else {
-                Block::OAK_PLANKS.default_state
+                Block::DARK_OAK_PLANKS.default_state
             },
         );
     }
-    sink.put(x, y, z, Block::OAK_PLANKS.default_state);
+    sink.put(x, y, z, Block::DARK_OAK_PLANKS.default_state);
     let bow = along <= 3;
     let stern = along >= length - 4;
     let mast = along == length / 2 && from_keel == 0;
     let yard = along == length / 2;
     let sail = along == length / 2 + 1;
     if rect.on_edge(x, z) {
-        sink.put(x, y + 1, z, Block::OAK_LOG.default_state);
+        sink.put(x, y + 1, z, Block::DARK_OAK_LOG.default_state);
         if stern {
-            sink.put(x, y + 2, z, Block::OAK_PLANKS.default_state);
-            sink.put(x, y + 3, z, Block::OAK_PLANKS.default_state);
-            sink.put(x, y + 4, z, Block::OAK_FENCE.default_state);
+            sink.put(x, y + 2, z, Block::DARK_OAK_PLANKS.default_state);
+            sink.put(x, y + 3, z, Block::DARK_OAK_PLANKS.default_state);
+            sink.put(x, y + 4, z, Block::DARK_OAK_FENCE.default_state);
         } else if bow && along >= 1 {
-            sink.put(x, y + 2, z, Block::OAK_PLANKS.default_state);
-            sink.put(x, y + 3, z, Block::OAK_FENCE.default_state);
+            sink.put(x, y + 2, z, Block::DARK_OAK_PLANKS.default_state);
+            sink.put(x, y + 3, z, Block::DARK_OAK_FENCE.default_state);
         } else if rect.is_corner(x, z) {
-            sink.put(x, y + 2, z, Block::OAK_FENCE.default_state);
+            sink.put(x, y + 2, z, Block::DARK_OAK_FENCE.default_state);
         }
         if from_keel == mid {
-            sink.put(x, y + 2, z, Block::OAK_FENCE.default_state);
+            sink.put(x, y + 2, z, Block::DARK_OAK_FENCE.default_state);
             if along % 3 == 0 {
                 sink.put(x, y + 3, z, Block::IRON_CHAIN.default_state);
             }
         }
     } else {
-        sink.put(x, y + 1, z, Block::OAK_SLAB.default_state);
+        sink.put(x, y + 1, z, Block::SPRUCE_SLAB.default_state);
         if stern {
-            sink.put(x, y + 2, z, Block::OAK_PLANKS.default_state);
-            sink.put(x, y + 3, z, Block::OAK_PLANKS.default_state);
+            sink.put(x, y + 2, z, Block::DARK_OAK_PLANKS.default_state);
+            sink.put(x, y + 3, z, Block::DARK_OAK_PLANKS.default_state);
             if (x + z) % 3 == 0 {
                 sink.put(x, y + 4, z, Block::CHEST.default_state);
             }
         } else if bow && along >= 1 {
-            sink.put(x, y + 2, z, Block::OAK_PLANKS.default_state);
+            sink.put(x, y + 2, z, Block::DARK_OAK_PLANKS.default_state);
         }
         if mast {
             for h in 2..=12 {
-                sink.put(x, y + h, z, Block::OAK_LOG.default_state);
+                sink.put(x, y + h, z, Block::SPRUCE_LOG.default_state);
             }
             sink.put(x, y + 13, z, Block::WHITE_BANNER.default_state);
         }
         if yard {
-            sink.put(x, y + 8, z, palette.stripped);
+            sink.put(x, y + 8, z, Block::SPRUCE_LOG.default_state);
             sink.put(x, y + 9, z, Block::OAK_FENCE.default_state);
         }
         if sail && from_keel <= mid {
@@ -3754,7 +3754,7 @@ fn place_ship(
             sink.put(x, y + 2, z, Block::BARREL.default_state);
         }
     }
-    let _ = (cx, cz);
+    let _ = (cx, cz, palette);
 }
 
 fn place_fishing_boat(
@@ -3770,7 +3770,7 @@ fn place_fishing_boat(
     let sea = plan.heights.sea_level;
     dredge_hull(sink, x, ground, z, sea);
     let y = sea.max(ground);
-    sink.put(x, y, z, Block::OAK_PLANKS.default_state);
+    sink.put(x, y, z, Block::SPRUCE_PLANKS.default_state);
     if rect.on_edge(x, z) {
         sink.put(x, y + 1, z, Block::OAK_LOG.default_state);
     } else if x == cx && z == cz {
@@ -3778,7 +3778,7 @@ fn place_fishing_boat(
         sink.put(x, y + 2, z, Block::WHITE_WOOL.default_state);
         sink.put(x, y + 3, z, Block::LANTERN.default_state);
     } else {
-        sink.put(x, y + 1, z, Block::OAK_SLAB.default_state);
+        sink.put(x, y + 1, z, Block::SPRUCE_SLAB.default_state);
         if (x + z) % 3 == 0 {
             sink.put(x, y + 1, z, Block::CHEST.default_state);
         }
@@ -4119,17 +4119,17 @@ fn place_water_wheel(
     );
     // Standing disk in a vertical plane, hub at the waterline so half is submerged.
     let hub = sea;
-    for dy in -5..=5 {
+    for dy in -6..=6 {
         let d2 = da * da + dy * dy;
-        if d2 > 25 {
+        if d2 > 36 {
             continue;
         }
         let y = hub + dy;
         let on_axis = da == 0 || dy == 0;
         let on_diag = da.abs() == dy.abs();
         let spoke = on_axis || on_diag;
-        let rim = d2 >= 16;
-        let paddle = rim && spoke && d2 >= 20;
+        let rim = d2 >= 20;
+        let paddle = rim && spoke && d2 >= 25;
         let hub_cell = da == 0 && dy == 0;
         let block = if hub_cell {
             palette.stripped
@@ -4202,11 +4202,28 @@ fn place_vine(
 ) {
     sink.put(x, ground, z, palette.grass);
     terrace_edge(sink, plan, x, ground, z, palette);
-    sink.put(x, ground + 1, z, palette.fence);
-    sink.put(x, ground + 2, z, palette.leaves);
-    sink.put(x, ground + 3, z, palette.leaves);
-    if (x + z) % 2 == 0 {
-        sink.put(x, ground + 4, z, Block::PURPLE_WOOL.default_state);
+    let mix = (x + z).rem_euclid(4);
+    match mix {
+        0 => {
+            sink.put(x, ground + 1, z, palette.fence);
+            sink.put(x, ground + 2, z, palette.fence);
+            sink.put(x, ground + 3, z, palette.leaves);
+            sink.put(x, ground + 4, z, Block::PURPLE_WOOL.default_state);
+        }
+        1 => {
+            sink.put(x, ground + 1, z, palette.fence);
+            sink.put(x, ground + 2, z, palette.leaves);
+            sink.put(x, ground + 3, z, palette.leaves);
+        }
+        2 => {
+            sink.put(x, ground + 1, z, Block::SWEET_BERRY_BUSH.default_state);
+            sink.put(x, ground + 2, z, palette.leaves);
+        }
+        _ => {
+            sink.put(x, ground + 1, z, palette.fence);
+            sink.put(x, ground + 2, z, palette.leaves);
+            sink.put(x, ground + 3, z, Block::PURPLE_WOOL.default_state);
+        }
     }
     clear_above(sink, x, ground + 5, ground + 8, z);
 }
@@ -4222,42 +4239,72 @@ fn place_lighthouse(
 ) {
     let rect = blob_of(plan, x, z, CellKind::Lighthouse);
     let (cx, cz) = rect.center();
+    let dx = x - cx;
+    let dz = z - cz;
+    let cheb = dx.abs().max(dz.abs());
+    let manh = dx.abs() + dz.abs();
     let base = (sea - 2).max(sink.floor_min() + 2);
-    let top = sea.max(ground) + 16;
-    let edge = rect.on_edge(x, z);
-    for y in base..=top {
-        if edge {
-            let mix = (x.wrapping_mul(5) + z + y) as u8 % 3;
-            sink.put(
-                x,
-                y,
-                z,
-                if mix == 0 {
-                    Block::STONE_BRICKS.default_state
-                } else if mix == 1 {
-                    palette.cobble
-                } else {
-                    palette.andesite
-                },
-            );
-        } else {
-            sink.put(x, y, z, Block::AIR.default_state);
+    let gallery = sea.max(ground) + 13;
+    let lantern = gallery + 1;
+    let cap = lantern + 3;
+    for y in base..=cap {
+        let taper = if y < gallery - 1 { 2 } else { 1 };
+        let in_ring = cheb <= taper && manh <= taper + 1;
+        let interior = cheb == 0;
+        if y >= lantern {
+            if interior {
+                sink.put(
+                    x,
+                    y,
+                    z,
+                    if y == lantern + 1 {
+                        Block::GLOWSTONE.default_state
+                    } else {
+                        Block::SEA_LANTERN.default_state
+                    },
+                );
+            } else if cheb == 1 {
+                sink.put(x, y, z, Block::GLASS.default_state);
+            } else if y == lantern && cheb == 2 {
+                sink.put(x, y, z, palette.fence);
+            }
+            continue;
         }
-    }
-    if !edge && x == cx && z == cz {
-        for y in (sea + 1)..top {
-            sink.put(x, y, z, Block::LADDER.default_state);
+        if y == gallery && cheb == 2 {
+            sink.put(x, y, z, palette.fence);
+            continue;
         }
+        if !in_ring {
+            continue;
+        }
+        if interior {
+            if y > sea {
+                sink.put(x, y, z, Block::LADDER.default_state);
+            }
+            continue;
+        }
+        let band = y.rem_euclid(5);
+        sink.put(
+            x,
+            y,
+            z,
+            if band == 0 {
+                Block::STONE_BRICKS.default_state
+            } else if band == 1 {
+                Block::SANDSTONE.default_state
+            } else if cheb == taper {
+                palette.cobble
+            } else {
+                palette.andesite
+            },
+        );
     }
-    if edge && !rect.is_corner(x, z) && (x + z) % 2 == 0 {
-        sink.put(x, sea + 6, z, Block::IRON_BARS.default_state);
-        sink.put(x, sea + 7, z, Block::IRON_BARS.default_state);
-        sink.put(x, sea + 12, z, Block::IRON_BARS.default_state);
+    if cheb <= 1 {
+        sink.put(x, cap + 1, z, palette.brick_wall);
+        sink.put(x, cap + 2, z, Block::LANTERN.default_state);
     }
-    sink.put(x, top + 1, z, palette.brick_wall);
-    sink.put(x, top + 2, z, Block::LANTERN.default_state);
-    if x == cx && z == cz {
-        sink.put(x, top + 3, z, Block::LANTERN.default_state);
+    if dx == 0 && dz == 0 {
+        sink.put(x, cap + 3, z, Block::LANTERN.default_state);
     }
 }
 
