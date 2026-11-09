@@ -19,7 +19,11 @@ use crate::height::{HeightGrid, SAMPLE_STEP, world_gen_for};
 use crate::info::{GateInfo, GateKind, RoadInfo};
 use crate::palette::PaletteKind;
 use crate::rng::TownRng;
+use crate::scenes::{Scene, SceneKind, place_scenes, record_harbour};
 use crate::town::{TOWN_INFLUENCE, TownPos, town_in_cell};
+
+/// Pad around castle+town so hinterland farms, hamlets and camps fit.
+const HINTERLAND_PAD: i32 = 120;
 
 /// Cached plans, keyed by seed + cell.
 fn cache() -> &'static RwLock<HashMap<(u64, i32, i32), Arc<TownPlan>>> {
@@ -43,6 +47,7 @@ pub struct TownPlan {
     pub town_towers: Vec<Rect>,
     pub roads: Vec<RoadInfo>,
     pub lots: Vec<Lot>,
+    pub scenes: Vec<Scene>,
     pub occ: Occupancy,
     pub heights: HeightGrid,
 }
@@ -52,6 +57,15 @@ impl TownPlan {
     #[must_use]
     pub fn castle_footprint(&self) -> (i32, i32) {
         self.castle.footprint()
+    }
+
+    /// Scene covering `(x, z)`, if any.
+    #[must_use]
+    pub fn scene_at(&self, x: i32, z: i32) -> Option<Scene> {
+        self.scenes
+            .iter()
+            .copied()
+            .find(|scene| scene.rect.contains(x, z))
     }
 }
 
@@ -116,7 +130,9 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     let castle_rect = site_castle(&grid, origin.x, origin.z, &mut rng);
     let gate = downhill_town_dir(&grid, castle_rect);
     let town_rect = driest_town(&grid, castle_rect, gate, 132, 120);
-    let bounds = union(castle_rect.inflate(6), town_rect.inflate(18));
+    let core = union(castle_rect.inflate(6), town_rect.inflate(18));
+    let hinter = union(castle_rect, town_rect).inflate(HINTERLAND_PAD);
+    let bounds = clip_to_grid(&grid, union(core, hinter));
     let mut occ = Occupancy::new(bounds);
     let castle = paint_castle(&mut occ, &grid, castle_rect, &mut rng);
 
@@ -153,14 +169,31 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
             }
         }
     }
+    paint_gate_plazas(&mut occ, &gates);
+    paint_fountain_ring(&mut occ, well, market);
 
     let mut waypoints = vec![well, castle.gatehouse.center()];
     waypoints.extend(gate_pts);
-    let roads = paint_roads(&mut occ, &grid, &waypoints);
+    let mut roads = paint_roads(&mut occ, &grid, &waypoints);
+    paint_outbound_roads(&mut occ, &grid, origin, seed, well, &gates, &mut roads);
 
-    let lots = place_lots(&mut occ, &grid, town_rect, market, &mut rng, seed);
+    let mut lots = place_lots(&mut occ, &grid, town_rect, market, &mut rng, seed);
     place_farms(&mut occ, &grid, town_rect, castle_rect, &mut rng);
+    let mut scenes = place_scenes(
+        &mut occ,
+        &grid,
+        castle_rect,
+        town_rect,
+        &mut lots,
+        seed,
+        &mut rng,
+    );
+    scenes.push(Scene {
+        kind: SceneKind::Plaza,
+        rect: market,
+    });
     paint_water_uses(&mut occ, &grid, bounds, castle_rect);
+    record_harbour(&occ, bounds, &mut scenes);
 
     debug_assert!(castle.bounds.width() >= CASTLE_MIN);
     debug_assert!(castle.bounds.depth() >= CASTLE_MIN);
@@ -179,6 +212,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         town_towers,
         roads,
         lots,
+        scenes,
         occ,
         heights: grid,
     }
@@ -382,6 +416,59 @@ fn union(a: Rect, b: Rect) -> Rect {
     )
 }
 
+fn clip_to_grid(grid: &HeightGrid, rect: Rect) -> Rect {
+    let max_x = grid.min_x + (grid.nx - 1) * grid.step;
+    let max_z = grid.min_z + (grid.nz - 1) * grid.step;
+    Rect::new(
+        rect.min_x.max(grid.min_x),
+        rect.min_z.max(grid.min_z),
+        rect.max_x.min(max_x),
+        rect.max_z.min(max_z),
+    )
+}
+
+fn paint_gate_plazas(occ: &mut Occupancy, gates: &[GateInfo]) {
+    for gate in gates {
+        if gate.kind != GateKind::Town {
+            continue;
+        }
+        for dz in -6i32..=6 {
+            for dx in -6i32..=6 {
+                if dx.abs() <= 2 && dz.abs() <= 2 {
+                    continue;
+                }
+                let x = gate.x + dx;
+                let z = gate.z + dz;
+                if matches!(
+                    occ.kind(x, z),
+                    CellKind::Empty | CellKind::Farm | CellKind::FarmEdge | CellKind::Green
+                ) {
+                    occ.set(x, z, CellKind::Plaza, true);
+                }
+            }
+        }
+    }
+}
+
+fn paint_fountain_ring(occ: &mut Occupancy, well: (i32, i32), market: Rect) {
+    for dz in -4..=4 {
+        for dx in -4..=4 {
+            let x = well.0 + dx;
+            let z = well.1 + dz;
+            if !market.contains(x, z) {
+                continue;
+            }
+            if dx.abs() <= 1 && dz.abs() <= 1 {
+                continue;
+            }
+            let ring = dx.abs() + dz.abs() == 3 || (dx.abs() == 3 && dz.abs() == 3);
+            if ring && matches!(occ.kind(x, z), CellKind::Market | CellKind::Empty) {
+                occ.set(x, z, CellKind::Fountain, true);
+            }
+        }
+    }
+}
+
 fn flattest_dry(grid: &HeightGrid, within: Rect, w: i32, d: i32) -> Rect {
     let mut best = Rect::new(
         within.min_x,
@@ -502,6 +589,53 @@ fn paint_roads(occ: &mut Occupancy, grid: &HeightGrid, waypoints: &[(i32, i32)])
     roads
 }
 
+fn paint_outbound_roads(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    origin: TownPos,
+    seed: u64,
+    well: (i32, i32),
+    gates: &[GateInfo],
+    roads: &mut Vec<RoadInfo>,
+) {
+    let bounds = occ.bounds;
+    let start = gates
+        .iter()
+        .find(|gate| gate.kind == GateKind::Town)
+        .map_or(well, |gate| (gate.x, gate.z));
+    for dir in Dir::ALL {
+        let neighbor = town_in_cell(seed, origin.cell_x + dir.dx(), origin.cell_z + dir.dz());
+        let goal = clip_toward(bounds, start, (neighbor.x, neighbor.z));
+        if (goal.0 - start.0).abs() + (goal.1 - start.1).abs() < 28 {
+            continue;
+        }
+        let path = astar(grid, bounds, start, goal)
+            .unwrap_or_else(|| bresenham(start.0, start.1, goal.0, goal.1));
+        if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
+            paint_path(occ, grid, &path);
+            roads.push(RoadInfo {
+                from: [first.0, first.1],
+                to: [last.0, last.1],
+                points: path.iter().map(|&(x, z)| [x, z]).collect(),
+            });
+        }
+    }
+}
+
+fn clip_toward(bounds: Rect, start: (i32, i32), target: (i32, i32)) -> (i32, i32) {
+    let inner = bounds.deflate(6);
+    let line = bresenham(start.0, start.1, target.0, target.1);
+    let mut last = start;
+    for point in line {
+        if inner.contains(point.0, point.1) {
+            last = point;
+        } else {
+            break;
+        }
+    }
+    last
+}
+
 fn paint_path(occ: &mut Occupancy, grid: &HeightGrid, path: &[(i32, i32)]) {
     for window in path.windows(2) {
         let (x, z) = window[0];
@@ -533,7 +667,15 @@ fn paint_path(occ: &mut Occupancy, grid: &HeightGrid, path: &[(i32, i32)]) {
                         x + dx,
                         z + dz,
                         kind,
-                        matches!(cell, CellKind::Empty | CellKind::Farm | CellKind::Market),
+                        matches!(
+                            cell,
+                            CellKind::Empty
+                                | CellKind::Farm
+                                | CellKind::FarmEdge
+                                | CellKind::Market
+                                | CellKind::Plaza
+                                | CellKind::Green
+                        ),
                     );
                 }
             }
@@ -808,6 +950,11 @@ fn paint_water_uses(occ: &mut Occupancy, grid: &HeightGrid, bounds: Rect, castle
                 | CellKind::Green
                 | CellKind::Farm
                 | CellKind::FarmEdge
+                | CellKind::Orchard
+                | CellKind::Pasture
+                | CellKind::Grave
+                | CellKind::Plaza
+                | CellKind::Fountain
                 | CellKind::TownWall
                 | CellKind::TownTower => {
                     let dock = Dir::ALL.iter().any(|dir| {
@@ -937,7 +1084,14 @@ mod tests {
         }
         for z in plan.bounds.min_z..=plan.bounds.max_z {
             for x in plan.bounds.min_x..=plan.bounds.max_x {
-                if matches!(plan.occ.kind(x, z), CellKind::Building | CellKind::Farm) {
+                if matches!(
+                    plan.occ.kind(x, z),
+                    CellKind::Building
+                        | CellKind::Farm
+                        | CellKind::Orchard
+                        | CellKind::Pasture
+                        | CellKind::Grave
+                ) {
                     assert!(
                         plan.heights.is_dry(x, z)
                             || matches!(

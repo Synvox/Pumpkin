@@ -7,9 +7,10 @@ This crate is the Synvox-fork feature code for generated medieval towns. It is *
 One town per 2048×2048 cell, a pure function of `(seed, cell)`. Each chunk writes only its own columns.
 
 - **Castle** on high ground, at least 128×128 (8×8 chunks): contour-following polygonal curtain (not a rectangle), inner ward, mixed round / D / octagon / square towers with cone or crenellated tops, twin-round gatehouse, multi-mass keep, hall, chapel, stables, barracks, kitchen, courtyards, and a moat/ditch where the approach is low enough. Archetype (ridge, concentric, spur, coastal) is a function of seed and terrain. Walls step with the ridge. No flattening.
-- **Town** on the downhill side: market on the flattest patch, well, timber-frame and cottage lots (WFC facades), church, tavern, blacksmith, longhouse, barn, windmill, farms outside the walls.
-- **Roads** by A* over sampled height with a ~1:4 slope cost, stairs when steeper, switchbacks when the path needs them.
-- **Palettes** by vanilla biome: oak/plains, spruce/taiga, sandstone/desert.
+- **Town** on the downhill side: market on the flattest patch, well and fountain ring, gate plazas, timber-frame and cottage lots (WFC facades), church, tavern, blacksmith with a forge yard, longhouse, barn, windmill, farms outside the walls.
+- **Hinterland** (same seed+cell plan, chunk-local writes): outlying hamlets, large farmsteads with crop rows / hay barns / windmills, orchards, fenced pastures, watchtowers on high ground, ruined forts, a monastery, a graveyard, harbour/docks where the plot touches water, and a pillager palisade camp with tents and siege engines placed away from the town. Terrain is not flattened.
+- **Roads** by A* over sampled height with a ~1:4 slope cost, stairs when steeper, switchbacks when the path needs them. Outbound roads aim at neighbouring cells and become bridges over water.
+- **Palettes** by vanilla biome: oak/plains, spruce/taiga, sandstone/desert. Castle walls mix stone bricks, cobble, mossy, cracked, andesite and tuff, with a darker cobble/andesite plinth.
 
 Siting uses `VanillaGenerator::sample_surface_height` (the same noise column structures use). Placement uses the real chunk surface and only local foundations, terraces, stilts, or retaining walls. Lots, streets, and farms stay on dry land; leftover water becomes harbor, dock, bridge, or moat. The town rectangle shrinks off wet edges instead of walling in a lake. Courtyards are grass with paths and trees. Houses are timber-frame with cobble foundations, plaster, **closed gables** (triangular wall infill to the roof), chimneys, and furnished rooms (bed, table, chest, furnace, lantern). Castle keeps and halls sit on one ridge floor so they do not smear into dirt terraces. Castles mix stone variants, merlons, wall walks, a portcullis, and banners. Roof stairs sit on walls: perimeter columns rise to `roof_y - 1`, cone/hip/spire caps are filled, and doors are real door blocks rather than air.
 
@@ -43,8 +44,24 @@ let json = info.to_json()?;
 | `castle` (keep, gatehouse, barbican, inner bailey, halls, barracks…) | Garrison and breach targets |
 | `roads` (polylines + endpoints) | March graph |
 | `buildings` | Civilian / economic sites |
+| `scenes` | Hinterland and civic scenes (farmstead, hamlet, camp, monastery, …) |
+| `spawns` | Villager beds, workstations, wall/tower guard posts, market and keep rallies, gates, pillager camp spawn/rally |
+
+`spawns` is a pure function of seed+cell (planner height + occupancy). `y` is the sampled surface + 1, the standing height the stamper aims for, not a live chunk Y. The villager AI layer can query:
+
+```rust
+use pumpkin_kingdoms::{town_info, SpawnRole};
+
+let info = town_info(seed, cell_x, cell_z)?;
+let beds: Vec<_> = info.spawns.iter().filter(|s| s.role == SpawnRole::VillagerBed).collect();
+let camp: Vec<_> = info.spawns.iter().filter(|s| s.role == SpawnRole::PillagerSpawn).collect();
+```
+
+Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `Gate`, `PillagerSpawn`, `PillagerRally`.
 
 No capture, siege, or AI logic lives here yet. `TownPlan` still holds the occupancy grid used to stamp chunks; `TownInfo` is the small struct game systems should store.
+
+Inter-cell roads are truncated to this cell's occupancy. They point at the neighbouring town but do not stitch pixel-perfect at the 2048-block cell border.
 
 ### Planned blocks (for later repair)
 
@@ -93,8 +110,10 @@ crates/kingdoms/
   KINGDOMS.md
   src/lib.rs           install() + WorldInit attach
   src/plan.rs          city plan (cached, seed+cell)
+  src/scenes.rs        hinterland scenes + extra lots
   src/castle.rs        parametric castle
   src/buildings.rs     lots + WFC facades
+  src/info.rs          TownInfo + spawn points
   src/stamp.rs         per-column placement
   src/interior.rs      furniture (same-column, deterministic)
   src/watertight.rs    flood-fill envelope check

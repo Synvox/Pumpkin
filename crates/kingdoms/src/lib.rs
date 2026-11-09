@@ -50,13 +50,15 @@ pub mod plan;
 pub mod portal;
 pub mod render;
 pub mod rng;
+pub mod scenes;
 pub mod stamp;
 pub mod town;
 pub mod watertight;
 pub mod wfc;
 
-pub use info::{TownInfo, town_id, town_info, town_info_at};
+pub use info::{SpawnPoint, SpawnRole, TownInfo, town_id, town_info, town_info_at};
 pub use plan::{plan_at, plan_from_cache};
+pub use scenes::{Scene, SceneKind};
 pub use stamp::{
     PlannedBlock, planned_block, planned_block_at, planned_blocks_in, planned_blocks_in_at,
     planned_building_blocks, planned_building_blocks_for, planned_column, planned_column_at,

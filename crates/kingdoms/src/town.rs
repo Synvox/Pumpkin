@@ -10,10 +10,10 @@ pub const CELL_SIZE: i32 = 2048;
 pub const TOWN_MARGIN: i32 = 400;
 
 /// Blocks around a town where vanilla villages are vetoed.
-pub const VILLAGE_EXCLUSION_RADIUS: i32 = 360;
+pub const VILLAGE_EXCLUSION_RADIUS: i32 = 480;
 
 /// Conservative radius used to decide which chunks a town may touch.
-pub const TOWN_INFLUENCE: i32 = 360;
+pub const TOWN_INFLUENCE: i32 = 512;
 
 /// Mixer seed so town positions do not line up with vanilla structure salts.
 const TOWN_SALT: u64 = 0x4B49_4E47_444F_4D53; // "KINGDOMS"
