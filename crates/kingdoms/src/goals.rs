@@ -7,6 +7,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+use pumpkin_core::entity::Entity;
+use pumpkin_core::entity::EntityBase;
 use pumpkin_core::entity::ai::goal::avoid_entity::AvoidEntityGoal;
 use pumpkin_core::entity::ai::goal::bow_attack::BowAttackGoal;
 use pumpkin_core::entity::ai::goal::break_door::BreakDoorGoal;
@@ -19,6 +21,7 @@ use pumpkin_core::entity::ai::pathfinder::NavigatorGoal;
 use pumpkin_core::entity::mob::Mob;
 use pumpkin_core::entity::mob::patrol::LongDistancePatrolGoal;
 use pumpkin_core::entity::mob::raider::{HoldGroundAttackGoal, RaiderMoveThroughVillageGoal};
+use pumpkin_core::entity::projectile::arrow::{ArrowEntity, ArrowPickup};
 use pumpkin_core::world::World;
 use pumpkin_data::data_component_impl::EquipmentSlot;
 use pumpkin_data::entity::EntityType;
@@ -326,7 +329,7 @@ impl Goal for RingBellGoal {
     }
 }
 
-/// Placeholder so builders have a registered goal. Repair-by-diff comes later.
+/// Idle animation; the director walks builders to repair jobs after a siege.
 pub struct BuilderStubGoal {
     ticks: AtomicI32,
 }
@@ -783,6 +786,46 @@ pub fn bind_raider(
         3,
         MarchOnTownGoal::new(move |m| crate::director::raid_march_post(m, &town)),
     );
+}
+
+const ARROW_SPEED: f64 = 1.6;
+
+/// Spawn a real arrow at `target`. Used when a player is close enough to see it.
+pub fn shoot_arrow(mob: &dyn Mob, target: &Arc<dyn EntityBase>) {
+    let entity = mob.get_entity();
+    let world = entity.world.load();
+    let world_full = entity.world.load_full();
+    let arrow_entity = Entity::new(world.clone(), entity.pos.load(), &EntityType::ARROW);
+    let projectile = ItemStack::new(1, &Item::ARROW);
+    let bow = ItemStack::new(1, &Item::BOW);
+    let arrow = ArrowEntity::new_shot_with_weapon(
+        arrow_entity,
+        entity,
+        &projectile,
+        &bow,
+        ArrowPickup::Disallowed,
+    );
+    let difficulty = world.level_info.load().difficulty as i32;
+    arrow.set_base_damage_from_mob(ARROW_SPEED, difficulty);
+    let mob_pos = entity.pos.load();
+    let target_entity = target.get_entity();
+    let target_pos = target_entity.pos.load();
+    let dx = target_pos.x - mob_pos.x;
+    let dy = (target_pos.y + f64::from(target_entity.entity_dimension.load().height) / 3.0)
+        - arrow.entity.pos.load().y;
+    let dz = target_pos.z - mob_pos.z;
+    let horizontal_distance = dx.hypot(dz);
+    let divergence = f64::from(14 - difficulty * 4);
+    arrow.set_velocity(
+        dx,
+        horizontal_distance.mul_add(0.2, dy),
+        dz,
+        ARROW_SPEED,
+        divergence,
+    );
+    world.play_sound(Sound::EntityArrowShoot, SoundCategory::Hostile, &mob_pos);
+    let arrow: Arc<dyn EntityBase> = Arc::new(arrow);
+    world_full.spawn_entity(arrow);
 }
 
 /// True when we already attached kingdom goals (reload-safe).

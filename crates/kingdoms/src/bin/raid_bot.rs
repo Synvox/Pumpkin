@@ -35,7 +35,7 @@ use pumpkin_protocol::java::server::config::{
 use pumpkin_protocol::java::server::handshake::SHandShake;
 use pumpkin_protocol::java::server::login::{SLoginAcknowledged, SLoginStart};
 use pumpkin_protocol::java::server::play::{
-    SConfirmTeleport, SKeepAlive, SPlayerLoaded, SPlayerPosition,
+    SChatCommand, SConfirmTeleport, SKeepAlive, SPlayerLoaded, SPlayerPosition,
 };
 use pumpkin_protocol::packet::MultiVersionJavaPacket;
 use pumpkin_protocol::ser::NetworkWriteExt;
@@ -54,6 +54,7 @@ struct Args {
     y: f64,
     z: f64,
     seconds: u64,
+    command: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -63,6 +64,7 @@ fn parse_args() -> Result<Args, String> {
     let mut y = 80.0;
     let mut z = 0.0;
     let mut seconds = 180u64;
+    let mut command = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut next = |flag: &str| args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -77,9 +79,10 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--seconds: {e}"))?;
             }
+            "--command" => command = Some(next("--command")?),
             "-h" | "--help" => {
                 println!(
-                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180"
+                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command \"kingdom join alder\"]"
                 );
                 std::process::exit(0);
             }
@@ -94,6 +97,7 @@ fn parse_args() -> Result<Args, String> {
         y,
         z,
         seconds,
+        command,
     })
 }
 
@@ -306,6 +310,14 @@ async fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     println!("standing; holding for {}s", args.seconds);
+    if let Some(cmd) = args.command.as_deref() {
+        let packet = SChatCommand { command: cmd };
+        if let Err(err) = bot.send_packet(&packet).await {
+            eprintln!("command failed: {err}");
+            return ExitCode::from(1);
+        }
+        println!("sent /{cmd}");
+    }
 
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     loop {

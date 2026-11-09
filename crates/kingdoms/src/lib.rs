@@ -47,6 +47,7 @@ pub mod flow;
 pub mod geom;
 pub mod goals;
 pub mod height;
+pub mod http;
 pub mod info;
 pub mod interior;
 pub mod lod;
@@ -57,6 +58,7 @@ pub mod populate;
 pub mod portal;
 pub mod raid;
 pub mod render;
+pub mod repair;
 pub mod rng;
 pub mod roles;
 pub mod scene;
@@ -77,7 +79,7 @@ pub use info::{
     SpawnPoint, SpawnRole, TownInfo, town_id, town_info, town_info_at, town_info_from_id,
 };
 pub use plan::{plan_at, plan_from_cache};
-pub use raid::RaidSpec;
+pub use raid::{RaidSide, RaidSpec};
 pub use roles::VillagerRole;
 pub use scene::{TownInfoScene, TownScene};
 pub use scenes::{Scene, SceneKind};
@@ -105,6 +107,7 @@ pub fn install(server: &Server) {
 
     register_world_init_handler(server);
     events::register(server);
+    crate::http::spawn_if_enabled();
     info!("Kingdoms plugin installed (towns, villagers, raids)");
 }
 

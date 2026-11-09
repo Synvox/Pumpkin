@@ -147,26 +147,60 @@ Vanilla scoreboard teams `k_alder`, `k_raven`, `k_pillager` are created with fri
 | Guard | iron sword, chainmail | melee pillagers; rally to the threatened gate |
 | Archer | bow, leather | hold a tower/wall; `BowAttackGoal` |
 | Civilian | none | flee to the keep, ring a bell (`block.bell.use`), return after |
-| Builder | none | stub: idle near the keep. Repair-by-diff (`plan.planned_block`) is later |
+| Builder | none | after a siege, walk to missing/wrong blocks vs `plan.planned_column` and place them (gates, then walls, then houses), one block / 10 ticks with a swing |
 
 Iron golems keep vanilla melee / monster targeting and also rally.
 
 ### Raids
 
-`/raid start <town> [size]` — town is `here` (cell containing the sender), quoted `"0,0"` / `"20261025:0:0"`, or an unquoted word like `here`. Commas and colons need quotes. Default size 24. Waves of pillagers (crossbow) and vindicators (melee + door break) spawn on `PillagerSpawn` tent columns in the hinterland camp, captains wear the ominous banner, and they march on the threatened gate. `/raid stop` ends every raid in the process.
+`/raid start <town> [size]` — town is `here` (cell containing the sender), quoted `"0,0"` / `"20261025:0:0"`, or an unquoted word like `here`. Commas and colons need quotes. Default size 24. Waves of pillagers (crossbow) and vindicators (melee + door break) spawn on `PillagerSpawn` tent columns in the hinterland camp, captains wear the ominous banner, and they march on the threatened gate. `/raid retake <town> [size]` sends kingdom soldiers to retake a pillager-owned town. `/raid stop` ends every raid in the process.
 
-Director API (HTTP later, not in this crate):
+`/kingdom join <alder|raven>` is allowed for any player. It dyes leather armour in the team colour, puts the player on the scoreboard team (friendly fire off, name tags on), and sets respawn at that kingdom's keep. Membership is saved in `kingdoms-ownership.json` and reapplied on join.
+
+Archers within ~32 blocks of a logged-in player shoot real arrow entities. Distant shots stay director damage so 400 vs 400 does not spawn hundreds of arrows.
+
+Director API in-process:
 
 ```rust
 pumpkin_kingdoms::start_raid(&world, &town_id, RaidSpec::new(40))?;
+pumpkin_kingdoms::start_raid(&world, &town_id, RaidSpec::new(40).with_side(RaidSide::Kingdom))?;
 pumpkin_kingdoms::set_target_town(raid_id, &other_town)?;
 pumpkin_kingdoms::stop_raid(Some(&town_id));
 let state = pumpkin_kingdoms::battle_state(&town_id);
 ```
 
+### HTTP director (off by default)
+
+For an external AI director (e.g. on Sails). Enable with env; bind is localhost so a Cloudflare Tunnel can expose it.
+
+| Env | |
+| --- | --- |
+| `KINGDOMS_HTTP=1` | turn the server on (`KINGDOMS_DIRECTOR_HTTP` also works) |
+| `KINGDOMS_HTTP_TOKEN` | bearer token (required; no token means no bind). Alias `KINGDOMS_DIRECTOR_TOKEN` |
+| `KINGDOMS_HTTP_BIND` | default `127.0.0.1:8742` |
+| `KINGDOMS_HTTP_WEBHOOK` | optional URL; POSTs JSON events |
+| `KINGDOMS_HTTP_WEBHOOK_SECRET` | HMAC-SHA256 key (defaults to the bearer token) |
+
+Webhook body is JSON. Header `X-Kingdoms-Signature: sha256=<hex>` is HMAC-SHA256 of the raw body. Events: `raid_started`, `gate_breached`, `town_captured`, `player_joined_a_kingdom`.
+
+```bash
+export TOKEN=dev-token
+# pumpkin.toml world already running, with KINGDOMS_HTTP=1 KINGDOMS_HTTP_TOKEN=$TOKEN
+
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8742/state
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8742/towns/20261025:0:0
+curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"town":"here","size":40,"side":"pillager"}' http://127.0.0.1:8742/raids
+curl -sS -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8742/raids/1/stop
+curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"Herald","message":"The gate is down"}' http://127.0.0.1:8742/chat
+```
+
+`GET /state` returns towns (owners, battles, troop counts) and logged-in player positions. `POST /raids` also accepts `"side":"kingdom"` for a counter-raid and an optional `"camp"` (currently unused; waves still spawn from the hinterland camp / relief post).
+
 ### Population
 
-`ChunkPopulate` (PR #1) spawns a stable garrison: roughly 4–16 guards, 4–12 archers, 8–24 civilians, 1 builder, 2 golems, homes a function of the plan. Citizens are `PersistenceRequired` and tagged (`kingdoms:citizen`, `kingdoms:role:…`). Empty slots respawn if the home chunk is loaded. `/raid start 200` is 200 **raiders** against that garrison, not 200 extra villagers. Use the siege bench for N vs N.
+`ChunkPopulate` (PR #1) spawns a stable garrison: roughly 4–16 guards, 4–12 archers, 8–24 civilians, 4 builders, 2 golems, homes a function of the plan. Citizens are `PersistenceRequired` and tagged (`kingdoms:citizen`, `kingdoms:role:…`). Empty slots respawn if the home chunk is loaded. `/raid start 200` is 200 **raiders** against that garrison, not 200 extra villagers. Use the siege bench for N vs N.
 
 ### Scale / LOD
 
@@ -222,12 +256,17 @@ Live Pumpkin (release, LTO off, seed `20261025`, `kingdoms-raid-bot` standing at
 | before (vanilla goals) | ~300 | 38–68 ms | n/a | yes, during contact | PR #6 live 200 |
 | 200 vs 200 (+ leftovers) | 197 / 355 | **9–20 ms** (peak 19.8) | 3–5 (133 at spawn) | start only (8.6 s / 172 ticks, chunk tickets) | ram breach; capture |
 | 400 vs 400 (+ leftovers) | 400 / 708 | **10–30 ms** (peak 30.4 then 15) | 4–9 | none during fight | packed at gate |
+| 400 vs 400 (fresh world) | **392 / 408** (800 ticking) | **14–19 ms** after contact (peak **31.87** at spawn) | 3–6 | start hitch only (8.7 s / 174 ticks) | ram 21 bars; capture; real arrows 25–52 near bots |
 
 Capture: `kingdoms town captured town=20261025:0:0 raiders_in_keep=27 hold=200`. Ownership file `world/kingdoms-ownership.json` → `"pillager"`. `battle_state.owner` exposes it. Gates closed at `(1504, 597)` and `(1327, 669)`; ram cleared 18 iron bars at the town gate.
 
 Plots: `/opt/cursor/artifacts/live-r2.log`, `live-r2-strip.png`, `live-200-r2-strip.png`, `live-400-r2-strip.png`, `kingdoms-ownership.json`.
 
-Gaps: 400 was stacked on leftover bodies so it is not a clean 400 vs 400; the start hitch is still force-load catch-up, not AI; archers at this scale deal director damage rather than arrow entities; the covered ram is a spawn/job, not a moving block.
+Round 3 (fresh world, two `kingdoms-raid-bot`s on alder/raven, HTTP `POST /raids` size 400/400): peak **800** ticking bodies (`defenders=392 raiders=408`), fight MSPT **14–19** after the spawn hitch (peak **31.87** at tick 1500). One `Can't keep up` (8.7 s / 174 ticks) on chunk tickets, none during the fight. Real arrows: **25** at first contact, up to **52** while bots stood at the gate. Ram cleared 21 bars; capture `raiders_in_keep=4 hold=200`; ownership file has towns + player membership. Builders queued jobs and placed gate blocks before the raid. HTTP webhooks fired `player_joined_a_kingdom`, `raid_started`, `gate_breached`, `town_captured` with valid HMAC. A 40-soldier `side=kingdom` retake spawned after stop.
+
+Plots: `/opt/cursor/artifacts/live-r3.log`, `live-r3-strip.png`, `live-r3-start-strip.png`, `live-r3-mid-strip.png`, `kingdoms-ownership-r3.json`, `webhook-r3.log`.
+
+Gaps: the start hitch is still force-load, not AI; capture used 4 raiders in the keep (the hold threshold) while most of the 400 were still outside; `/raid stop` does not despawn leftover soldiers, so a later retake can see them; the covered ram is still a spawn/job, not a moving block; leather kits are server-side (bots do not render).
 
 ### Commands
 
@@ -235,8 +274,9 @@ Gaps: 400 was stacked on leftover bodies so it is not a clean 400 vs 400; the st
 | --- | --- |
 | `/locatetown` | nearest planned town |
 | `/kingdom info` | town, kingdom, owner, battle counts, gate breach |
-| `/kingdom join <kingdom>` | `alder` or `raven` (players fight with that side) |
+| `/kingdom join <kingdom>` | `alder` or `raven`. Leather team colour, name tag, friendly fire off, respawn at the keep |
 | `/raid start <town> [size] [defenders]` | start a pillager raid. Optional `defenders` is how many kingdom combatants to field (extras spawn at the threatened gate). |
+| `/raid retake <town> [size]` | kingdom counter-raid to retake a pillager-owned town |
 | `/raid stop` | stop all kingdoms raids |
 
 ## Build and run

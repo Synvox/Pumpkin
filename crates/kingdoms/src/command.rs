@@ -11,7 +11,7 @@ use pumpkin_util::text::color::NamedColor;
 
 use crate::director;
 use crate::plan::plan_from_cache;
-use crate::raid::RaidSpec;
+use crate::raid::{RaidSide, RaidSpec};
 use crate::town::nearest_town;
 
 const LOCATE_NAME: &str = "locatetown";
@@ -193,6 +193,51 @@ impl CommandExecutor for RaidStartExecutor {
     }
 }
 
+struct RaidRetakeExecutor {
+    has_size: bool,
+}
+
+impl CommandExecutor for RaidRetakeExecutor {
+    fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
+        let world = context.world().clone();
+        let pos = context.position;
+        let town_arg = StringArgumentType::get(context, "town")?;
+        let Some(town_id) = director::resolve_town_id(&world, pos, town_arg) else {
+            context.source.send_feedback(
+                TextComponent::text(format!("Unknown town {town_arg}"))
+                    .color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        };
+        let size = if self.has_size {
+            IntegerArgumentType::get(context, "size")? as u16
+        } else {
+            40
+        };
+        let spec = RaidSpec::new(size).with_side(RaidSide::Kingdom);
+        match director::start_raid(&world, &town_id, spec) {
+            Ok(id) => {
+                context.source.send_feedback(
+                    TextComponent::text(format!(
+                        "Retake {} started on {town_id} ({} soldiers)",
+                        id.0, spec.raiders
+                    ))
+                    .color_named(NamedColor::Gold),
+                    true,
+                );
+                Ok(1)
+            }
+            Err(err) => {
+                context
+                    .source
+                    .send_feedback(TextComponent::text(err).color_named(NamedColor::Red), false);
+                Ok(0)
+            }
+        }
+    }
+}
+
 struct RaidStopExecutor;
 
 impl CommandExecutor for RaidStopExecutor {
@@ -216,7 +261,7 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
     permissions.register_permission_or_panic(Permission::new(
         KINGDOM_PERM,
         KINGDOM_DESC,
-        PermissionDefault::Op(PermissionLvl::Two),
+        PermissionDefault::Allow,
     ));
     permissions.register_permission_or_panic(Permission::new(
         RAID_PERM,
@@ -262,6 +307,16 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
                                             has_defenders: true,
                                         }),
                                 ),
+                        ),
+                ),
+            )
+            .then(
+                literal("retake").then(
+                    argument("town", StringArgumentType::QuotablePhrase)
+                        .executes(RaidRetakeExecutor { has_size: false })
+                        .then(
+                            argument("size", IntegerArgumentType::new(1, 400))
+                                .executes(RaidRetakeExecutor { has_size: true }),
                         ),
                 ),
             )

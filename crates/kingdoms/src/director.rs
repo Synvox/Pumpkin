@@ -16,9 +16,14 @@ use pumpkin_core::entity::player::Player;
 use pumpkin_core::world::World;
 use pumpkin_core::world::scoreboard::{CollisionRule, NameTagVisibility, Team};
 use pumpkin_data::damage::DamageType;
+use pumpkin_data::data_component::DataComponent;
+use pumpkin_data::data_component_impl::{DataComponentImpl, DyedColorImpl, EquipmentSlot};
 use pumpkin_data::dimension::Dimension;
 use pumpkin_data::entity::EntityType;
+use pumpkin_data::item::Item;
+use pumpkin_data::item_stack::ItemStack;
 use pumpkin_util::math::boundingbox::BoundingBox;
+use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector2::Vector2;
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::text::TextComponent;
@@ -29,15 +34,18 @@ use crate::faction::{
     role_from_tags,
 };
 use crate::flow::{DIRECT_RANGE, FlowField};
-use crate::goals::{PostTarget, already_wired, bind_citizen, bind_golem, bind_raider, drive_live};
+use crate::goals::{
+    PostTarget, already_wired, bind_citizen, bind_golem, bind_raider, drive_live, shoot_arrow,
+};
 use crate::info::TownInfo;
 use crate::lod::{
     ACQUIRE_RANGE, ALARM_RANGE, DEFAULT_PATH_CAP, LodTier, PathBudget, SpatialBuckets,
 };
 use crate::plan::plan_from_cache;
 use crate::raid::{
-    RaidSpec, WAVE_ADVANCE_REMAINING, WAVE_SPACING_TICKS, compose_wave, spawn_offset,
+    RaidSide, RaidSpec, WAVE_ADVANCE_REMAINING, WAVE_SPACING_TICKS, compose_wave, spawn_offset,
 };
+use crate::repair::{self, RepairJob};
 use crate::roles::{PopulationSpec, VillagerRole, citizen_slots};
 use crate::scene::{ScenePost, TownInfoScene, TownScene};
 use crate::siege::{
@@ -58,7 +66,13 @@ const LIVE_MELEE_PERIOD: u32 = 10;
 const LIVE_RANGED_RANGE: f64 = 16.0;
 const LIVE_RANGED_DAMAGE: f32 = 3.0;
 const LIVE_RANGED_PERIOD: u32 = 20;
+/// Real arrows when a player can see the shot; director damage beyond this.
+const PLAYER_ARROW_RANGE: f64 = 32.0;
 const RAM_BREACH_RANGE: f64 = 5.0;
+const REPAIR_PERIOD: u32 = 40;
+const REPAIR_PLACE_PERIOD: u32 = 10;
+const REPAIR_REACH: f64 = 2.5;
+const REPAIR_QUEUE_CAP: usize = 24;
 
 const COMBAT_LOG_CAP: usize = 512;
 const RESPAWN_PERIOD: u32 = 200;
@@ -148,6 +162,9 @@ struct TownWar {
     retake_hold: u32,
     gates_closed: bool,
     gate_breached: bool,
+    repair_jobs: VecDeque<RepairJob>,
+    repair_assigned: HashMap<i32, RepairJob>,
+    last_repair_tick: u32,
 }
 
 struct Wired {
@@ -186,7 +203,11 @@ impl Director {
         self.worlds.push(Arc::downgrade(world));
         ensure_kingdom_teams(world);
         let path = siege::ownership_path(&world.level.level_folder.root_folder);
-        self.owners = siege::load_ownership(&path);
+        let saved = siege::load_state(&path);
+        self.owners = saved.towns;
+        for (uuid, name) in saved.players {
+            self.player_kingdoms.insert(uuid, KingdomId::new(&name));
+        }
         self.ownership_path = Some(path);
         for (id, owner) in &self.owners {
             if let Some(war) = self.towns.get_mut(id) {
@@ -200,16 +221,26 @@ impl Director {
         }
     }
 
+    fn persist(&self) {
+        let Some(path) = &self.ownership_path else {
+            return;
+        };
+        let players: HashMap<String, String> = self
+            .player_kingdoms
+            .iter()
+            .map(|(uuid, k)| (uuid.clone(), k.as_str().to_owned()))
+            .collect();
+        if let Err(err) = siege::save_state(path, &self.owners, &players) {
+            tracing::warn!(%err, "failed to persist kingdoms ownership");
+        }
+    }
+
     fn persist_owner(&mut self, town_id: &str, owner: TownOwner) {
         self.owners.insert(town_id.to_owned(), owner.clone());
         if let Some(war) = self.towns.get_mut(town_id) {
             war.owner = owner;
         }
-        if let Some(path) = &self.ownership_path
-            && let Err(err) = siege::save_ownership(path, &self.owners)
-        {
-            tracing::warn!(%err, "failed to persist kingdoms ownership");
-        }
+        self.persist();
     }
 
     #[must_use]
@@ -224,11 +255,15 @@ impl Director {
         let world = entity.world.load();
         add_to_team(&world, &kingdom, &player.gameprofile.name);
         self.player_kingdoms.insert(uuid, kingdom.clone());
+        self.persist();
+        kit_player(player, &kingdom);
+        set_keep_respawn(player, &world, &kingdom, &self.towns);
         tracing::info!(
             player = %player.gameprofile.name,
             kingdom = kingdom.as_str(),
             "player joined kingdom"
         );
+        crate::http::notify_join(&player.gameprofile.name, kingdom.as_str());
         kingdom
     }
 
@@ -302,12 +337,16 @@ impl Director {
             other: None,
             x: f64::from(camp.x),
             z: f64::from(camp.z),
-            note: format!("raid {} size {} on {town_id}", id.0, spec.raiders),
+            note: format!(
+                "raid {} size {} side {:?} on {town_id}",
+                id.0, spec.raiders, spec.side
+            ),
         });
         tracing::info!(
             raid = id.0,
             town = town_id,
             size = spec.raiders,
+            side = ?spec.side,
             waves = spec.waves,
             camp_x = camp.x,
             camp_z = camp.z,
@@ -490,6 +529,7 @@ impl Director {
     }
 
     fn push_event(&mut self, event: CombatEvent) {
+        crate::http::notify_combat(&event);
         if self.events.len() >= COMBAT_LOG_CAP {
             self.events.pop_front();
         }
@@ -518,6 +558,9 @@ impl TownWar {
             retake_hold: 0,
             gates_closed: false,
             gate_breached: false,
+            repair_jobs: VecDeque::new(),
+            repair_assigned: HashMap::new(),
+            last_repair_tick: 0,
         }
     }
 
@@ -705,6 +748,86 @@ fn add_pillager_team(world: &World, scoreboard_name: &str) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     sb.add_player_to_team(world, pillager_team_name(), scoreboard_name.to_owned());
+}
+
+fn kingdom_dye(kingdom: &KingdomId) -> i32 {
+    match kingdom.as_str() {
+        "raven" => 0x003C44AA,
+        "alder" => 0x005E7C16,
+        _ => 0x00B02E26,
+    }
+}
+
+fn dyed_leather(item: &'static Item, rgb: i32) -> ItemStack {
+    let mut stack = ItemStack::new(1, item);
+    stack.patch.push((
+        DataComponent::DyedColor,
+        Some(DyedColorImpl { rgb }.to_dyn()),
+    ));
+    stack
+}
+
+fn kit_player(player: &Player, kingdom: &KingdomId) {
+    let rgb = kingdom_dye(kingdom);
+    let pieces = [
+        (EquipmentSlot::HEAD, &Item::LEATHER_HELMET),
+        (EquipmentSlot::CHEST, &Item::LEATHER_CHESTPLATE),
+        (EquipmentSlot::LEGS, &Item::LEATHER_LEGGINGS),
+        (EquipmentSlot::FEET, &Item::LEATHER_BOOTS),
+    ];
+    let mut changes = Vec::with_capacity(pieces.len());
+    {
+        let mut eq = player
+            .living_entity
+            .entity_equipment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (slot, item) in pieces {
+            let stack = dyed_leather(item, rgb);
+            eq.put(&slot, stack.clone());
+            changes.push((slot, stack));
+        }
+    }
+    player.living_entity.send_equipment_changes(&changes);
+}
+
+fn set_keep_respawn(
+    player: &Player,
+    world: &World,
+    kingdom: &KingdomId,
+    towns: &HashMap<String, TownWar>,
+) {
+    let Some(keep) = towns
+        .values()
+        .find(|w| w.kingdom == *kingdom)
+        .map(|w| w.scene.keep())
+    else {
+        return;
+    };
+    let y = standing_y(world, keep);
+    let _ = player.set_respawn_point(
+        world.dimension.clone(),
+        BlockPos::new(keep.x, y, keep.z),
+        0.0,
+        0.0,
+        true,
+    );
+}
+
+/// Re-apply team colour, leather, and keep spawn after a reconnect.
+pub fn restore_player(player: &Player) {
+    let uuid = player.gameprofile.id.to_string();
+    let kingdom = lock().player_kingdom(&uuid).cloned();
+    let Some(kingdom) = kingdom else {
+        return;
+    };
+    let entity = player.get_entity();
+    let _ = entity.add_scoreboard_tag(&kingdom_tag(&kingdom));
+    let world = entity.world.load();
+    add_to_team(&world, &kingdom, &player.gameprofile.name);
+    kit_player(player, &kingdom);
+    let dir = lock();
+    set_keep_respawn(player, &world, &kingdom, &dir.towns);
 }
 
 /// One server tick: alarm, targets, LOD, raid waves.
@@ -908,12 +1031,20 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             // Refresh living raid ids from snapshots.
             let mut finished = false;
             if let Some(raid) = &mut war.raid {
-                let living: Vec<i32> = snapshots
-                    .iter()
-                    .filter(|(_, f)| matches!(f, Faction::Pillager))
-                    .map(|(e, _)| e.get_entity().entity_id)
-                    .collect();
-                raid.living = living;
+                if raid.spec.side == RaidSide::Kingdom {
+                    let alive: std::collections::HashSet<i32> = snapshots
+                        .iter()
+                        .map(|(e, _)| e.get_entity().entity_id)
+                        .collect();
+                    raid.living.retain(|id| alive.contains(id));
+                } else {
+                    let living: Vec<i32> = snapshots
+                        .iter()
+                        .filter(|(_, f)| matches!(f, Faction::Pillager))
+                        .map(|(e, _)| e.get_entity().entity_id)
+                        .collect();
+                    raid.living = living;
+                }
                 let should_advance = raid.spawned_this_wave > 0
                     && (raid.living.len() as u16) <= WAVE_ADVANCE_REMAINING
                     || tick.saturating_sub(raid.last_wave_tick) >= WAVE_SPACING_TICKS
@@ -991,7 +1122,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     // Director-owned combat: NoAI + flow-field slide. Vanilla melee/bow/path
     // goals stay off during a raid so 200 vs 200 does not A* or shove.
     let loop_started = Instant::now();
-    let (alarm, march_dest, keep_dest, ram_dest, ladder_dest, keep_rect, breached) = {
+    let (alarm, march_dest, keep_dest, ram_dest, ladder_dest, keep_rect, breached, owner_pillager) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
             return;
@@ -1025,8 +1156,11 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             },
             war.scene.keep_rect(),
             war.gate_breached,
+            war.owner.is_pillager(),
         )
     };
+    maybe_refill_repair(world, town_id, tick, alarm);
+
     let mut n_ticking = 0u32;
     let mut n_loaded = 0u32;
     let mut n_active = 0u32;
@@ -1034,6 +1168,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     let mut n_slid = 0u32;
     let mut n_melee = 0u32;
     let mut n_ranged = 0u32;
+    let mut n_arrows = 0u32;
+    let mut n_repair = 0u32;
     let mut ram_at_gate = false;
     let mut raiders_in_keep = 0u32;
     let mut defenders_in_keep = 0u32;
@@ -1069,6 +1205,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         let in_combat = hostile.is_some();
         let melee_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, LIVE_MELEE_RANGE);
         let ranged_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, LIVE_RANGED_RANGE);
+        let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
+        let is_builder = role == Some(VillagerRole::Builder);
         let tier = if in_combat {
             LodTier::Combat
         } else if alarm {
@@ -1078,7 +1216,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         };
         let id = base.entity_id;
         // Raid soldiers never run vanilla AI. The director slides them.
-        let skip = if alarm {
+        let skip = if alarm || is_builder {
             false
         } else {
             !tier.should_tick(id, tick)
@@ -1100,6 +1238,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             }
             let dest = match faction {
                 Faction::Pillager => march_dest,
+                Faction::Kingdom(_) if is_builder => {
+                    assigned_repair_dest(town_id, id, world).unwrap_or(keep_dest)
+                }
                 Faction::Kingdom(_) => keep_dest,
                 Faction::Neutral => continue,
             };
@@ -1107,7 +1248,11 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
 
         let job = job_of(base);
-        let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
+        let repair_dest = if is_builder {
+            assigned_repair_dest(town_id, id, world)
+        } else {
+            None
+        };
         let dest = dest_for(
             faction,
             job,
@@ -1115,7 +1260,12 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             alarm,
             in_combat,
             breached,
-            march_dest,
+            repair_dest,
+            if owner_pillager {
+                keep_dest
+            } else {
+                march_dest
+            },
             keep_dest,
             ram_dest,
             ladder_dest,
@@ -1155,15 +1305,28 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             && let Some(h) = ranged_hostile
             && let Some(target) = world.get_entity_by_id(h.entity_id)
         {
-            let _ = target.damage_with_context(
-                target.as_ref(),
-                LIVE_RANGED_DAMAGE,
-                DamageType::ARROW,
-                None,
-                Some(entity.as_ref()),
-                Some(entity.as_ref()),
-            );
+            if player_near(world, pos.x, pos.z, PLAYER_ARROW_RANGE) {
+                shoot_arrow(mob, &target);
+                n_arrows += 1;
+            } else {
+                let _ = target.damage_with_context(
+                    target.as_ref(),
+                    LIVE_RANGED_DAMAGE,
+                    DamageType::ARROW,
+                    None,
+                    Some(entity.as_ref()),
+                    Some(entity.as_ref()),
+                );
+            }
             n_ranged += 1;
+        }
+        if is_builder
+            && repair_dest.is_some()
+            && dist < REPAIR_REACH
+            && try_place_repair(world, town_id, id, tick)
+        {
+            mob.get_mob_entity().living_entity.swing_hand();
+            n_repair += 1;
         }
     }
     let loop_us = loop_started.elapsed().as_micros();
@@ -1225,10 +1388,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         let town = town_id.to_owned();
         std::thread::spawn(move || dump_live_plots(Some(&town)));
     }
-    if tick.is_multiple_of(100) && alarm {
+    if tick.is_multiple_of(100) && (alarm || n_repair > 0 || n_arrows > 0) {
         let n_entities = snapshots.len();
         tracing::info!(
-            "kingdoms raid entity tick town={town_id} ticking={n_ticking} loaded={n_loaded} active={n_active} no_ai={n_no_ai} slid={n_slid} melee={n_melee} ranged={n_ranged} loop_us={loop_us} keep_r={raiders_in_keep} keep_d={defenders_in_keep} entities={n_entities}"
+            "kingdoms raid entity tick town={town_id} ticking={n_ticking} loaded={n_loaded} active={n_active} no_ai={n_no_ai} slid={n_slid} melee={n_melee} ranged={n_ranged} arrows={n_arrows} repair={n_repair} loop_us={loop_us} keep_r={raiders_in_keep} keep_d={defenders_in_keep} entities={n_entities}"
         );
     }
 
@@ -1250,6 +1413,10 @@ fn spawn_wave(
     raid_id: RaidId,
     tick: u32,
 ) {
+    if spec.side == RaidSide::Kingdom {
+        spawn_retake_wave(world, town_id, wave, spec, camp, raid_id, tick);
+        return;
+    }
     let count = spec.raiders_in_wave(wave);
     let members = compose_wave(count, wave);
     let (tents, rams, ladders): (Vec<ScenePost>, Vec<ScenePost>, Vec<ScenePost>) = {
@@ -1573,6 +1740,179 @@ fn is_ranged_fighter(entity: &Entity, role: Option<VillagerRole>) -> bool {
     role == Some(VillagerRole::Archer) || entity.entity_type == &EntityType::PILLAGER
 }
 
+fn player_near(world: &World, x: f64, z: f64, range: f64) -> bool {
+    world.players.load().iter().any(|p| {
+        let pos = p.living_entity.entity.pos.load();
+        (pos.x - x).hypot(pos.z - z) <= range
+    })
+}
+
+fn maybe_refill_repair(world: &World, town_id: &str, tick: u32, alarm: bool) {
+    if alarm || !tick.is_multiple_of(REPAIR_PERIOD) {
+        return;
+    }
+    let (scene, threatened, queued) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        (
+            war.scene.clone(),
+            war.threatened.map(|p| (p.x, p.z)),
+            war.repair_jobs.len() + war.repair_assigned.len(),
+        )
+    };
+    if queued >= 8 {
+        return;
+    }
+    let Some((_, cx, cz)) = parse_town_id(town_id) else {
+        return;
+    };
+    let seed = world.level.seed.0;
+    let Some(plan) = plan_from_cache(seed, cx, cz) else {
+        return;
+    };
+    let cols = repair::repair_columns(&scene, threatened);
+    let jobs = repair::collect_jobs(world, &plan, &cols, REPAIR_QUEUE_CAP);
+    if jobs.is_empty() {
+        return;
+    }
+    let mut dir = lock();
+    if let Some(war) = dir.towns.get_mut(town_id) {
+        war.repair_jobs = jobs.into_iter().collect();
+        tracing::info!(
+            town = town_id,
+            queued = war.repair_jobs.len(),
+            "kingdoms builders queued repair jobs"
+        );
+    }
+}
+
+fn assigned_repair_dest(town_id: &str, entity_id: i32, world: &World) -> Option<PostTarget> {
+    let mut dir = lock();
+    let war = dir.towns.get_mut(town_id)?;
+    if let Some(job) = war.repair_assigned.get(&entity_id).copied() {
+        return Some(PostTarget {
+            x: job.x,
+            y: job.y,
+            z: job.z,
+        });
+    }
+    let job = war.repair_jobs.pop_front()?;
+    war.repair_assigned.insert(entity_id, job);
+    drop(dir);
+    let y = standing_y(world, ScenePost::new(job.x, job.z)).max(job.y);
+    Some(PostTarget {
+        x: job.x,
+        y,
+        z: job.z,
+    })
+}
+
+fn try_place_repair(world: &Arc<World>, town_id: &str, entity_id: i32, tick: u32) -> bool {
+    let job = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return false;
+        };
+        if tick.saturating_sub(war.last_repair_tick) < REPAIR_PLACE_PERIOD {
+            return false;
+        }
+        let Some(job) = war.repair_assigned.remove(&entity_id) else {
+            return false;
+        };
+        war.last_repair_tick = tick;
+        job
+    };
+    if repair::place_one(world, job) {
+        tracing::info!(
+            "kingdoms builder placed block x={} y={} z={}",
+            job.x,
+            job.y,
+            job.z
+        );
+        true
+    } else {
+        false
+    }
+}
+
+fn spawn_retake_wave(
+    world: &Arc<World>,
+    town_id: &str,
+    wave: u8,
+    spec: RaidSpec,
+    camp: ScenePost,
+    raid_id: RaidId,
+    tick: u32,
+) {
+    let count = spec.raiders_in_wave(wave);
+    let (kingdom, keep, gate) = {
+        let dir = lock();
+        dir.towns.get(town_id).map_or_else(
+            || (KingdomId::new("alder"), camp, camp),
+            |w| {
+                (
+                    w.kingdom.clone(),
+                    w.scene.keep(),
+                    w.scene
+                        .gates()
+                        .first()
+                        .map_or_else(|| w.scene.keep(), |g| ScenePost::new(g.x, g.z)),
+                )
+            },
+        )
+    };
+    let post = ScenePost::new(keep.x * 2 - camp.x, keep.z * 2 - camp.z);
+    let post = if post.x == keep.x && post.z == keep.z {
+        ScenePost::new(gate.x + 48, gate.z + 48)
+    } else {
+        post
+    };
+    let y = standing_y(world, post);
+    let mut spawned_ids = Vec::new();
+    for i in 0..count {
+        let pos = spawn_offset(post, i, y);
+        let golem = i % 6 == 5;
+        let role = if i % 3 == 2 {
+            VillagerRole::Archer
+        } else {
+            VillagerRole::Guard
+        };
+        if let Some(id) = spawn_citizen(world, town_id, &kingdom, role, golem, pos) {
+            spawned_ids.push(id);
+        }
+    }
+    let mut dir = lock();
+    if let Some(war) = dir.towns.get_mut(town_id)
+        && let Some(raid) = &mut war.raid
+        && raid.id == raid_id
+    {
+        raid.spawned_this_wave = count;
+        raid.last_wave_tick = tick;
+        raid.living.extend(spawned_ids.iter().copied());
+        raid.wave = raid.wave.saturating_add(1);
+    }
+    dir.push_event(CombatEvent {
+        tick,
+        kind: CombatKind::Wave,
+        actor: i32::from(wave) + 1,
+        other: Some(i32::from(count)),
+        x: f64::from(post.x),
+        z: f64::from(post.z),
+        note: format!(
+            "{town_id} retake wave {} spawned {count}",
+            u32::from(wave) + 1
+        ),
+    });
+    tracing::info!(
+        town = town_id,
+        wave = u32::from(wave) + 1,
+        count,
+        "retake wave spawned"
+    );
+}
+
 fn slide_period(dist: f64, in_combat: bool) -> u32 {
     if in_combat || dist < 24.0 {
         1
@@ -1590,11 +1930,15 @@ fn dest_for(
     alarm: bool,
     in_combat: bool,
     breached: bool,
+    repair_dest: Option<PostTarget>,
     march_dest: PostTarget,
     keep_dest: PostTarget,
     _ram_dest: PostTarget,
     ladder_dest: PostTarget,
 ) -> PostTarget {
+    if role == Some(VillagerRole::Builder) {
+        return repair_dest.unwrap_or(keep_dest);
+    }
     match faction {
         Faction::Neutral => keep_dest,
         Faction::Kingdom(_) if role == Some(VillagerRole::Archer) => ladder_dest,
@@ -1813,6 +2157,19 @@ pub fn stop_raid(town_id: Option<&str>) -> u32 {
         apply_force_tickets(&world, &tickets, false);
     }
     n
+}
+
+pub fn stop_raid_by_id(id: RaidId) -> u32 {
+    let town = {
+        let dir = lock();
+        dir.towns.iter().find_map(|(town_id, war)| {
+            war.raid
+                .as_ref()
+                .is_some_and(|r| r.id == id)
+                .then(|| town_id.clone())
+        })
+    };
+    town.map_or(0, |town_id| stop_raid(Some(&town_id)))
 }
 
 pub fn set_target_town(raid_id: RaidId, town_id: &str) -> Result<(), String> {
