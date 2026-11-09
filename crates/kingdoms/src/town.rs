@@ -3,6 +3,8 @@
 //! One town per `CELL_SIZE`×`CELL_SIZE` block region, placed as a pure function
 //! of `(seed, cell_x, cell_z)`.
 
+use crate::geom::Rect;
+
 /// Side length of a town planning cell, in blocks.
 pub const CELL_SIZE: i32 = 2048;
 
@@ -113,6 +115,74 @@ pub fn is_inside_village_exclusion(seed: u64, block_x: i32, block_z: i32) -> boo
     false
 }
 
+/// Crossing both cardinal-neighbour cells agree on, hashed from the shared edge.
+///
+/// For an east-west pair the point lies on `x = east_cell * CELL_SIZE` (the first
+/// column of the eastern cell). For north-south, on `z = south_cell * CELL_SIZE`.
+#[must_use]
+pub fn border_crossing(seed: u64, a: TownPos, b: TownPos) -> (i32, i32) {
+    let (c0x, c0z, c1x, c1z) = if (a.cell_x, a.cell_z) <= (b.cell_x, b.cell_z) {
+        (a.cell_x, a.cell_z, b.cell_x, b.cell_z)
+    } else {
+        (b.cell_x, b.cell_z, a.cell_x, a.cell_z)
+    };
+    let h = mix_town(seed ^ 0x524F_4144, c0x, c0z) ^ mix_town(seed, c1x, c1z);
+    let along = 48 + (h % (CELL_SIZE as u64 - 96)) as i32;
+    if c0x == c1x {
+        (c0x * CELL_SIZE + along, c1z * CELL_SIZE)
+    } else {
+        (c1x * CELL_SIZE, c0z * CELL_SIZE + along)
+    }
+}
+
+/// Goal column inside `origin`'s cell that meets `crossing` on the shared edge.
+#[must_use]
+pub fn border_goal(origin: TownPos, neighbor: TownPos, crossing: (i32, i32)) -> (i32, i32) {
+    if neighbor.cell_x > origin.cell_x {
+        (crossing.0 - 1, crossing.1)
+    } else if neighbor.cell_x < origin.cell_x {
+        (crossing.0, crossing.1)
+    } else if neighbor.cell_z > origin.cell_z {
+        (crossing.0, crossing.1 - 1)
+    } else {
+        (crossing.0, crossing.1)
+    }
+}
+
+fn corridor_hits_chunk(ax: i32, az: i32, bx: i32, bz: i32, chunk_x: i32, chunk_z: i32) -> bool {
+    let cmin_x = chunk_x * 16;
+    let cmin_z = chunk_z * 16;
+    let chunk = Rect::new(cmin_x, cmin_z, cmin_x + 15, cmin_z + 15);
+    if !Rect::new(ax, az, bx, bz).inflate(24).intersects(chunk) {
+        return false;
+    }
+    dist2_to_segment(cmin_x + 8, cmin_z + 8, ax, az, bx, bz) <= 28 * 28
+}
+
+fn dist2_to_segment(px: i32, pz: i32, ax: i32, az: i32, bx: i32, bz: i32) -> i64 {
+    let px = i64::from(px);
+    let pz = i64::from(pz);
+    let ax = i64::from(ax);
+    let az = i64::from(az);
+    let bx = i64::from(bx);
+    let bz = i64::from(bz);
+    let abx = bx - ax;
+    let abz = bz - az;
+    let apx = px - ax;
+    let apz = pz - az;
+    let ab2 = abx * abx + abz * abz;
+    if ab2 == 0 {
+        return apx * apx + apz * apz;
+    }
+    let t = (apx * abx + apz * abz).clamp(0, ab2);
+    let qx = ax * ab2 + abx * t;
+    let qz = az * ab2 + abz * t;
+    let dx = px * ab2 - qx;
+    let dz = pz * ab2 - qz;
+    let dist2_num = dx * dx + dz * dz;
+    dist2_num / (ab2 * ab2)
+}
+
 /// Towns whose footprint may touch chunk `(chunk_x, chunk_z)`.
 #[must_use]
 pub fn towns_touching_chunk(seed: u64, chunk_x: i32, chunk_z: i32) -> Vec<TownPos> {
@@ -133,6 +203,20 @@ pub fn towns_touching_chunk(seed: u64, chunk_x: i32, chunk_z: i32) -> Vec<TownPo
             let cx = min_x.midpoint(max_x);
             let cz = min_z.midpoint(max_z);
             if dist2(cx, cz, town.x, town.z) <= radius2 {
+                towns.push(town);
+                continue;
+            }
+            let mut on_road = false;
+            for dir in crate::geom::Dir::ALL {
+                let neighbor = town_in_cell(seed, town.cell_x + dir.dx(), town.cell_z + dir.dz());
+                let cross = border_crossing(seed, town, neighbor);
+                let goal = border_goal(town, neighbor, cross);
+                if corridor_hits_chunk(town.x, town.z, goal.0, goal.1, chunk_x, chunk_z) {
+                    on_road = true;
+                    break;
+                }
+            }
+            if on_road {
                 towns.push(town);
             }
         }
@@ -176,5 +260,21 @@ mod tests {
         let town = town_in_cell(seed, 3, -2);
         assert_eq!(nearest_town(seed, town.x, town.z), town);
         assert_eq!(nearest_town(seed, town.x + 1, town.z - 1), town);
+    }
+
+    #[test]
+    fn border_crossing_agrees_from_both_cells() {
+        let seed = 20_261_025u64;
+        let a = town_in_cell(seed, 0, 0);
+        let b = town_in_cell(seed, 1, 0);
+        let ab = border_crossing(seed, a, b);
+        let ba = border_crossing(seed, b, a);
+        assert_eq!(ab, ba);
+        assert_eq!(ab.0, CELL_SIZE);
+        let goal_a = border_goal(a, b, ab);
+        let goal_b = border_goal(b, a, ab);
+        assert_eq!(goal_a, (CELL_SIZE - 1, ab.1));
+        assert_eq!(goal_b, (CELL_SIZE, ab.1));
+        assert_eq!(goal_a.1, goal_b.1);
     }
 }

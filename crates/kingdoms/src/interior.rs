@@ -313,10 +313,10 @@ pub fn furnish_house(
         return;
     }
     match kind {
-        BuildingKind::Church | BuildingKind::Monastery => {
+        BuildingKind::Church | BuildingKind::Monastery | BuildingKind::Cathedral => {
             furnish_chapel(sink, rect, x, floor, z, roof_y, palette, true);
         }
-        BuildingKind::Watchtower => {}
+        BuildingKind::Watchtower | BuildingKind::Outpost | BuildingKind::BellTower => {}
         BuildingKind::Blacksmith => furnish_smith(sink, rect, x, floor, z, roof_y),
         BuildingKind::Barn => furnish_barn(sink, rect, x, floor, z, roof_y),
         BuildingKind::Tavern => furnish_tavern(sink, rect, x, floor, z, roof_y, stories, palette),

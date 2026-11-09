@@ -236,10 +236,13 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             BuildingKind::Blacksmith
             | BuildingKind::Church
             | BuildingKind::Monastery
+            | BuildingKind::Cathedral
             | BuildingKind::Windmill
             | BuildingKind::Barn
             | BuildingKind::Stall => spawns.push(at(SpawnRole::Workstation, cx, cz)),
-            BuildingKind::Watchtower => spawns.push(at(SpawnRole::GuardPost, cx, cz)),
+            BuildingKind::Watchtower | BuildingKind::Outpost | BuildingKind::BellTower => {
+                spawns.push(at(SpawnRole::GuardPost, cx, cz));
+            }
         }
     }
 
@@ -271,14 +274,16 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
                     for x in (scene.rect.min_x + 3..scene.rect.max_x - 2).step_by(6) {
                         if matches!(
                             plan.occ.kind(x, z),
-                            crate::cells::CellKind::Tent | crate::cells::CellKind::CampCourt
+                            crate::cells::CellKind::Tent
+                                | crate::cells::CellKind::WarTent
+                                | crate::cells::CellKind::CampCourt
                         ) {
                             spawns.push(at(SpawnRole::PillagerSpawn, x, z));
                         }
                     }
                 }
             }
-            SceneKind::Watchtower => {
+            SceneKind::Watchtower | SceneKind::MountainFortress => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));
             }
