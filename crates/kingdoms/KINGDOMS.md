@@ -27,7 +27,7 @@ The planner is geometry only today, but each town exposes a serializable [`TownI
 ```rust
 use pumpkin_kingdoms::info::{town_info, town_info_at, TownInfo};
 
-let info = town_info(seed, cell_x, cell_z)?;          // cached cell
+let info = town_info(seed, cell_x, cell_z)?;          // memory/disk only; never generates
 let info = town_info_at(seed, block_x, block_z)?;     // cell containing a column
 let json = info.to_json()?;
 ```
@@ -324,7 +324,7 @@ Player-join hitch (investigate only, no pumpkin-core change): `chunker::update_p
 
 Plots: `/opt/cursor/artifacts/live-r6.log`, `live-r6-strip.png` (3990×1024), `live-r6-clock-strip.png`, `soak-r6.csv`, `kingdoms-ownership-r6.json`, `webhook-r6.log`.
 
-Round 7 is a performance pass. Remote fronts (no player within 128 blocks of keep/gate/camp) no longer spawn soldiers or force-load towns: they keep virtual counts and resolve Lanchester combat on a 20-tick timer after a 400-tick march. `KINGDOMS_BODY_BUDGET` (default 240) caps live bodies; the war clock still opens up to `KINGDOMS_WAR_CLOCK_FRONTS` raids, but extras stay abstract. Live tickets cover the battle line only (1-chunk ring, 8-step corridor). Camp pillagers inside `plan.bounds` no longer hold the alarm. Join hitch: kingdoms calls `pumpkin_core::world::chunker::set_join_view_grow(1)` so a new player's view cylinder grows one ring per tick (vanilla keeps 0).
+Round 7 is a performance pass. Remote fronts (no player within 128 blocks of keep/gate/camp) no longer spawn soldiers or force-load towns: they keep virtual counts and resolve Lanchester combat on a 20-tick timer after a 400-tick march. `KINGDOMS_BODY_BUDGET` (default 240) caps live bodies; the war clock still opens up to `KINGDOMS_WAR_CLOCK_FRONTS` raids, but extras stay abstract. Live tickets cover the battle line only (1-chunk ring, 8-step corridor). Camp pillagers inside `plan.bounds` no longer hold the alarm. Join hitch: r7 added `set_join_view_grow(1)` in pumpkin-core; a warm-world join was still 8.9 s (town-plan ensure), so r8 reverts both pumpkin-core hooks.
 
 | Fight | peak bodies | fight MSPT | director_ms | `Can't keep up` | notes |
 | --- | ---: | ---: | ---: | --- | --- |
@@ -334,6 +334,17 @@ Round 7 is a performance pass. Remote fronts (no player within 128 blocks of kee
 Target was p50 ≤ 25 / p95 ≤ 45. Director time is 3.5 ms; the leftover ~30 ms is the live player's chunk/entity tick, not 3×100 vs 100. First join still hitches on the first town plan (~40 s director), not the view-distance fill. Three bots were still connected 30 s into that hitch. A later join on the same world took 2.6 s. Kingdom occupy of a pillager town was stuck at `occupy_hold >> 200` until `tick_hold` started treating keep-holds as a capture for any owner.
 
 Plots: `/opt/cursor/artifacts/live-r7.log`, `soak-r7.csv`, `soak-r7-summary.json`, `kingdoms-ownership-r7.json`, `webhook-r7.log`.
+
+Round 8: town plans precompute on a background thread at world attach (spawn cell ±1 and owned fronts) and persist `TownInfo` JSON under `kingdoms-plans/v2/` (`PLAN_CACHE_VERSION`; bump it when plan layout changes). The tick never calls `plan_for`; a miss queues work and defers that town's AI. Idle civilians/guards farther than 64 blocks from every player sleep (`NoAI`); kingdoms-tagged mobs never run vanilla villager brains; workstation/home/wall Y uses planner height instead of per-entity `sample_surface_height`. Join-view-grow pumpkin-core hooks are reverted (r7 warm-world join was still 8.9 s of town-plan ensure).
+
+| Fight | peak bodies | fight MSPT | director_ms | `Can't keep up` | notes |
+| --- | ---: | ---: | ---: | --- | --- |
+| r7 30 min soak (before) | **230** live / 556 entities | **p50 34.2 / p95 47.4 / max 65** after join (join sample 522, 40 s first-plan hitch) | p50 **3.5** / p95 92 | 8 (join 41 s / 819 ticks) | 1 live + 3 abstract; 9 captures, 7 kingdom |
+| r8 30 min soak (after warmup) | **256** live / 836 entities | **p50 34.9 / p95 49.4 / max 71** after join | p50 **0.26** / p95 **1.48** (max 902 on a dual-capture tick) | 14 (join catch-up 2.2 s / 43 ticks; later 2 s bursts) | warmup 9 cells in **78 s**; 9 JSON plans on disk; **36 captures, 25 kingdom / 11 pillager**; tickets 0→85 (no leak); RSS 88→733 MiB |
+
+First join after warmup no longer runs `plan_for` on the tick (r7 director **40 s**). Worst director on that join was **154 ms** (ensure + first civilian scan). Target “no tick over 100 ms” still misses that 154 ms join director and raid-start bursts (554 ms spawning the first live wave). Steady p50 **34.9** vs target **25**: director is 0.26 ms; the leftover ~34 ms is vanilla chunk/entity tick of the live player in the PR #17 capital (entity loop `loop_us≈300`, ~60/165 villagers asleep). Kingdom occupy of pillager towns resolves (`tick_hold` + `occupy`).
+
+Plots: `/opt/cursor/artifacts/soak-r8.log`, `soak-r8.csv`, `soak-r8-summary.json`, `kingdoms-ownership-r8.json`, `webhook-r8.log`.
 
 ### Commands
 

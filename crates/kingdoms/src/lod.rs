@@ -17,6 +17,8 @@ pub const DEFAULT_PATH_CAP: u32 = 48;
 pub const ACQUIRE_RANGE: f64 = 28.0;
 /// Pillagers this close to a gate raise the town alarm.
 pub const ALARM_RANGE: f64 = 48.0;
+/// Idle civilians / guards farther than this from every player sleep.
+pub const CIVILIAN_SLEEP_RANGE: f64 = 64.0;
 
 /// How often a combatant should run AI this tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,5 +215,7 @@ mod tests {
         assert!(LodTier::Idle.should_tick(0, 8));
         assert!(LodTier::Alert.should_tick(2, 2));
         assert!(!LodTier::Alert.should_tick(2, 3));
+        assert_eq!(LodTier::Far.period(), 40);
+        assert_eq!(CIVILIAN_SLEEP_RANGE, 64.0);
     }
 }

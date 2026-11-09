@@ -1,36 +1,400 @@
 //! City-level plan: castle site, walls, roads, lots, farms.
 //!
 //! Pure function of `(seed, cell, height grid, palette)`. Cached by the decorator.
+//! The tick never generates a plan: it reads memory/disk and queues misses.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 
 use pumpkin_data::biome::Biome;
 use pumpkin_world::biome::BiomeSupplier;
 use pumpkin_world::generation::generator::WorldGenerator;
 use pumpkin_world::generation::noise::router::multi_noise_sampler::MultiNoiseSampler;
+use serde::{Deserialize, Serialize};
 
 use crate::buildings::{BuildingKind, Lot};
 use crate::castle::{CASTLE_MIN, CASTLE_SIZE, CastlePlan, paint_castle, site_castle};
 use crate::cells::{CellKind, Occupancy};
 use crate::geom::{Dir, Rect, bresenham};
 use crate::height::{HeightGrid, SAMPLE_STEP, world_gen_for};
-use crate::info::{GateInfo, GateKind, RoadInfo};
+use crate::info::{GateInfo, GateKind, RoadInfo, TownInfo};
 use crate::palette::PaletteKind;
 use crate::rng::TownRng;
 use crate::scenes::{
     Scene, SceneKind, force_lot, paint_harbour_town, paint_scene_yards, place_scenes,
 };
-use crate::town::{CELL_SIZE, TownPos, border_crossing, border_goal, town_in_cell};
+use crate::town::{
+    CELL_SIZE, TownPos, border_crossing, border_goal, town_containing, town_in_cell,
+};
 
 /// Pad around castle+town so hinterland farms, hamlets and camps fit.
 const HINTERLAND_PAD: i32 = 120;
+
+/// Disk snapshot format. Bump when plan or scene layout changes so files
+/// written by older code are not reused.
+pub const PLAN_CACHE_VERSION: u32 = 2;
+
+#[derive(Serialize, Deserialize)]
+struct PlanCacheFile {
+    version: u32,
+    info: TownInfo,
+}
 
 /// Cached plans, keyed by seed + cell.
 fn cache() -> &'static RwLock<HashMap<(u64, i32, i32), Arc<TownPlan>>> {
     static CACHE: OnceLock<RwLock<HashMap<(u64, i32, i32), Arc<TownPlan>>>> = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Serializable snapshots so the director can tick before a full `TownPlan` is
+/// rebuilt after a restart.
+fn info_cache() -> &'static RwLock<HashMap<(u64, i32, i32), TownInfo>> {
+    static CACHE: OnceLock<RwLock<HashMap<(u64, i32, i32), TownInfo>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn plans_dir() -> &'static RwLock<Option<PathBuf>> {
+    static DIR: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+    DIR.get_or_init(|| RwLock::new(None))
+}
+
+type CellKey = (u64, i32, i32);
+
+struct PlanQueue {
+    pending: HashSet<CellKey>,
+    jobs: VecDeque<CellKey>,
+}
+
+impl PlanQueue {
+    fn new() -> Self {
+        Self {
+            pending: HashSet::new(),
+            jobs: VecDeque::new(),
+        }
+    }
+}
+
+fn queue() -> &'static (Mutex<PlanQueue>, Condvar) {
+    static Q: OnceLock<(Mutex<PlanQueue>, Condvar)> = OnceLock::new();
+    Q.get_or_init(|| (Mutex::new(PlanQueue::new()), Condvar::new()))
+}
+
+fn bind_plans_dir(dir: PathBuf) {
+    *plans_dir()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir);
+}
+
+fn disk_path(seed: u64, cell_x: i32, cell_z: i32) -> Option<PathBuf> {
+    let guard = plans_dir()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = guard.as_ref()?;
+    Some(dir.join(format!("{seed}_{cell_x}_{cell_z}.json")))
+}
+
+fn persist_info(info: &TownInfo) {
+    let Some(path) = disk_path(info.seed, info.cell[0], info.cell[1]) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = PlanCacheFile {
+        version: PLAN_CACHE_VERSION,
+        info: info.clone(),
+    };
+    let Ok(json) = serde_json::to_string_pretty(&file) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+fn parse_cache_file(bytes: &[u8], seed: u64) -> Option<TownInfo> {
+    let file: PlanCacheFile = serde_json::from_slice(bytes).ok()?;
+    if file.version != PLAN_CACHE_VERSION {
+        return None;
+    }
+    if file.info.seed != seed {
+        return None;
+    }
+    Some(file.info)
+}
+
+fn load_info_from_disk(seed: u64, cell_x: i32, cell_z: i32) -> Option<TownInfo> {
+    let path = disk_path(seed, cell_x, cell_z)?;
+    let bytes = std::fs::read(path).ok()?;
+    let info = parse_cache_file(&bytes, seed)?;
+    if info.cell != [cell_x, cell_z] {
+        return None;
+    }
+    Some(info)
+}
+
+fn load_all_from_disk(seed: u64) {
+    let dir = {
+        let guard = plans_dir()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.clone()
+    };
+    let Some(dir) = dir else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut loaded = 0u32;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Some(info) = parse_cache_file(&bytes, seed) else {
+            continue;
+        };
+        let key = (info.seed, info.cell[0], info.cell[1]);
+        info_cache()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, info);
+        loaded += 1;
+    }
+    if loaded > 0 {
+        tracing::info!(seed, loaded, "kingdoms loaded town-info cache");
+    }
+}
+
+fn remember_plan(key: CellKey, plan: &Arc<TownPlan>) {
+    let info = TownInfo::from_plan(plan);
+    info_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, info.clone());
+    persist_info(&info);
+}
+
+fn ensure_worker() {
+    static START: OnceLock<()> = OnceLock::new();
+    START.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("kingdoms-plan".into())
+            .spawn(plan_worker);
+    });
+}
+
+fn plan_worker() {
+    loop {
+        let job = {
+            let (lock, cond) = queue();
+            let mut q = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            loop {
+                if let Some(job) = q.jobs.pop_front() {
+                    break job;
+                }
+                q = cond
+                    .wait(q)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        };
+        let (seed, cell_x, cell_z) = job;
+        if cached_plan(seed, cell_x, cell_z).is_some() {
+            finish_job(job);
+            continue;
+        }
+        if let Some(world_gen) = world_gen_for(seed) {
+            let _ = plan_for(seed, cell_x, cell_z, &world_gen);
+            tracing::info!(seed, cell_x, cell_z, "kingdoms plan ready");
+        }
+        finish_job(job);
+    }
+}
+
+fn warmup_set() -> &'static Mutex<HashSet<CellKey>> {
+    static SET: OnceLock<Mutex<HashSet<CellKey>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn finish_job(job: CellKey) {
+    let (lock, _) = queue();
+    let mut q = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    q.pending.remove(&job);
+    drop(q);
+    let mut warmup = warmup_set()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if warmup.remove(&job) && warmup.is_empty() {
+        tracing::info!("kingdoms plan warmup done");
+    }
+}
+
+/// Memory-only. Never generates.
+#[must_use]
+pub fn cached_plan(seed: u64, cell_x: i32, cell_z: i32) -> Option<Arc<TownPlan>> {
+    cache()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(seed, cell_x, cell_z))
+        .cloned()
+}
+
+/// Memory or disk `TownInfo`. Never generates a plan.
+#[must_use]
+pub fn cached_town_info(seed: u64, cell_x: i32, cell_z: i32) -> Option<TownInfo> {
+    let cached = info_cache()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(seed, cell_x, cell_z))
+        .cloned();
+    if let Some(info) = cached {
+        return Some(info);
+    }
+    if let Some(plan) = cached_plan(seed, cell_x, cell_z) {
+        let info = TownInfo::from_plan(&plan);
+        info_cache()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((seed, cell_x, cell_z), info.clone());
+        return Some(info);
+    }
+    let info = load_info_from_disk(seed, cell_x, cell_z)?;
+    info_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert((seed, cell_x, cell_z), info.clone());
+    Some(info)
+}
+
+/// Snapshots already in the memory info cache for `seed`.
+#[must_use]
+pub fn cached_infos(seed: u64) -> Vec<TownInfo> {
+    info_cache()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .filter(|info| info.seed == seed)
+        .cloned()
+        .collect()
+}
+
+/// Queue background generation. No-op if the full plan is already in memory.
+pub fn request_plan(seed: u64, cell_x: i32, cell_z: i32) {
+    if cached_plan(seed, cell_x, cell_z).is_some() {
+        finish_job((seed, cell_x, cell_z));
+        return;
+    }
+    ensure_worker();
+    let job = (seed, cell_x, cell_z);
+    let (lock, cond) = queue();
+    let mut q = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if q.pending.insert(job) {
+        q.jobs.push_back(job);
+        cond.notify_one();
+    }
+}
+
+fn warmup_cells(seed: u64, spawn_x: i32, spawn_z: i32, extra: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let spawn = town_containing(seed, spawn_x, spawn_z);
+    let mut cells = HashSet::new();
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            cells.insert((spawn.cell_x + dx, spawn.cell_z + dz));
+            cells.insert((dx, dz));
+        }
+    }
+    for &(cx, cz) in extra {
+        cells.insert((cx, cz));
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            cells.insert((cx + dx, cz + dz));
+        }
+    }
+    let mut out: Vec<(i32, i32)> = cells.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
+/// Bind the world folder, load disk snapshots, and queue spawn/front cells.
+pub fn bind_and_warmup(
+    seed: u64,
+    world_root: PathBuf,
+    spawn_x: i32,
+    spawn_z: i32,
+    extra: &[(i32, i32)],
+) {
+    bind_plans_dir(
+        world_root
+            .join("kingdoms-plans")
+            .join(format!("v{PLAN_CACHE_VERSION}")),
+    );
+    load_all_from_disk(seed);
+    let cells = warmup_cells(seed, spawn_x, spawn_z, extra);
+    tracing::info!(
+        seed,
+        spawn_x,
+        spawn_z,
+        cells = cells.len(),
+        "kingdoms plan warmup queued"
+    );
+    let mut pending = Vec::new();
+    for (cx, cz) in cells {
+        if cached_plan(seed, cx, cz).is_none() {
+            pending.push((seed, cx, cz));
+        }
+    }
+    if pending.is_empty() {
+        tracing::info!("kingdoms plan warmup done");
+        return;
+    }
+    warmup_set()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend(pending.iter().copied());
+    ensure_worker();
+    for (seed, cx, cz) in pending {
+        request_plan(seed, cx, cz);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn bind_plans_dir_for_test(dir: PathBuf) {
+    bind_plans_dir(dir);
+}
+
+#[cfg(test)]
+pub(crate) fn remember_plan_for_test(plan: Arc<TownPlan>) {
+    let key = (plan.seed, plan.origin.cell_x, plan.origin.cell_z);
+    cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, Arc::clone(&plan));
+    remember_plan(key, &plan);
+}
+
+#[cfg(test)]
+pub(crate) fn forget_memory_for_test(seed: u64, cell_x: i32, cell_z: i32) {
+    let key = (seed, cell_x, cell_z);
+    cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&key);
+    info_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&key);
 }
 
 /// Full planned town.
@@ -114,7 +478,10 @@ pub fn plan_for(seed: u64, cell_x: i32, cell_z: i32, world_gen: &WorldGenerator)
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     write.entry(key).or_insert_with(|| Arc::clone(&plan));
-    Arc::clone(write.get(&key).unwrap_or(&plan))
+    let stored = Arc::clone(write.get(&key).unwrap_or(&plan));
+    drop(write);
+    remember_plan(key, &stored);
+    stored
 }
 
 /// Builds or fetches a plan, using a registered generator when the cache misses.
@@ -1528,5 +1895,80 @@ mod tests {
             "expected a stitched road at the hashed crossing {goal:?}"
         );
         assert_eq!(cross.0, CELL_SIZE);
+    }
+
+    #[test]
+    fn cached_plan_does_not_generate() {
+        assert!(cached_plan(9_999_001, 0, 0).is_none());
+        assert!(cached_town_info(9_999_001, 0, 0).is_none());
+    }
+
+    #[test]
+    fn town_info_disk_round_trip_without_regenerating() {
+        let dir = std::env::temp_dir().join(format!(
+            "kingdoms-plans-test-{}-{}",
+            std::process::id(),
+            9_999_002
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        bind_plans_dir_for_test(dir.clone());
+        let origin = town_in_cell(9_999_002, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            6,
+        );
+        let plan = Arc::new(build_plan(9_999_002, origin, grid, PaletteKind::Oak));
+        remember_plan_for_test(Arc::clone(&plan));
+        forget_memory_for_test(9_999_002, 0, 0);
+        assert!(cached_plan(9_999_002, 0, 0).is_none());
+        let info = cached_town_info(9_999_002, 0, 0).expect("disk snapshot");
+        assert_eq!(info.id, "9999002:0:0");
+        assert_eq!(info.cell, [0, 0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_plan_cache_version_is_ignored() {
+        assert_eq!(PLAN_CACHE_VERSION, 2);
+        let dir = std::env::temp_dir().join(format!(
+            "kingdoms-plans-test-{}-{}",
+            std::process::id(),
+            9_999_003
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        bind_plans_dir_for_test(dir.clone());
+        let origin = town_in_cell(9_999_003, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            6,
+        );
+        let plan = Arc::new(build_plan(9_999_003, origin, grid, PaletteKind::Oak));
+        let info = TownInfo::from_plan(&plan);
+        let path = dir.join("9999003_0_0.json");
+        let stale = PlanCacheFile {
+            version: 1,
+            info: info.clone(),
+        };
+        std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        forget_memory_for_test(9_999_003, 0, 0);
+        assert!(cached_town_info(9_999_003, 0, 0).is_none());
+        std::fs::write(&path, info.to_json().unwrap()).unwrap();
+        forget_memory_for_test(9_999_003, 0, 0);
+        assert!(cached_town_info(9_999_003, 0, 0).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
