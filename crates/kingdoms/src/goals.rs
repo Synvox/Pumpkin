@@ -10,9 +10,15 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use pumpkin_core::entity::ai::goal::avoid_entity::AvoidEntityGoal;
 use pumpkin_core::entity::ai::goal::bow_attack::BowAttackGoal;
 use pumpkin_core::entity::ai::goal::break_door::BreakDoorGoal;
+use pumpkin_core::entity::ai::goal::melee_attack::MeleeAttackGoal;
+use pumpkin_core::entity::ai::goal::pathfind_to_raid::PathfindToRaidGoal;
+use pumpkin_core::entity::ai::goal::ranged_crossbow_attack::RangedCrossbowAttackGoal;
+use pumpkin_core::entity::ai::goal::wander_around::WanderAroundGoal;
 use pumpkin_core::entity::ai::goal::{Controls, Goal, GoalReach};
 use pumpkin_core::entity::ai::pathfinder::NavigatorGoal;
 use pumpkin_core::entity::mob::Mob;
+use pumpkin_core::entity::mob::patrol::LongDistancePatrolGoal;
+use pumpkin_core::entity::mob::raider::{HoldGroundAttackGoal, RaiderMoveThroughVillageGoal};
 use pumpkin_core::world::World;
 use pumpkin_data::data_component_impl::EquipmentSlot;
 use pumpkin_data::entity::EntityType;
@@ -28,6 +34,7 @@ use crate::faction::{
 use crate::flow::{DIRECT_RANGE, is_squad_leader, should_refresh_path};
 use crate::roles::VillagerRole;
 use crate::scene::ScenePost;
+use crate::siege::MarchJob;
 
 const POST_REACH_SQ: f64 = 6.25;
 const FLEE_SPEED: f64 = 0.85;
@@ -534,6 +541,73 @@ impl Goal for ThrottledMeleeGoal {
 }
 
 const ACQUIRE_AS_REACH: f64 = 28.0;
+const BOW_RANGE: f64 = 16.0;
+const BOW_RANGE_SQ: f64 = BOW_RANGE * BOW_RANGE;
+
+/// Look-at-target bow. Does not path; the director slides the archer.
+#[derive(Default)]
+pub struct ThrottledBowGoal {
+    cooldown: i32,
+}
+
+impl Goal for ThrottledBowGoal {
+    fn can_start(&mut self, mob: &dyn Mob) -> bool {
+        mob.get_mob_entity()
+            .get_target()
+            .is_some_and(|t| t.get_entity().is_alive())
+    }
+
+    fn should_continue(&mut self, mob: &dyn Mob) -> bool {
+        self.can_start(mob)
+    }
+
+    fn tick(&mut self, mob: &dyn Mob) {
+        let Some(target) = mob.get_mob_entity().get_target() else {
+            return;
+        };
+        let eye = target.get_entity().get_eye_pos();
+        mob.get_mob_entity()
+            .look_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .look_at_with_range(eye.x, eye.y, eye.z, 30.0, 30.0);
+        let pos = mob.get_entity().pos.load();
+        let tpos = target.get_entity().pos.load();
+        let dist_sq = (pos.x - tpos.x).hypot(pos.z - tpos.z).powi(2);
+        self.cooldown = (self.cooldown - 1).max(0);
+        if self.cooldown <= 0 && dist_sq <= BOW_RANGE_SQ {
+            self.cooldown = 20;
+            mob.get_mob_entity().living_entity.swing_hand();
+        }
+    }
+
+    fn controls(&self) -> Controls {
+        Controls::LOOK
+    }
+
+    fn tick_reach(&self, _mob: &dyn Mob, _running: bool) -> Option<GoalReach> {
+        Some(GoalReach {
+            entities: BOW_RANGE,
+            players: 0.0,
+            speed: 0.0,
+            changes_blocks: false,
+            links: Vec::new(),
+        })
+    }
+}
+
+/// Drop vanilla pathing combat so 200 soldiers do not each A* every few ticks.
+fn strip_vanilla_combat(mob: &dyn Mob) {
+    let goals = &mob.get_mob_entity().goals_selector;
+    goals.remove_goal::<MeleeAttackGoal>(mob);
+    goals.remove_goal::<BowAttackGoal>(mob);
+    goals.remove_goal::<RangedCrossbowAttackGoal>(mob);
+    goals.remove_goal::<HoldGroundAttackGoal>(mob);
+    goals.remove_goal::<LongDistancePatrolGoal>(mob);
+    goals.remove_goal::<PathfindToRaidGoal>(mob);
+    goals.remove_goal::<RaiderMoveThroughVillageGoal>(mob);
+    goals.remove_goal::<WanderAroundGoal>(mob);
+}
 
 fn equip(mob: &dyn Mob, slot: EquipmentSlot, item: &'static Item) {
     mob.get_mob_entity()
@@ -577,6 +651,7 @@ pub fn bind_citizen(
     match role {
         VillagerRole::Guard => {
             remove_avoid(mob);
+            strip_vanilla_combat(mob);
             equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_SWORD);
             equip(mob, EquipmentSlot::HEAD, &Item::CHAINMAIL_HELMET);
             equip(mob, EquipmentSlot::CHEST, &Item::CHAINMAIL_CHESTPLATE);
@@ -593,11 +668,12 @@ pub fn bind_citizen(
         }
         VillagerRole::Archer => {
             remove_avoid(mob);
+            strip_vanilla_combat(mob);
             equip(mob, EquipmentSlot::MAIN_HAND, &Item::BOW);
             equip(mob, EquipmentSlot::HEAD, &Item::LEATHER_HELMET);
             equip(mob, EquipmentSlot::CHEST, &Item::LEATHER_CHESTPLATE);
             mob.get_mob_entity()
-                .add_goal(2, BowAttackGoal::new(1.0, 20, 16.0));
+                .add_goal(2, ThrottledBowGoal::default());
             mob.get_mob_entity().add_goal(
                 3,
                 MoveToPostGoal::new(PATROL_SPEED, move |m| {
@@ -645,6 +721,9 @@ pub fn bind_golem(mob: &dyn Mob, town_id: &str, kingdom: &crate::faction::Kingdo
     tag(entity, &town_tag(town_id));
     tag(entity, &kingdom_tag(kingdom));
     tag(entity, &role_tag(VillagerRole::Guard.as_str()));
+    strip_vanilla_combat(mob);
+    mob.get_mob_entity()
+        .add_goal(2, ThrottledMeleeGoal::new(MELEE_SPEED));
     let town = town_id.to_owned();
     mob.get_mob_entity().add_goal(
         3,
@@ -655,7 +734,14 @@ pub fn bind_golem(mob: &dyn Mob, town_id: &str, kingdom: &crate::faction::Kingdo
 }
 
 /// Extra raid behaviour on top of vanilla pillager / vindicator goals.
-pub fn bind_raider(mob: &dyn Mob, town_id: &str, captain: bool, _world: &World, _camp: ScenePost) {
+pub fn bind_raider(
+    mob: &dyn Mob,
+    town_id: &str,
+    captain: bool,
+    job: MarchJob,
+    _world: &World,
+    _camp: ScenePost,
+) {
     let entity = mob.get_entity();
     mob.get_mob_entity()
         .persistence_required
@@ -663,6 +749,10 @@ pub fn bind_raider(mob: &dyn Mob, town_id: &str, captain: bool, _world: &World, 
     tag(entity, TAG_RAIDER);
     tag(entity, TAG_WIRED);
     tag(entity, &town_tag(town_id));
+    if let Some(job_tag) = job.tag() {
+        tag(entity, job_tag);
+    }
+    strip_vanilla_combat(mob);
     if captain {
         tag(entity, TAG_CAPTAIN);
         if let Some(raider) = mob.as_raider() {
@@ -673,24 +763,26 @@ pub fn bind_raider(mob: &dyn Mob, town_id: &str, captain: bool, _world: &World, 
             .set_item_slot(&EquipmentSlot::HEAD, banner);
     }
     if let Some(raider) = mob.as_raider() {
-        // Do not pin `patrol_target` on the camp: `LongDistancePatrolGoal`
-        // would hold them there, and `HoldGroundAttackGoal` stops the
-        // navigator once they have a target.
         raider.set_can_join_raid(true);
     }
-    let town = town_id.to_owned();
-    mob.get_mob_entity().add_goal(
-        3,
-        MarchOnTownGoal::new(move |m| crate::director::raid_march_post(m, &town)),
-    );
     if entity.entity_type == &EntityType::VINDICATOR {
+        mob.get_mob_entity()
+            .add_goal(2, ThrottledMeleeGoal::new(MELEE_SPEED));
         mob.get_mob_entity().add_goal(
             1,
             BreakDoorGoal::new(Arc::new(|d| {
                 d != Difficulty::Peaceful && d != Difficulty::Easy
             })),
         );
+    } else {
+        mob.get_mob_entity()
+            .add_goal(2, ThrottledBowGoal::default());
     }
+    let town = town_id.to_owned();
+    mob.get_mob_entity().add_goal(
+        3,
+        MarchOnTownGoal::new(move |m| crate::director::raid_march_post(m, &town)),
+    );
 }
 
 /// True when we already attached kingdom goals (reload-safe).

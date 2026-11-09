@@ -40,6 +40,9 @@ use crate::raid::{
 };
 use crate::roles::{PopulationSpec, VillagerRole, citizen_slots};
 use crate::scene::{ScenePost, TownInfoScene, TownScene};
+use crate::siege::{
+    self, HOLD_TICKS, MarchJob, TownOwner, WALL_WALK_LIFT, in_courtyard, tick_hold,
+};
 use crate::sim::{SimSnapshot, write_named_snapshots_with_kills};
 use crate::town::town_containing;
 
@@ -52,6 +55,10 @@ const SET_TARGET_RANGE: f64 = 12.0;
 const LIVE_MELEE_RANGE: f64 = 2.75;
 const LIVE_MELEE_DAMAGE: f32 = 4.0;
 const LIVE_MELEE_PERIOD: u32 = 10;
+const LIVE_RANGED_RANGE: f64 = 16.0;
+const LIVE_RANGED_DAMAGE: f32 = 3.0;
+const LIVE_RANGED_PERIOD: u32 = 20;
+const RAM_BREACH_RANGE: f64 = 5.0;
 
 const COMBAT_LOG_CAP: usize = 512;
 const RESPAWN_PERIOD: u32 = 200;
@@ -82,6 +89,8 @@ pub struct BattleState {
     pub waves: u32,
     pub raid_active: bool,
     pub threatened_gate: Option<(i32, i32)>,
+    pub owner: String,
+    pub gate_breached: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +112,9 @@ pub enum CombatKind {
     RaidStart,
     RaidStop,
     Victory,
+    Capture,
+    Retake,
+    Breach,
 }
 
 pub struct Director {
@@ -113,6 +125,8 @@ pub struct Director {
     worlds: Vec<Weak<World>>,
     pub events: VecDeque<CombatEvent>,
     pub path_budget: PathBudget,
+    owners: HashMap<String, TownOwner>,
+    ownership_path: Option<PathBuf>,
 }
 
 struct TownWar {
@@ -129,6 +143,11 @@ struct TownWar {
     raider_gate_dist: f64,
     ticketed: Vec<Vector2<i32>>,
     live_snaps: Vec<SimSnapshot>,
+    owner: TownOwner,
+    occupy_hold: u32,
+    retake_hold: u32,
+    gates_closed: bool,
+    gate_breached: bool,
 }
 
 struct Wired {
@@ -156,6 +175,8 @@ impl Director {
             worlds: Vec::new(),
             events: VecDeque::new(),
             path_budget: PathBudget::new(DEFAULT_PATH_CAP),
+            owners: HashMap::new(),
+            ownership_path: None,
         }
     }
 
@@ -164,6 +185,31 @@ impl Director {
             .retain(|w| w.upgrade().is_some_and(|o| !Arc::ptr_eq(&o, world)));
         self.worlds.push(Arc::downgrade(world));
         ensure_kingdom_teams(world);
+        let path = siege::ownership_path(&world.level.level_folder.root_folder);
+        self.owners = siege::load_ownership(&path);
+        self.ownership_path = Some(path);
+        for (id, owner) in &self.owners {
+            if let Some(war) = self.towns.get_mut(id) {
+                war.owner = owner.clone();
+            }
+            tracing::info!(
+                town = id.as_str(),
+                owner = owner.as_str(),
+                "loaded town ownership"
+            );
+        }
+    }
+
+    fn persist_owner(&mut self, town_id: &str, owner: TownOwner) {
+        self.owners.insert(town_id.to_owned(), owner.clone());
+        if let Some(war) = self.towns.get_mut(town_id) {
+            war.owner = owner;
+        }
+        if let Some(path) = &self.ownership_path
+            && let Err(err) = siege::save_ownership(path, &self.owners)
+        {
+            tracing::warn!(%err, "failed to persist kingdoms ownership");
+        }
     }
 
     #[must_use]
@@ -241,6 +287,10 @@ impl Director {
                 living: Vec::new(),
             });
             war.alarm = true;
+            war.gates_closed = false;
+            war.gate_breached = false;
+            war.occupy_hold = 0;
+            war.retake_hold = 0;
             if let Some(g) = gate {
                 war.threatened = Some(g);
             }
@@ -351,6 +401,8 @@ impl Director {
             waves,
             raid_active,
             threatened_gate: war.threatened.map(|p| (p.x, p.z)),
+            owner: war.owner.as_str().to_owned(),
+            gate_breached: war.gate_breached,
         })
     }
 
@@ -412,7 +464,42 @@ impl Director {
             .or_else(|| build_town_info(world, town_id))
             .ok_or_else(|| format!("no planned town {town_id}"))?;
         let scene = TownInfoScene::from_info(info);
-        let war = TownWar {
+        let owner = self
+            .owners
+            .get(town_id)
+            .cloned()
+            .unwrap_or_else(|| TownOwner::kingdom(&scene.kingdom()));
+        let war = TownWar::from_scene(scene, owner);
+        self.towns.insert(town_id.to_owned(), war);
+        self.towns
+            .get_mut(town_id)
+            .ok_or_else(|| "town insert failed".to_owned())
+    }
+
+    pub(crate) fn ensure_town_from_info(&mut self, info: TownInfo) {
+        let id = info.id.clone();
+        let owner = self
+            .owners
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| TownOwner::kingdom(&KingdomId::for_town(&info)));
+        self.towns.entry(id).or_insert_with(|| {
+            let scene = TownInfoScene::from_info(info);
+            TownWar::from_scene(scene, owner)
+        });
+    }
+
+    fn push_event(&mut self, event: CombatEvent) {
+        if self.events.len() >= COMBAT_LOG_CAP {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+}
+
+impl TownWar {
+    fn from_scene(scene: TownInfoScene, owner: TownOwner) -> Self {
+        Self {
             info_id: scene.town_id().to_owned(),
             kingdom: scene.kingdom(),
             scene,
@@ -426,44 +513,14 @@ impl Director {
             raider_gate_dist: f64::INFINITY,
             ticketed: Vec::new(),
             live_snaps: Vec::new(),
-        };
-        self.towns.insert(town_id.to_owned(), war);
-        self.towns
-            .get_mut(town_id)
-            .ok_or_else(|| "town insert failed".to_owned())
-    }
-
-    pub(crate) fn ensure_town_from_info(&mut self, info: TownInfo) {
-        let id = info.id.clone();
-        self.towns.entry(id).or_insert_with(|| {
-            let scene = TownInfoScene::from_info(info);
-            TownWar {
-                info_id: scene.town_id().to_owned(),
-                kingdom: scene.kingdom(),
-                scene,
-                alarm: false,
-                threatened: None,
-                raid: None,
-                defenders_killed: 0,
-                raiders_killed: 0,
-                wired: HashMap::new(),
-                fields: HashMap::new(),
-                raider_gate_dist: f64::INFINITY,
-                ticketed: Vec::new(),
-                live_snaps: Vec::new(),
-            }
-        });
-    }
-
-    fn push_event(&mut self, event: CombatEvent) {
-        if self.events.len() >= COMBAT_LOG_CAP {
-            self.events.pop_front();
+            owner,
+            occupy_hold: 0,
+            retake_hold: 0,
+            gates_closed: false,
+            gate_breached: false,
         }
-        self.events.push_back(event);
     }
-}
 
-impl TownWar {
     fn field_toward(&mut self, dest: ScenePost) -> Arc<FlowField> {
         let key = crate::flow::cache_key(dest);
         if let Some(field) = self.fields.get(&key) {
@@ -529,6 +586,7 @@ pub fn post_for_role(mob: &dyn Mob, town_id: &str, role: VillagerRole) -> Option
     let dir = lock();
     let war = dir.towns.get(town_id)?;
     let post = match role {
+        VillagerRole::Guard if war.alarm && war.gate_breached => war.scene.keep(),
         VillagerRole::Guard if war.alarm => war.threatened.unwrap_or_else(|| war.scene.keep()),
         VillagerRole::Guard => pick_home(mob, war.scene.guard_posts(), war.scene.keep()),
         VillagerRole::Archer => pick_home(mob, war.scene.archer_posts(), war.scene.keep()),
@@ -537,7 +595,11 @@ pub fn post_for_role(mob: &dyn Mob, town_id: &str, role: VillagerRole) -> Option
         VillagerRole::Builder => war.scene.keep(),
     };
     let world = mob.get_entity().world.load();
-    Some(PostTarget::from_post(post, standing_y(&world, post)))
+    let mut y = standing_y(&world, post);
+    if role == VillagerRole::Archer {
+        y += WALL_WALK_LIFT;
+    }
+    Some(PostTarget::from_post(post, y))
 }
 
 #[must_use]
@@ -561,7 +623,11 @@ pub fn is_alarmed_for(_mob: &dyn Mob, town_id: &str) -> bool {
 pub fn raid_march_post(mob: &dyn Mob, town_id: &str) -> Option<PostTarget> {
     let dir = lock();
     let war = dir.towns.get(town_id)?;
-    let dest = war.threatened.unwrap_or_else(|| war.scene.keep());
+    let dest = if war.gate_breached {
+        war.scene.keep()
+    } else {
+        war.threatened.unwrap_or_else(|| war.scene.keep())
+    };
     let world = mob.get_entity().world.load();
     Some(PostTarget::from_post(dest, standing_y(&world, dest)))
 }
@@ -684,31 +750,13 @@ pub fn tick_world(world: &Arc<World>) {
         );
         drop(dir);
         if raid_on {
-            if let Some(server) = world.server.upgrade() {
-                tracing::info!(
-                    tick,
-                    director_ms = ms,
-                    tps = server.get_tps(),
-                    mspt = server.get_mspt(),
-                    defenders = def_n,
-                    raiders = raid_n,
-                    defender_kills = def_k,
-                    raider_kills = raid_k,
-                    raider_gate_dist = gate_d,
-                    "kingdoms raid tick"
-                );
-            } else {
-                tracing::info!(
-                    tick,
-                    director_ms = ms,
-                    defenders = def_n,
-                    raiders = raid_n,
-                    defender_kills = def_k,
-                    raider_kills = raid_k,
-                    raider_gate_dist = gate_d,
-                    "kingdoms raid tick"
-                );
-            }
+            let (tps, mspt) = world
+                .server
+                .upgrade()
+                .map_or((0.0, ms), |s| (s.get_tps(), s.get_mspt()));
+            tracing::info!(
+                "kingdoms raid tick tick={tick} director_ms={ms:.2} tps={tps:.1} mspt={mspt:.2} defenders={def_n} raiders={raid_n} kills={def_k}/{raid_k} gate_dist={gate_d:.1}"
+            );
         } else if ms > 1.0 {
             tracing::debug!(ms, tick, "kingdoms director tick");
         }
@@ -822,6 +870,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     let mut pending_events = Vec::new();
     let mut pending_release: Vec<Vector2<i32>> = Vec::new();
     let mut dump_plots = false;
+    let mut should_close_gates = false;
     {
         let mut dir = lock();
         {
@@ -850,6 +899,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     note: format!("{town_id} alarm"),
                 });
                 tracing::info!(town = town_id, "town alarm");
+            }
+            if war.alarm && !war.gates_closed {
+                should_close_gates = true;
+                war.gates_closed = true;
             }
 
             // Refresh living raid ids from snapshots.
@@ -922,9 +975,23 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     if dump_plots {
         dump_live_plots(Some(town_id));
     }
+    if should_close_gates {
+        let gates = {
+            let dir = lock();
+            dir.towns
+                .get(town_id)
+                .map(|w| w.scene.gates().to_vec())
+                .unwrap_or_default()
+        };
+        siege::close_gates(world, &gates, |x, z| {
+            standing_y(world, ScenePost::new(x, z))
+        });
+    }
 
-    // Assign targets + LOD without holding the director lock across nav.
-    let (alarm, march_dest, keep_dest) = {
+    // Director-owned combat: NoAI + flow-field slide. Vanilla melee/bow/path
+    // goals stay off during a raid so 200 vs 200 does not A* or shove.
+    let loop_started = Instant::now();
+    let (alarm, march_dest, keep_dest, ram_dest, ladder_dest, keep_rect, breached) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
             return;
@@ -932,10 +999,32 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         let dest = war.threatened.unwrap_or_else(|| war.scene.keep());
         let y = standing_y(world, dest);
         let keep = war.scene.keep();
+        let ram = war.scene.ram_posts().first().copied().unwrap_or(dest);
+        let ladder = war
+            .scene
+            .ladder_posts()
+            .first()
+            .copied()
+            .or_else(|| {
+                war.scene
+                    .wall()
+                    .iter()
+                    .min_by_key(|p| (p[0] - dest.x).abs() + (p[1] - dest.z).abs())
+                    .map(|p| ScenePost::new(p[0], p[1]))
+            })
+            .unwrap_or(dest);
         (
             war.alarm,
             PostTarget::from_post(dest, y),
             PostTarget::from_post(keep, standing_y(world, keep)),
+            PostTarget::from_post(ram, standing_y(world, ram)),
+            PostTarget {
+                x: ladder.x,
+                y: standing_y(world, ladder) + WALL_WALK_LIFT,
+                z: ladder.z,
+            },
+            war.scene.keep_rect(),
+            war.gate_breached,
         )
     };
     let mut n_ticking = 0u32;
@@ -943,6 +1032,11 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     let mut n_active = 0u32;
     let mut n_no_ai = 0u32;
     let mut n_slid = 0u32;
+    let mut n_melee = 0u32;
+    let mut n_ranged = 0u32;
+    let mut ram_at_gate = false;
+    let mut raiders_in_keep = 0u32;
+    let mut defenders_in_keep = 0u32;
     let active_chunks = world
         .active_chunks
         .read()
@@ -964,10 +1058,17 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             continue;
         };
         let pos = base.pos.load();
+        if in_courtyard(keep_rect, pos.x, pos.z) {
+            match faction {
+                Faction::Pillager => raiders_in_keep += 1,
+                Faction::Kingdom(_) => defenders_in_keep += 1,
+                Faction::Neutral => {}
+            }
+        }
         let hostile = buckets.nearest_hostile(pos.x, pos.z, faction, ACQUIRE_RANGE);
         let in_combat = hostile.is_some();
-        let close_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, SET_TARGET_RANGE);
         let melee_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, LIVE_MELEE_RANGE);
+        let ranged_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, LIVE_RANGED_RANGE);
         let tier = if in_combat {
             LodTier::Combat
         } else if alarm {
@@ -976,40 +1077,65 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             LodTier::Idle
         };
         let id = base.entity_id;
-        // Cheap flow-field steering still needs the goal tick. Only idle
-        // garrisons get `set_no_ai`; a live raid must actually walk.
-        let skip = !alarm && !tier.should_tick(id, tick);
-        mob.get_mob_entity().set_no_ai(skip);
-        if skip {
+        // Raid soldiers never run vanilla AI. The director slides them.
+        let skip = if alarm {
+            false
+        } else {
+            !tier.should_tick(id, tick)
+        };
+        mob.get_mob_entity().set_no_ai(alarm || skip);
+        if alarm {
+            n_no_ai += 1;
+        } else if skip {
             n_no_ai += 1;
             continue;
         }
-        if let Some(h) = close_hostile
-            && let Some(target) = world.get_entity_by_id(h.entity_id)
-        {
-            mob.set_mob_target(Some(target));
-        } else if close_hostile.is_none() {
-            mob.set_mob_target(None);
+        if !alarm {
+            if let Some(h) = buckets.nearest_hostile(pos.x, pos.z, faction, SET_TARGET_RANGE)
+                && let Some(target) = world.get_entity_by_id(h.entity_id)
+            {
+                mob.set_mob_target(Some(target));
+            } else {
+                mob.set_mob_target(None);
+            }
+            let dest = match faction {
+                Faction::Pillager => march_dest,
+                Faction::Kingdom(_) => keep_dest,
+                Faction::Neutral => continue,
+            };
+            let _ = drive_live(mob, dest, in_combat);
         }
-        let dest = match faction {
-            Faction::Pillager => march_dest,
-            Faction::Kingdom(_) if in_combat || alarm => march_dest,
-            Faction::Kingdom(_) => keep_dest,
-            Faction::Neutral => continue,
-        };
-        let _ = drive_live(mob, dest, in_combat);
-        // World::tick skips entities whose chunk is not in `active_chunks`
-        // and `is_chunk_loaded`. If this mob has never been world-ticked,
-        // or vanilla pathfinding has stalled far from the gate, slide along
-        // the flow field. Director melee covers the same missed-tick case
-        // and also fires when they are in range so live kills show up even
-        // if vanilla melee goals never lock.
+
+        let job = job_of(base);
+        let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
+        let dest = dest_for(
+            faction,
+            job,
+            role,
+            alarm,
+            in_combat,
+            breached,
+            march_dest,
+            keep_dest,
+            ram_dest,
+            ladder_dest,
+        );
         let dest_v = dest.vec();
-        let far = (pos.x - dest_v.x).hypot(pos.z - dest_v.z) > DIRECT_RANGE;
-        let unticked = base.tick_count.load(Ordering::Relaxed) == 0;
-        if unticked || far {
+        let dist = (pos.x - dest_v.x).hypot(pos.z - dest_v.z);
+        if job == MarchJob::Ram && dist < RAM_BREACH_RANGE && !breached {
+            ram_at_gate = true;
+        }
+        let period = slide_period(dist, in_combat);
+        if alarm && tick.is_multiple_of(period) {
             slide_along_field(base, town_id, dest);
             n_slid += 1;
+        } else if !alarm {
+            let far = dist > DIRECT_RANGE;
+            let unticked = base.tick_count.load(Ordering::Relaxed) == 0;
+            if unticked || far {
+                slide_along_field(base, town_id, dest);
+                n_slid += 1;
+            }
         }
         if tick.is_multiple_of(LIVE_MELEE_PERIOD)
             && let Some(h) = melee_hostile
@@ -1023,8 +1149,53 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 Some(entity.as_ref()),
                 Some(entity.as_ref()),
             );
+            n_melee += 1;
+        } else if tick.is_multiple_of(LIVE_RANGED_PERIOD)
+            && is_ranged_fighter(base, role)
+            && let Some(h) = ranged_hostile
+            && let Some(target) = world.get_entity_by_id(h.entity_id)
+        {
+            let _ = target.damage_with_context(
+                target.as_ref(),
+                LIVE_RANGED_DAMAGE,
+                DamageType::ARROW,
+                None,
+                Some(entity.as_ref()),
+                Some(entity.as_ref()),
+            );
+            n_ranged += 1;
         }
     }
+    let loop_us = loop_started.elapsed().as_micros();
+    if ram_at_gate && !breached {
+        let gate = {
+            let dir = lock();
+            dir.towns.get(town_id).and_then(|w| {
+                w.threatened
+                    .or_else(|| w.scene.gates().first().map(|g| ScenePost::new(g.x, g.z)))
+                    .zip(w.scene.gates().first().copied())
+            })
+        };
+        if let Some((post, gate)) = gate {
+            let cleared = siege::breach_gate(world, gate, standing_y(world, post));
+            if cleared > 0 {
+                let mut dir = lock();
+                if let Some(war) = dir.towns.get_mut(town_id) {
+                    war.gate_breached = true;
+                }
+                dir.push_event(CombatEvent {
+                    tick,
+                    kind: CombatKind::Breach,
+                    actor: 0,
+                    other: Some(cleared as i32),
+                    x: f64::from(gate.x),
+                    z: f64::from(gate.z),
+                    note: format!("{town_id} ram breached gate"),
+                });
+            }
+        }
+    }
+    apply_capture(town_id, tick, raiders_in_keep, defenders_in_keep);
 
     if alarm && tick.is_multiple_of(20) {
         let snap = SimSnapshot {
@@ -1055,15 +1226,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         std::thread::spawn(move || dump_live_plots(Some(&town)));
     }
     if tick.is_multiple_of(100) && alarm {
+        let n_entities = snapshots.len();
         tracing::info!(
-            town = town_id,
-            n_ticking,
-            n_loaded,
-            n_active,
-            n_no_ai,
-            n_slid,
-            entities = snapshots.len(),
-            "kingdoms raid entity tick"
+            "kingdoms raid entity tick town={town_id} ticking={n_ticking} loaded={n_loaded} active={n_active} no_ai={n_no_ai} slid={n_slid} melee={n_melee} ranged={n_ranged} loop_us={loop_us} keep_r={raiders_in_keep} keep_d={defenders_in_keep} entities={n_entities}"
         );
     }
 
@@ -1087,35 +1252,44 @@ fn spawn_wave(
 ) {
     let count = spec.raiders_in_wave(wave);
     let members = compose_wave(count, wave);
-    let spots: Vec<ScenePost> = {
+    let (tents, rams, ladders): (Vec<ScenePost>, Vec<ScenePost>, Vec<ScenePost>) = {
         let dir = lock();
         dir.towns.get(town_id).map_or_else(
-            || vec![camp],
+            || (vec![camp], Vec::new(), Vec::new()),
             |w| {
-                let camps = w.scene.raid_camps();
-                if camps.is_empty() {
-                    vec![camp]
-                } else {
-                    camps.to_vec()
+                let mut tents = w.scene.raid_camps().to_vec();
+                if tents.is_empty() {
+                    tents.push(camp);
                 }
+                (
+                    tents,
+                    w.scene.ram_posts().to_vec(),
+                    w.scene.ladder_posts().to_vec(),
+                )
             },
         )
     };
     let mut spawned_ids = Vec::new();
     for (i, member) in members.iter().enumerate() {
-        let post = spots[i % spots.len()];
+        let vindicator = member.entity_type == &EntityType::VINDICATOR;
+        let job = MarchJob::assign(i, vindicator);
+        let post = match job {
+            MarchJob::Ram if !rams.is_empty() => rams[i % rams.len()],
+            MarchJob::Ladder if !ladders.is_empty() => ladders[i % ladders.len()],
+            _ => tents[i % tents.len()],
+        };
         let y = standing_y(world, post);
-        let ring = (i / spots.len().max(1)) as u16;
+        let ring = (i / tents.len().max(1)) as u16;
         let pos = spawn_offset(post, ring, y);
         let entity = Entity::new(world.clone(), pos, member.entity_type);
-        let base: Arc<dyn EntityBase> = if member.entity_type == &EntityType::VINDICATOR {
+        let base: Arc<dyn EntityBase> = if vindicator {
             pumpkin_core::entity::mob::vindicator::VindicatorEntity::new(entity)
                 as Arc<dyn EntityBase>
         } else {
             pumpkin_core::entity::mob::pillager::PillagerEntity::new(entity) as Arc<dyn EntityBase>
         };
         if let Some(mob) = base.get_mob() {
-            bind_raider(mob, town_id, member.captain, world, post);
+            bind_raider(mob, town_id, member.captain, job, world, post);
             add_pillager_team(world, &base.get_scoreboard_name());
         }
         let id = base.get_entity().entity_id;
@@ -1211,7 +1385,14 @@ pub fn rebind_if_needed(entity: &dyn EntityBase) {
     };
     if is_raider {
         let camp = ScenePost::new(base.block_pos.load().0.x, base.block_pos.load().0.z);
-        bind_raider(mob, &town_id, false, &base.world.load(), camp);
+        let job = {
+            let tags = base
+                .scoreboard_tags
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            MarchJob::from_tags(tags.iter())
+        };
+        bind_raider(mob, &town_id, false, job, &base.world.load(), camp);
         return;
     }
     let Some(kingdom) = kingdom else {
@@ -1364,15 +1545,131 @@ fn slide_along_field(entity: &Entity, town_id: &str, dest: PostTarget) {
     let dx = wx - pos.x;
     let dz = wz - pos.z;
     let len = dx.hypot(dz);
+    let climb = (f64::from(dest.y) - pos.y).clamp(-0.45, 0.45);
     if len < 0.05 {
+        if climb.abs() < 0.02 {
+            return;
+        }
+        entity.set_pos(Vector3::new(pos.x, pos.y + climb, pos.z));
         return;
     }
     let step = SLIDE_STEP.min(len);
     entity.set_pos(Vector3::new(
         pos.x + dx / len * step,
-        pos.y,
+        pos.y + climb,
         pos.z + dz / len * step,
     ));
+}
+
+fn job_of(entity: &Entity) -> MarchJob {
+    let tags = entity
+        .scoreboard_tags
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    MarchJob::from_tags(tags.iter())
+}
+
+fn is_ranged_fighter(entity: &Entity, role: Option<VillagerRole>) -> bool {
+    role == Some(VillagerRole::Archer) || entity.entity_type == &EntityType::PILLAGER
+}
+
+fn slide_period(dist: f64, in_combat: bool) -> u32 {
+    if in_combat || dist < 24.0 {
+        1
+    } else if dist < 64.0 {
+        2
+    } else {
+        4
+    }
+}
+
+fn dest_for(
+    faction: &Faction,
+    job: MarchJob,
+    role: Option<VillagerRole>,
+    alarm: bool,
+    in_combat: bool,
+    breached: bool,
+    march_dest: PostTarget,
+    keep_dest: PostTarget,
+    _ram_dest: PostTarget,
+    ladder_dest: PostTarget,
+) -> PostTarget {
+    match faction {
+        Faction::Neutral => keep_dest,
+        Faction::Kingdom(_) if role == Some(VillagerRole::Archer) => ladder_dest,
+        Faction::Kingdom(_) if alarm || in_combat => {
+            if breached {
+                keep_dest
+            } else {
+                march_dest
+            }
+        }
+        Faction::Kingdom(_) => keep_dest,
+        Faction::Pillager => {
+            if job == MarchJob::Ladder && !breached {
+                ladder_dest
+            } else if breached {
+                keep_dest
+            } else {
+                march_dest
+            }
+        }
+    }
+}
+
+fn apply_capture(town_id: &str, tick: u32, raiders_in_keep: u32, defenders_in_keep: u32) {
+    let (captured, retaken, kingdom, keep) = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        let update = tick_hold(
+            &war.owner,
+            raiders_in_keep,
+            defenders_in_keep,
+            war.occupy_hold,
+            war.retake_hold,
+        );
+        war.occupy_hold = update.occupy_hold;
+        war.retake_hold = update.retake_hold;
+        (
+            update.captured,
+            update.retaken,
+            war.kingdom.clone(),
+            war.scene.keep(),
+        )
+    };
+    if captured {
+        lock().persist_owner(town_id, TownOwner::Pillager);
+        lock().push_event(CombatEvent {
+            tick,
+            kind: CombatKind::Capture,
+            actor: raiders_in_keep as i32,
+            other: Some(defenders_in_keep as i32),
+            x: f64::from(keep.x),
+            z: f64::from(keep.z),
+            note: format!("{town_id} captured by pillagers after {HOLD_TICKS} ticks"),
+        });
+        tracing::info!(
+            "kingdoms town captured town={town_id} raiders_in_keep={raiders_in_keep} hold={HOLD_TICKS}"
+        );
+    } else if retaken {
+        let owner = TownOwner::kingdom(&kingdom);
+        lock().persist_owner(town_id, owner);
+        lock().push_event(CombatEvent {
+            tick,
+            kind: CombatKind::Retake,
+            actor: defenders_in_keep as i32,
+            other: Some(raiders_in_keep as i32),
+            x: f64::from(keep.x),
+            z: f64::from(keep.z),
+            note: format!("{town_id} retaken by villagers"),
+        });
+        tracing::info!(
+            "kingdoms town retaken town={town_id} defenders_in_keep={defenders_in_keep}"
+        );
+    }
 }
 
 fn plot_dir() -> Option<PathBuf> {
@@ -1576,5 +1873,26 @@ mod tests {
         ));
         dir.tick = 10;
         assert_eq!(dir.next_raid_id, 1);
+    }
+
+    #[test]
+    fn battle_state_exposes_owner_and_breach() {
+        let state = BattleState {
+            town_id: "20261025:0:0".to_owned(),
+            kingdom: "alder".to_owned(),
+            alarm: true,
+            defenders_alive: 0,
+            raiders_alive: 12,
+            defenders_killed: 20,
+            raiders_killed: 3,
+            wave: 1,
+            waves: 1,
+            raid_active: true,
+            threatened_gate: Some((1, 2)),
+            owner: "pillager".to_owned(),
+            gate_breached: true,
+        };
+        assert_eq!(state.owner, "pillager");
+        assert!(state.gate_breached);
     }
 }

@@ -96,6 +96,10 @@ pub enum SpawnRole {
     PillagerSpawn,
     /// Pillager camp court rally.
     PillagerRally,
+    /// Covered ram in the camp siege yard.
+    SiegeRam,
+    /// Stacked siege ladders in the camp siege yard.
+    SiegeLadder,
 }
 
 /// One spawn or rally column. `y` is planner surface + 1 (standing height).
@@ -270,15 +274,44 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             SceneKind::PillagerCamp => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::PillagerRally, cx, cz));
-                for z in (scene.rect.min_z + 3..scene.rect.max_z - 2).step_by(6) {
-                    for x in (scene.rect.min_x + 3..scene.rect.max_x - 2).step_by(6) {
-                        if matches!(
-                            plan.occ.kind(x, z),
-                            crate::cells::CellKind::Tent
-                                | crate::cells::CellKind::WarTent
-                                | crate::cells::CellKind::CampCourt
-                        ) {
-                            spawns.push(at(SpawnRole::PillagerSpawn, x, z));
+                // Walk every column. A coarse `step_by(6)` misses the rebuilt
+                // 4×3 tents (they sit between the old sample points).
+                let mut tents = 0u32;
+                let mut rams = 0u32;
+                let mut ladders = 0u32;
+                for z in scene.rect.min_z..=scene.rect.max_z {
+                    for x in scene.rect.min_x..=scene.rect.max_x {
+                        match plan.occ.kind(x, z) {
+                            crate::cells::CellKind::Tent | crate::cells::CellKind::WarTent
+                                if tents < 16 && (x + z) % 2 == 0 =>
+                            {
+                                spawns.push(at(SpawnRole::PillagerSpawn, x, z));
+                                tents += 1;
+                            }
+                            crate::cells::CellKind::SiegeRam if rams < 8 && (x + z) % 3 == 0 => {
+                                spawns.push(at(SpawnRole::SiegeRam, x, z));
+                                rams += 1;
+                            }
+                            crate::cells::CellKind::SiegeLadder
+                                if ladders < 16 && (x + z) % 2 == 0 =>
+                            {
+                                spawns.push(at(SpawnRole::SiegeLadder, x, z));
+                                ladders += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if tents == 0 {
+                    for z in (scene.rect.min_z + 3..scene.rect.max_z - 2).step_by(4) {
+                        for x in (scene.rect.min_x + 3..scene.rect.max_x - 2).step_by(4) {
+                            if matches!(
+                                plan.occ.kind(x, z),
+                                crate::cells::CellKind::CampCourt
+                                    | crate::cells::CellKind::PalisadeGate
+                            ) {
+                                spawns.push(at(SpawnRole::PillagerSpawn, x, z));
+                            }
                         }
                     }
                 }
@@ -355,5 +388,46 @@ mod tests {
         assert_eq!(back.id, info.id);
         assert_eq!(back.castle.keep, info.castle.keep);
         assert_eq!(back.spawns.len(), info.spawns.len());
+    }
+
+    #[test]
+    fn camp_spawns_sit_on_rebuilt_tents_and_siege_engines() {
+        let origin = town_in_cell(3, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            70,
+            8,
+            4,
+        );
+        let plan = build_plan(3, origin, grid, PaletteKind::Oak);
+        let info = TownInfo::from_plan(&plan);
+        let tents: Vec<_> = info
+            .spawns
+            .iter()
+            .filter(|s| s.role == SpawnRole::PillagerSpawn)
+            .collect();
+        assert!(!tents.is_empty(), "raiders should spawn from camp tents");
+        let on_tent = tents.iter().filter(|s| {
+            matches!(
+                plan.occ.kind(s.x, s.z),
+                crate::cells::CellKind::Tent | crate::cells::CellKind::WarTent
+            )
+        });
+        assert!(
+            on_tent.count() >= 4,
+            "PillagerSpawn posts should land on Tent/WarTent cells, got {tents:?}"
+        );
+        assert!(
+            info.spawns.iter().any(|s| s.role == SpawnRole::SiegeRam),
+            "covered ram should be a spawn post"
+        );
+        assert!(
+            info.spawns.iter().any(|s| s.role == SpawnRole::SiegeLadder),
+            "siege ladders should be spawn posts"
+        );
     }
 }

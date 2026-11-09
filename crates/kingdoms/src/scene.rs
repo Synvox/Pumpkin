@@ -81,8 +81,11 @@ pub trait TownScene {
     fn civilian_homes(&self) -> &[ScenePost];
     fn rally_points(&self) -> &[ScenePost];
     fn raid_camps(&self) -> &[ScenePost];
+    fn ram_posts(&self) -> &[ScenePost];
+    fn ladder_posts(&self) -> &[ScenePost];
     fn road_approach(&self) -> Option<ScenePost>;
     fn wall(&self) -> &[[i32; 2]];
+    fn keep_rect(&self) -> Rect;
 
     /// Gate nearest to a world column. Used when pillagers approach.
     fn nearest_gate(&self, x: i32, z: i32) -> Option<GateInfo> {
@@ -115,6 +118,8 @@ pub struct TownInfoScene {
     civilian_homes: Vec<ScenePost>,
     rally_points: Vec<ScenePost>,
     raid_camps: Vec<ScenePost>,
+    ram_posts: Vec<ScenePost>,
+    ladder_posts: Vec<ScenePost>,
     road_approach: Option<ScenePost>,
 }
 
@@ -149,6 +154,8 @@ impl TownInfoScene {
         if raid_camps.is_empty() {
             raid_camps = posts(&info, SpawnRole::PillagerRally);
         }
+        let ram_posts = posts(&info, SpawnRole::SiegeRam);
+        let ladder_posts = posts(&info, SpawnRole::SiegeLadder);
         let road_approach =
             first_role(&info, SpawnRole::PillagerRally).or_else(|| raid_camps.first().copied());
 
@@ -161,6 +168,8 @@ impl TownInfoScene {
             civilian_homes,
             rally_points,
             raid_camps,
+            ram_posts,
+            ladder_posts,
             road_approach,
         }
     }
@@ -217,12 +226,24 @@ impl TownScene for TownInfoScene {
         &self.raid_camps
     }
 
+    fn ram_posts(&self) -> &[ScenePost] {
+        &self.ram_posts
+    }
+
+    fn ladder_posts(&self) -> &[ScenePost] {
+        &self.ladder_posts
+    }
+
     fn road_approach(&self) -> Option<ScenePost> {
         self.road_approach
     }
 
     fn wall(&self) -> &[[i32; 2]] {
         &self.info.town_wall
+    }
+
+    fn keep_rect(&self) -> Rect {
+        self.info.castle.inner
     }
 }
 
@@ -284,6 +305,10 @@ mod tests {
                 .spawns
                 .iter()
                 .any(|s| s.role == SpawnRole::PillagerSpawn || s.role == SpawnRole::PillagerRally)
+        );
+        assert!(
+            !scene.ram_posts().is_empty() && !scene.ladder_posts().is_empty(),
+            "camp siege yard should expose ram and ladder posts"
         );
         assert_eq!(scene.kingdom().as_str(), "alder");
         let keep = scene.keep();

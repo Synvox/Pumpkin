@@ -61,6 +61,7 @@ pub mod rng;
 pub mod roles;
 pub mod scene;
 pub mod scenes;
+pub mod siege;
 pub mod sim;
 pub mod stamp;
 pub mod town;
@@ -80,6 +81,7 @@ pub use raid::RaidSpec;
 pub use roles::VillagerRole;
 pub use scene::{TownInfoScene, TownScene};
 pub use scenes::{Scene, SceneKind};
+pub use siege::TownOwner;
 pub use stamp::{
     PlannedBlock, planned_block, planned_block_at, planned_blocks_in, planned_blocks_in_at,
     planned_building_blocks, planned_building_blocks_for, planned_column, planned_column_at,

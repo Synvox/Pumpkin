@@ -1527,6 +1527,17 @@ impl LivingEntity {
     }
 
     fn push_entities(&self, dyn_self: &dyn EntityBase) {
+        // NoAI already skips travel. Shoving still ran `get_all_at_box` per
+        // living entity, which at 200 packed soldiers dominated the tick.
+        // Kingdoms tags raid soldiers NoAI and drives them from the director;
+        // this skip is the one-line hook that makes that cheap. Documented in
+        // crates/kingdoms/KINGDOMS.md.
+        if dyn_self
+            .get_mob()
+            .is_some_and(|mob| mob.get_mob_entity().is_no_ai())
+        {
+            return;
+        }
         let world = self.entity.world.load();
         let entity_bb = self.entity.bounding_box.load();
         let own_team = dyn_self.get_team();

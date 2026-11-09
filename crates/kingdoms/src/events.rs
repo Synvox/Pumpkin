@@ -110,15 +110,13 @@ impl EventHandler<EntityDamageByEntityEvent> for FriendlyFireHandler {
                 if is_allied(&a, &b) {
                     event.cancelled = true;
                     event.damage = 0.0;
-                } else if is_kingdoms_tagged(victim.get_entity())
-                    || is_kingdoms_tagged(damager.get_entity())
+                } else if (is_kingdoms_tagged(victim.get_entity())
+                    || is_kingdoms_tagged(damager.get_entity()))
+                    && damager_id % 17 == 0
                 {
                     tracing::info!(
-                        attacker = damager_id,
-                        victim = victim_id,
-                        damage = event.damage,
-                        cause = %event.cause,
-                        "kingdoms combat"
+                        "kingdoms combat attacker={damager_id} victim={victim_id} damage={}",
+                        event.damage
                     );
                 }
                 return;
