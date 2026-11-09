@@ -151,10 +151,76 @@ fn write_scene_renders(
     {
         save(
             &out_dir.join(format!("{stem}-scene-windmill.png")),
-            &render_exterior(volume, mill.rect.inflate(14), 2, "Windmill"),
+            &render_exterior(
+                volume,
+                mill.rect.inflate(16),
+                2,
+                "Windmill · open-air sails",
+            ),
+        )?;
+    }
+    save(
+        &out_dir.join(format!("{stem}-scene-market.png")),
+        &render_exterior(volume, plan.market.inflate(16), 3, "Market square"),
+    )?;
+    if plan.capital {
+        save(
+            &out_dir.join(format!("{stem}-scene-capital.png")),
+            &render_exterior(
+                volume,
+                plan.castle.bounds.inflate(6),
+                4,
+                "Royal capital · inner and outer bailey",
+            ),
+        )?;
+    }
+    if let Some(hull) = largest_blob(plan, CellKind::Ship) {
+        save(
+            &out_dir.join(format!("{stem}-scene-harbour-ship.png")),
+            &render_exterior(volume, hull.inflate(12), 3, "Harbour · cog at the quay"),
         )?;
     }
     Ok(())
+}
+
+fn largest_blob(plan: &TownPlan, kind: CellKind) -> Option<Rect> {
+    let mut best: Option<Rect> = None;
+    let mut best_n = 0;
+    for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
+        for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
+            if plan.occ.kind(x, z) != kind {
+                continue;
+            }
+            if best.is_some_and(|rect| rect.contains(x, z)) {
+                continue;
+            }
+            let blob = blob_kind(plan, x, z, kind);
+            let n = blob.width() * blob.depth();
+            if n > best_n {
+                best_n = n;
+                best = Some(blob);
+            }
+        }
+    }
+    best
+}
+
+fn blob_kind(plan: &TownPlan, x: i32, z: i32, kind: CellKind) -> Rect {
+    let mut min_x = x;
+    let mut max_x = x;
+    let mut min_z = z;
+    let mut max_z = z;
+    for dz in -8..=8 {
+        for dx in -8..=8 {
+            if plan.occ.kind(x + dx, z + dz) == kind {
+                min_x = min_x.min(x + dx);
+                max_x = max_x.max(x + dx);
+                min_z = min_z.min(z + dz);
+                max_z = max_z.max(z + dz);
+            }
+        }
+    }
+    Rect::new(min_x, min_z, max_x, max_z)
 }
 
 /// Crop used for aerials and Features-chunk rerenders.
@@ -171,7 +237,7 @@ pub fn overview_bounds(plan: &TownPlan) -> Rect {
     }
     for lot in &plan.lots {
         if lot.kind == BuildingKind::Windmill {
-            bounds = union_rect(bounds, lot.rect.inflate(14));
+            bounds = union_rect(bounds, lot.rect.inflate(16));
         }
     }
     Rect::new(
@@ -379,6 +445,18 @@ fn write_cutaways(
                     "Cathedral · rose window",
                 ),
             )?;
+            save(
+                &out_dir.join(format!("{stem}-scene-rose-west.png")),
+                &render_elevation_west(
+                    volume,
+                    nave.min_x,
+                    nave.min_z - 6,
+                    nave.max_z + 6,
+                    floor + 2,
+                    floor + 28,
+                    "Cathedral · west front",
+                ),
+            )?;
         }
     }
     Ok(())
@@ -415,6 +493,49 @@ fn render_room(
         Some(title),
         true,
     )
+}
+
+fn render_elevation_west(
+    volume: &VolumeSink,
+    wall_x: i32,
+    min_z: i32,
+    max_z: i32,
+    min_y: i32,
+    max_y: i32,
+    title: &str,
+) -> RgbImage {
+    let scale = 14u32;
+    let span_z = (max_z - min_z + 1).max(1) as u32;
+    let span_y = (max_y - min_y + 1).max(1) as u32;
+    let label_h = 28u32;
+    let width = span_z * scale + 8;
+    let height = span_y * scale + 8 + label_h;
+    let mut image = ImageBuffer::from_pixel(width, height, Rgb([168u8, 198, 230]));
+    for z in min_z..=max_z {
+        for y in min_y..=max_y {
+            let mut rgb = None;
+            for x in (wall_x - 2)..=(wall_x + 3) {
+                if let Some(state) = volume.get(x, y, z)
+                    && !state.is_air()
+                {
+                    rgb = Some(block_rgb(state));
+                    break;
+                }
+            }
+            let Some(rgb) = rgb else {
+                continue;
+            };
+            let px = ((z - min_z) as u32) * scale + 4;
+            let py = ((max_y - y) as u32) * scale + 4 + label_h;
+            for sy in 0..scale {
+                for sx in 0..scale {
+                    image.put_pixel(px + sx, py + sy, Rgb(rgb));
+                }
+            }
+        }
+    }
+    blit_label(&mut image, title);
+    image
 }
 
 fn render_exterior(

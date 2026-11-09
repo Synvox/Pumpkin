@@ -183,7 +183,10 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
         if cols.is_empty() {
             continue;
         }
-        let check_sky = !matches!(lot.kind, BuildingKind::Watchtower | BuildingKind::BellTower);
+        let check_sky = !matches!(
+            lot.kind,
+            BuildingKind::Watchtower | BuildingKind::BellTower | BuildingKind::TownHall
+        );
         buildings.push(check_columns(
             &format!("lot{}-{:?}", lot.id, lot.kind),
             cols,

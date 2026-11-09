@@ -244,7 +244,10 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             | BuildingKind::Windmill
             | BuildingKind::Barn
             | BuildingKind::Stall => spawns.push(at(SpawnRole::Workstation, cx, cz)),
-            BuildingKind::Watchtower | BuildingKind::Outpost | BuildingKind::BellTower => {
+            BuildingKind::Watchtower
+            | BuildingKind::Outpost
+            | BuildingKind::BellTower
+            | BuildingKind::TownHall => {
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));
             }
         }

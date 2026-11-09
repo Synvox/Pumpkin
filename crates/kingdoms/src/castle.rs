@@ -12,6 +12,8 @@ use crate::rng::TownRng;
 pub const CASTLE_MIN: i32 = 128;
 /// Default outer footprint. 9×9 chunks.
 pub const CASTLE_SIZE: i32 = 144;
+/// Royal-capital outer footprint (inner and outer bailey plus palace).
+pub const CASTLE_CAPITAL_SIZE: i32 = 176;
 
 /// Which silhouette family a castle uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +121,10 @@ pub struct CastlePlan {
     pub inner_ring: WallRing,
     pub tower_specs: Vec<TowerSpec>,
     pub keep_masses: Vec<KeepMass>,
+    /// Spawn-cell royal capital: inner/outer bailey and a palace keep.
+    pub capital: bool,
+    /// Palace mass inside the inner bailey (capital only).
+    pub palace: Rect,
 }
 
 impl CastlePlan {
@@ -145,10 +151,15 @@ impl CastlePlan {
     }
 }
 
-/// Picks a 144×144 high-ground window near `origin`.
+/// Picks a high-ground window of `size` near `origin`.
 #[must_use]
-pub fn site_castle(grid: &HeightGrid, origin_x: i32, origin_z: i32, rng: &mut TownRng) -> Rect {
-    let size = CASTLE_SIZE;
+pub fn site_castle(
+    grid: &HeightGrid,
+    origin_x: i32,
+    origin_z: i32,
+    rng: &mut TownRng,
+    size: i32,
+) -> Rect {
     let search = 128;
     let mut best = Rect::new(
         origin_x - size / 2,
@@ -196,17 +207,23 @@ pub fn paint_castle(
     grid: &HeightGrid,
     bounds: Rect,
     rng: &mut TownRng,
+    capital: bool,
 ) -> CastlePlan {
     let gate_dir = downhill_side(grid, bounds);
     let archetype = pick_archetype(grid, bounds, rng);
-    let outer_verts = contour_polygon(grid, bounds, gate_dir, archetype, rng);
+    let outer_verts = contour_polygon(grid, bounds, gate_dir, archetype, rng, capital);
     let peak = grid.peak(
         bounds.min_x + 16,
         bounds.min_z + 16,
         bounds.max_x - 16,
         bounds.max_z - 16,
     );
-    let inner_verts = scale_poly(&outer_verts, peak.0, peak.1, inner_scale(archetype));
+    let inner_verts = scale_poly(
+        &outer_verts,
+        peak.0,
+        peak.1,
+        inner_scale(archetype, capital),
+    );
     let inner = poly_bounds(&inner_verts).unwrap_or_else(|| bounds.deflate(28));
 
     let outer_ring = WallRing {
@@ -216,11 +233,11 @@ pub fn paint_castle(
     };
     let inner_ring = WallRing {
         verts: inner_verts,
-        thickness: 1,
-        height: 11,
+        thickness: if capital { 2 } else { 1 },
+        height: if capital { 13 } else { 11 },
     };
 
-    let keep_masses = build_keep(peak.0, peak.1, archetype, rng);
+    let keep_masses = build_keep(peak.0, peak.1, archetype, rng, capital);
     let keep = masses_bounds(&keep_masses)
         .unwrap_or_else(|| Rect::new(peak.0 - 12, peak.1 - 12, peak.0 + 12, peak.1 + 12));
 
@@ -252,6 +269,9 @@ pub fn paint_castle(
     }
 
     occ.fill_poly(&outer_ring.verts, CellKind::Green, false);
+    if capital {
+        occ.fill_poly(&inner_ring.verts, CellKind::CastleCourt, false);
+    }
     paint_court_paths(occ, &keep, &hall, gate_pt);
     occ.stroke_poly(
         &outer_ring.verts,
@@ -269,6 +289,13 @@ pub fn paint_castle(
 
     for mass in &keep_masses {
         fill_shape(occ, mass.spec, CellKind::CastleKeep);
+    }
+    let palace = keep_masses
+        .iter()
+        .find(|mass| capital && mass.spec.height >= 22)
+        .map_or(keep, |mass| mass.spec.bounds());
+    if capital {
+        paint_bailey_hedges(occ, &inner_ring.verts, &outer_ring.verts);
     }
     occ.fill(hall, CellKind::CastleHall, true);
     paint_buttresses(occ, hall, CellKind::CastleHall);
@@ -317,6 +344,8 @@ pub fn paint_castle(
         inner_ring,
         tower_specs,
         keep_masses,
+        capital,
+        palace,
     }
 }
 
@@ -344,12 +373,13 @@ fn pick_archetype(grid: &HeightGrid, bounds: Rect, rng: &mut TownRng) -> CastleA
     }
 }
 
-fn inner_scale(archetype: CastleArchetype) -> i32 {
-    match archetype {
+fn inner_scale(archetype: CastleArchetype, capital: bool) -> i32 {
+    let base = match archetype {
         CastleArchetype::Concentric => 58,
         CastleArchetype::Ridge | CastleArchetype::Spur => 50,
         CastleArchetype::Coastal => 54,
-    }
+    };
+    if capital { base + 6 } else { base }
 }
 
 fn contour_polygon(
@@ -358,6 +388,7 @@ fn contour_polygon(
     gate_dir: Dir,
     archetype: CastleArchetype,
     rng: &mut TownRng,
+    capital: bool,
 ) -> Vec<(i32, i32)> {
     let n = match archetype {
         CastleArchetype::Concentric => 8,
@@ -380,7 +411,7 @@ fn contour_polygon(
         let (s, c) = (ang.sin(), ang.cos());
         let mut last = (cx, cz);
         let mut r = 18;
-        let max_r = 62;
+        let max_r = if capital { 80 } else { 62 };
         while r < max_r {
             let x = cx + (r as f64 * c).round() as i32;
             let z = cz + (r as f64 * s).round() as i32;
@@ -483,7 +514,13 @@ fn clamp_pt(pt: (i32, i32), within: Rect) -> (i32, i32) {
     )
 }
 
-fn build_keep(px: i32, pz: i32, archetype: CastleArchetype, rng: &mut TownRng) -> Vec<KeepMass> {
+fn build_keep(
+    px: i32,
+    pz: i32,
+    archetype: CastleArchetype,
+    rng: &mut TownRng,
+    capital: bool,
+) -> Vec<KeepMass> {
     let main_shape = match archetype {
         CastleArchetype::Coastal | CastleArchetype::Concentric => TowerShape::Octagon,
         CastleArchetype::Ridge => TowerShape::Square,
@@ -541,6 +578,30 @@ fn build_keep(px: i32, pz: i32, archetype: CastleArchetype, rng: &mut TownRng) -
                 height: 12,
                 shape: TowerShape::Octagon,
                 roof: RoofKind::Hip,
+                inner: true,
+            },
+        });
+    }
+    if capital {
+        masses.push(KeepMass {
+            spec: TowerSpec {
+                cx: px + main_r + 8,
+                cz: pz - 2,
+                radius: 9,
+                height: 22,
+                shape: TowerShape::Octagon,
+                roof: RoofKind::Hip,
+                inner: true,
+            },
+        });
+        masses.push(KeepMass {
+            spec: TowerSpec {
+                cx: px + main_r + 8,
+                cz: pz + 8,
+                radius: 5,
+                height: 18,
+                shape: TowerShape::Square,
+                roof: RoofKind::Gable { along_x: true },
                 inner: true,
             },
         });
@@ -836,6 +897,24 @@ fn paint_court_paths(occ: &mut Occupancy, keep: &Rect, hall: &Rect, gate: (i32, 
     }
 }
 
+fn paint_bailey_hedges(occ: &mut Occupancy, inner: &[(i32, i32)], outer: &[(i32, i32)]) {
+    let Some(bounds) = crate::geom::poly_bounds(outer) else {
+        return;
+    };
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            if !matches!(occ.kind(x, z), CellKind::Green | CellKind::Empty) {
+                continue;
+            }
+            let near_inner = crate::geom::near_poly_edge(x, z, inner, 2);
+            let garden = (x + z).rem_euclid(5) == 0;
+            if near_inner || garden {
+                occ.set(x, z, CellKind::Hedge, true);
+            }
+        }
+    }
+}
+
 fn paint_approach(occ: &mut Occupancy, gate: (i32, i32), dir: Dir) {
     let perp = match dir {
         Dir::North | Dir::South => Dir::East,
@@ -964,7 +1043,7 @@ mod tests {
         let mut grid = HeightGrid::synthetic_slope(0, 400, 800, 1200, 8, 58, 6, 4);
         grid.sea_level = 63;
         let mut rng = TownRng::new(42);
-        let rect = site_castle(&grid, 558, 979, &mut rng);
+        let rect = site_castle(&grid, 558, 979, &mut rng, CASTLE_SIZE);
         assert!(
             (rect.center().0 - 558).abs() < 200,
             "castle wandered to {rect:?}"
@@ -979,7 +1058,7 @@ mod tests {
         let mut rng = TownRng::new(7);
         let bounds = Rect::new(40, 40, 183, 183);
         let mut occ = Occupancy::new(bounds.inflate(8));
-        let plan = paint_castle(&mut occ, &grid, bounds, &mut rng);
+        let plan = paint_castle(&mut occ, &grid, bounds, &mut rng, false);
         assert!(
             plan.outer_ring.verts.len() >= 6,
             "outer ring too simple: {:?}",

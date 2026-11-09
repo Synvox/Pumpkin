@@ -19,7 +19,7 @@ use crate::height::{HeightGrid, SAMPLE_STEP, world_gen_for};
 use crate::info::{GateInfo, GateKind, RoadInfo};
 use crate::palette::PaletteKind;
 use crate::rng::TownRng;
-use crate::scenes::{Scene, SceneKind, paint_harbour_town, place_scenes};
+use crate::scenes::{Scene, SceneKind, paint_harbour_town, place_scenes, try_lot};
 use crate::town::{CELL_SIZE, TownPos, border_crossing, border_goal, town_in_cell};
 
 /// Pad around castle+town so hinterland farms, hamlets and camps fit.
@@ -52,6 +52,8 @@ pub struct TownPlan {
     /// Road columns outside hinterland occupancy, used to stitch cell borders.
     pub border_roads: HashMap<(i32, i32), CellKind>,
     pub heights: HeightGrid,
+    /// Spawn cell (0,0) is the royal capital of the seed.
+    pub capital: bool,
 }
 
 impl TownPlan {
@@ -130,16 +132,17 @@ pub fn plan_at(seed: u64, block_x: i32, block_z: i32) -> Option<Arc<TownPlan>> {
 #[must_use]
 pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: PaletteKind) -> TownPlan {
     let mut rng = TownRng::salted(seed, origin.cell_x as u64, origin.cell_z as u64);
-    let castle_rect = site_castle(&grid, origin.x, origin.z, &mut rng);
+    let capital = origin.cell_x == 0 && origin.cell_z == 0;
+    let castle_rect = site_castle(&grid, origin.x, origin.z, &mut rng, CASTLE_SIZE);
     let gate = downhill_town_dir(&grid, castle_rect);
     let town_rect = driest_town(&grid, castle_rect, gate, 132, 120);
     let core = union(castle_rect.inflate(6), town_rect.inflate(18));
     let hinter = union(castle_rect, town_rect).inflate(HINTERLAND_PAD);
     let bounds = clip_to_grid(&grid, union(core, hinter));
     let mut occ = Occupancy::new(bounds);
-    let castle = paint_castle(&mut occ, &grid, castle_rect, &mut rng);
+    let castle = paint_castle(&mut occ, &grid, castle_rect, &mut rng, capital);
 
-    let market = flattest_dry(&grid, town_rect, 24, 24);
+    let market = flattest_dry(&grid, town_rect, 28, 28);
     occ.fill(market, CellKind::Market, false);
     let well = market.center();
     occ.set(well.0, well.1, CellKind::Well, true);
@@ -191,6 +194,8 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     );
 
     let mut lots = place_lots(&mut occ, &grid, town_rect, market, &mut rng, seed, palette);
+    paint_civic_square(&mut occ, &grid, &mut lots, seed, market, town_rect);
+    paint_hedges_and_gardens(&mut occ, town_rect);
     place_farms(&mut occ, &grid, town_rect, castle_rect, &mut rng);
     let mut scenes = place_scenes(
         &mut occ,
@@ -239,6 +244,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         occ,
         border_roads,
         heights: grid,
+        capital,
     }
 }
 
@@ -469,6 +475,122 @@ fn paint_gate_plazas(occ: &mut Occupancy, gates: &[GateInfo]) {
                 ) {
                     occ.set(x, z, CellKind::Plaza, true);
                 }
+            }
+        }
+    }
+}
+
+fn paint_civic_square(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    market: Rect,
+    town: Rect,
+) {
+    let cobble = market.inflate(3);
+    for z in cobble.min_z..=cobble.max_z {
+        for x in cobble.min_x..=cobble.max_x {
+            if !town.contains(x, z) {
+                continue;
+            }
+            if matches!(
+                occ.kind(x, z),
+                CellKind::Empty | CellKind::Farm | CellKind::FarmEdge | CellKind::Green
+            ) {
+                occ.set(x, z, CellKind::Plaza, true);
+            }
+        }
+    }
+    let hedge = market.inflate(5);
+    for z in hedge.min_z..=hedge.max_z {
+        for x in hedge.min_x..=hedge.max_x {
+            if cobble.contains(x, z) || !town.contains(x, z) {
+                continue;
+            }
+            if matches!(occ.kind(x, z), CellKind::Empty | CellKind::Green)
+                && (x == hedge.min_x
+                    || x == hedge.max_x
+                    || z == hedge.min_z
+                    || z == hedge.max_z
+                    || (x + z).rem_euclid(4) == 0)
+            {
+                occ.set(x, z, CellKind::Hedge, true);
+            }
+        }
+    }
+    let hall = Rect::new(
+        market.min_x + 1,
+        market.min_z - 13,
+        market.min_x + 13,
+        market.min_z - 2,
+    );
+    if try_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::TownHall,
+        hall,
+        Dir::South,
+    )
+    .is_none()
+    {
+        let west = Rect::new(
+            market.min_x - 14,
+            market.min_z + 2,
+            market.min_x - 2,
+            market.min_z + 13,
+        );
+        let _ = try_lot(
+            occ,
+            grid,
+            lots,
+            seed,
+            BuildingKind::TownHall,
+            west,
+            Dir::East,
+        );
+    }
+    let mut stalls = 0;
+    let mut z = market.min_z + 1;
+    while z + 5 < market.max_z && stalls < 14 {
+        let mut x = market.min_x + 1;
+        while x + 5 < market.max_x && stalls < 14 {
+            let rect = Rect::new(x, z, x + 4, z + 4);
+            x += 6;
+            if market.contains(market.center().0, market.center().1)
+                && rect
+                    .inflate(2)
+                    .contains(market.center().0, market.center().1)
+            {
+                continue;
+            }
+            if try_lot(occ, grid, lots, seed, BuildingKind::Stall, rect, Dir::South).is_some() {
+                stalls += 1;
+            }
+        }
+        z += 6;
+    }
+}
+
+fn paint_hedges_and_gardens(occ: &mut Occupancy, town: Rect) {
+    for z in town.min_z..=town.max_z {
+        for x in town.min_x..=town.max_x {
+            if occ.kind(x, z) != CellKind::Empty {
+                continue;
+            }
+            let next_to_house = Dir::ALL
+                .iter()
+                .any(|dir| occ.kind(x + dir.dx(), z + dir.dz()) == CellKind::Building);
+            if !next_to_house {
+                continue;
+            }
+            let mix = (x.wrapping_mul(5) + z.wrapping_mul(11)).rem_euclid(6);
+            if mix == 0 {
+                occ.set(x, z, CellKind::Hedge, false);
+            } else if mix <= 2 {
+                occ.set(x, z, CellKind::Green, false);
             }
         }
     }
@@ -907,9 +1029,9 @@ fn lot_kinds(palette: PaletteKind) -> &'static [BuildingKind] {
             BuildingKind::Longhouse,
             BuildingKind::Cottage,
             BuildingKind::Cottage,
-            BuildingKind::Cottage,
-            BuildingKind::Windmill,
+            BuildingKind::Townhouse,
             BuildingKind::Barn,
+            BuildingKind::Stall,
             BuildingKind::Stall,
             BuildingKind::Stall,
         ],
@@ -924,8 +1046,9 @@ fn lot_kinds(palette: PaletteKind) -> &'static [BuildingKind] {
             BuildingKind::Longhouse,
             BuildingKind::Cottage,
             BuildingKind::Cottage,
-            BuildingKind::Windmill,
+            BuildingKind::Timber,
             BuildingKind::Barn,
+            BuildingKind::Stall,
             BuildingKind::Stall,
             BuildingKind::Stall,
         ],
@@ -939,8 +1062,9 @@ fn lot_kinds(palette: PaletteKind) -> &'static [BuildingKind] {
             BuildingKind::Cottage,
             BuildingKind::Cottage,
             BuildingKind::Cottage,
-            BuildingKind::Windmill,
+            BuildingKind::Townhouse,
             BuildingKind::Barn,
+            BuildingKind::Stall,
             BuildingKind::Stall,
             BuildingKind::Stall,
         ],
@@ -1081,6 +1205,7 @@ fn paint_water_uses(occ: &mut Occupancy, grid: &HeightGrid, bounds: Rect, castle
                 CellKind::Eave | CellKind::Hedge => {
                     occ.set(x, z, CellKind::Harbor, true);
                 }
+                CellKind::WindSail | CellKind::Building => {}
                 _ => {}
             }
         }

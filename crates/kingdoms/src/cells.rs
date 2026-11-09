@@ -116,6 +116,14 @@ pub enum CellKind {
     TourneyList,
     /// Tournament stand or pavilion pad.
     TourneyStand,
+    /// Stone quay along the harbour.
+    Quay,
+    /// Harbour crane pad.
+    Crane,
+    /// Small fishing-boat hull.
+    Boat,
+    /// Timber adit portal into the hillside.
+    MineAdit,
 }
 
 impl CellKind {

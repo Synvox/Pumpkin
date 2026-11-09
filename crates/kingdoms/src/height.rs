@@ -128,6 +128,44 @@ impl HeightGrid {
         }
     }
 
+    /// Synthetic coast: columns west of `shore_x` sit below sea level.
+    #[must_use]
+    pub fn synthetic_coast(
+        min_x: i32,
+        min_z: i32,
+        max_x: i32,
+        max_z: i32,
+        step: i32,
+        land: i32,
+        water: i32,
+        shore_x: i32,
+    ) -> Self {
+        let step = step.max(1);
+        let nx = ((max_x - min_x) / step) + 1;
+        let nz = ((max_z - min_z) / step) + 1;
+        let mut heights = Vec::with_capacity((nx * nz) as usize);
+        for iz in 0..nz {
+            for ix in 0..nx {
+                let x = min_x + ix * step;
+                let y = if x < shore_x {
+                    water
+                } else {
+                    land + iz * 2 / nz.max(1)
+                };
+                heights.push(y);
+            }
+        }
+        Self {
+            min_x,
+            min_z,
+            step,
+            nx,
+            nz,
+            heights,
+            sea_level: 63,
+        }
+    }
+
     fn index(&self, ix: i32, iz: i32) -> Option<usize> {
         if ix < 0 || iz < 0 || ix >= self.nx || iz >= self.nz {
             return None;
@@ -204,6 +242,12 @@ impl HeightGrid {
     #[must_use]
     pub fn is_dry(&self, x: i32, z: i32) -> bool {
         self.height(x, z) > self.sea_level + 1
+    }
+
+    /// Water depth in blocks (`0` on dry land).
+    #[must_use]
+    pub fn water_depth(&self, x: i32, z: i32) -> i32 {
+        (self.sea_level - self.height(x, z)).max(0)
     }
 
     /// Share of samples in `rect` that are dry, as 0..=100.
