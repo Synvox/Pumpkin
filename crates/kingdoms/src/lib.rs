@@ -65,6 +65,7 @@ pub mod rng;
 pub mod roles;
 pub mod scene;
 pub mod scenes;
+pub mod schedule;
 pub mod siege;
 pub mod sim;
 pub mod stamp;

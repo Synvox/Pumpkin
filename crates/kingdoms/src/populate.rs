@@ -90,9 +90,18 @@ fn populate_chunk(world: &Arc<World>, chunk_x: i32, chunk_z: i32) {
     }
 }
 
-/// Fill empty citizen slots if the home chunk is loaded. Deterministic homes
-/// mean a killed guard comes back at the same post.
+/// Max bodies to spawn on one director tick so a wipe does not hitch.
+const RESPAWN_PER_TICK: usize = 2;
+
+/// Fill empty citizen slots if the home chunk is loaded.
+///
+/// Deterministic homes mean a killed guard comes back at the same post.
+/// Skipped while a raid is alarming the town so capture holds are not
+/// restocked mid-fight.
 pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
+    if director::town_is_fighting(town_id) {
+        return;
+    }
     let seed = world.level.seed.0;
     let Some(info) = crate::info::town_info_from_id(seed, town_id).or_else(|| {
         let mut parts = town_id.split(':');
@@ -128,6 +137,7 @@ pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
         return;
     }
     let kingdom = scene.kingdom();
+    let mut spawned = 0usize;
     for slot in slots {
         let home_chunk =
             pumpkin_util::math::vector2::Vector2::new(slot.home.x >> 4, slot.home.z >> 4);
@@ -154,6 +164,16 @@ pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
             f64::from(y),
             f64::from(slot.home.z) + 0.5,
         );
-        let _ = director::spawn_citizen(world, town_id, &kingdom, slot.role, slot.is_golem, pos);
+        if director::spawn_citizen(world, town_id, &kingdom, slot.role, slot.is_golem, pos)
+            .is_some()
+        {
+            spawned += 1;
+            if spawned >= RESPAWN_PER_TICK {
+                break;
+            }
+        }
+    }
+    if spawned > 0 {
+        debug!(town = town_id, spawned, "respawned citizens from beds");
     }
 }

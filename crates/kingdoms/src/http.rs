@@ -208,6 +208,7 @@ pub fn spawn_if_enabled() {
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/state", get(get_state))
+        .route("/war", get(get_war))
         .route("/towns/{id}", get(get_town))
         .route("/raids", post(post_raid))
         .route("/raids/{id}/stop", post(stop_raid))
@@ -265,6 +266,24 @@ async fn get_state(State(state): State<AppState>, headers: HeaderMap) -> Respons
         return err;
     }
     json_ok(director_state())
+}
+
+/// Observational: auth + rate limit, but does not pause the war clock.
+fn gate_observe(headers: &HeaderMap, state: &AppState) -> Option<Response> {
+    if !state.limiter.allow() {
+        return Some(too_many());
+    }
+    if !check_auth(headers, &state.token) {
+        return Some(unauthorized());
+    }
+    None
+}
+
+async fn get_war(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(err) = gate_observe(&headers, &state) {
+        return err;
+    }
+    json_ok(war_json())
 }
 
 async fn get_town(
@@ -394,6 +413,35 @@ fn battle_json(b: &director::BattleState) -> Value {
     })
 }
 
+fn war_json() -> Value {
+    let front = director::war_front();
+    json!({
+        "tick": front.tick,
+        "scores": front.scores,
+        "clock": {
+            "enabled": front.clock_enabled,
+            "period": front.clock_period,
+            "overridden": front.clock_overridden,
+            "last_tick": front.last_clock_tick,
+        },
+        "next_raid_id": front.next_raid_id,
+        "towns": front.towns.iter().map(|t| json!({
+            "id": t.id,
+            "kingdom": t.kingdom,
+            "owner": t.owner,
+            "alarm": t.alarm,
+            "raid_active": t.raid_active,
+            "gate_breached": t.gate_breached,
+            "keep": { "x": t.keep.0, "z": t.keep.1 },
+            "gate": t.gate.map(|(x, z)| json!({ "x": x, "z": z })),
+            "occupy_hold": t.occupy_hold,
+            "occupy_need": t.occupy_need,
+            "defenders": t.defenders,
+            "raiders": t.raiders,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 fn director_state() -> Value {
     let dir = director::lock();
     let tick = dir.tick;
@@ -450,6 +498,7 @@ fn webhook_name(kind: CombatKind) -> Option<&'static str> {
         CombatKind::Retake => Some("town_captured"),
         CombatKind::RamDestroyed => Some("ram_destroyed"),
         CombatKind::Rout => Some("rout"),
+        CombatKind::WarClock => Some("war_clock"),
         _ => None,
     }
 }
@@ -540,6 +589,7 @@ mod tests {
             webhook_name(CombatKind::RamDestroyed),
             Some("ram_destroyed")
         );
+        assert_eq!(webhook_name(CombatKind::WarClock), Some("war_clock"));
         assert!(webhook_name(CombatKind::Kill).is_none());
     }
 
@@ -578,6 +628,15 @@ mod tests {
         let err = gate(&headers, &state, MAX_BODY + 1).unwrap();
         assert_eq!(err.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert!(gate(&headers, &state, 16).is_none());
+    }
+
+    #[test]
+    fn war_json_has_front_line_fields() {
+        let v = war_json();
+        assert!(v.get("tick").is_some());
+        assert!(v.get("scores").is_some());
+        assert!(v.get("clock").is_some());
+        assert!(v.get("towns").is_some());
     }
 
     #[test]
