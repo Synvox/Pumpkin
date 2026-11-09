@@ -209,6 +209,7 @@ fn planned_timber(kind: CellKind) -> bool {
             | CellKind::Eave
             | CellKind::WaterWheel
             | CellKind::Sluice
+            | CellKind::Vine
     )
 }
 
@@ -348,10 +349,14 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
         plan,
     );
     for lot in &plan.lots {
-        if matches!(lot.kind, BuildingKind::Stall | BuildingKind::Watermill) {
+        if matches!(lot.kind, BuildingKind::Stall) {
             continue;
         }
-        let mut cols = collect_lot(plan, lot.id, lot.rect);
+        let mut cols = if lot.kind == BuildingKind::Watermill {
+            collect_watermill(plan, lot.rect)
+        } else {
+            collect_lot(plan, lot.id, lot.rect)
+        };
         if matches!(lot.kind, BuildingKind::Windmill) {
             let (cx, cz) = lot.rect.center();
             cols.retain(|&(x, z)| (x - cx).abs().max((z - cz).abs()) <= 2);
@@ -461,6 +466,18 @@ fn collect_lot(plan: &TownPlan, lot_id: u16, rect: Rect) -> Vec<(i32, i32)> {
     for z in rect.min_z..=rect.max_z {
         for x in rect.min_x..=rect.max_x {
             if plan.occ.lot(x, z) == lot_id && plan.occ.kind(x, z) == CellKind::Building {
+                cols.push((x, z));
+            }
+        }
+    }
+    cols
+}
+
+fn collect_watermill(plan: &TownPlan, rect: Rect) -> Vec<(i32, i32)> {
+    let mut cols = Vec::new();
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            if plan.occ.kind(x, z) != CellKind::WaterWheel {
                 cols.push((x, z));
             }
         }
@@ -1279,24 +1296,28 @@ mod tests {
             let cy = floor + 13;
             let mut purple = 0;
             let mut yellow = 0;
+            let mut blue = 0;
+            let mut red = 0;
             let mut petals = 0;
             let mut oculus = 0;
             let mut oculus_ring = 0;
             for z in min_z..=max_z {
-                for y in cy - 6..=cy + 6 {
+                for y in cy - 7..=cy + 7 {
                     if let Some(state) = volume.get(nave_west, y, z) {
                         let id = Block::from_state_id(state.id).id;
                         let is_glass = id == Block::PURPLE_STAINED_GLASS.id
                             || id == Block::YELLOW_STAINED_GLASS.id
+                            || id == Block::BLUE_STAINED_GLASS.id
+                            || id == Block::RED_STAINED_GLASS.id
                             || id == Block::PURPLE_STAINED_GLASS_PANE.id
                             || id == Block::YELLOW_STAINED_GLASS_PANE.id;
                         let dy = y - cy;
                         let dz = z - cz;
                         let d2 = dy * dy + dz * dz;
-                        if d2 > 36 {
+                        if d2 > 49 {
                             continue;
                         }
-                        if is_glass || id == Block::CALCITE.id {
+                        if is_glass || id == Block::CALCITE.id || id == Block::STONE_BRICKS.id {
                             rose_lo = rose_lo.min(z);
                             rose_hi = rose_hi.max(z);
                         }
@@ -1316,12 +1337,25 @@ mod tests {
                         {
                             yellow += 1;
                         }
+                        if id == Block::BLUE_STAINED_GLASS.id {
+                            blue += 1;
+                        }
+                        if id == Block::RED_STAINED_GLASS.id {
+                            red += 1;
+                        }
                         if id == Block::CALCITE.id {
                             stone += 1;
                             if (4..=8).contains(&d2) {
                                 oculus_ring += 1;
                             }
-                            if dy.abs() * 2 == dz.abs() || dz.abs() * 2 == dy.abs() {
+                            let ady = dy.abs();
+                            let adz = dz.abs();
+                            if ady == adz
+                                || ady * 2 == adz
+                                || adz * 2 == ady
+                                || ady * 3 == adz * 2
+                                || adz * 3 == ady * 2
+                            {
                                 petals += 1;
                             }
                         }
@@ -1332,7 +1366,9 @@ mod tests {
             assert!(stone >= 16, "rose tracery {stone}");
             assert!(purple >= 4, "rose purple glass {purple}");
             assert!(yellow >= 4, "rose yellow glass {yellow}");
-            assert!(petals >= 8, "rose 12-petal spokes {petals}");
+            assert!(blue >= 2, "rose blue glass {blue}");
+            assert!(red >= 2, "rose red glass {red}");
+            assert!(petals >= 8, "rose petals {petals}");
             assert!(oculus >= 1, "rose central oculus {oculus}");
             assert!(oculus_ring >= 4, "rose oculus ring {oculus_ring}");
             assert!(
@@ -1633,6 +1669,87 @@ mod tests {
             scars >= 4,
             "scarred curtain should punch holes/scorch {scars}"
         );
+    }
+
+    #[test]
+    fn watermills_are_watertight() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_river(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+            origin.z + 140,
+        );
+        let plan = build_plan(11, origin, grid, PaletteKind::Oak);
+        assert!(
+            plan.lots
+                .iter()
+                .any(|lot| lot.kind == BuildingKind::Watermill),
+            "riverside watermills"
+        );
+        for mill in plan
+            .lots
+            .iter()
+            .filter(|lot| lot.kind == BuildingKind::Watermill)
+        {
+            for z in mill.rect.min_z..=mill.rect.max_z {
+                for x in mill.rect.min_x..=mill.rect.max_x {
+                    assert_eq!(
+                        plan.occ.kind(x, z),
+                        CellKind::Building,
+                        "watermill {} envelope at {x},{z} is {:?}",
+                        mill.id,
+                        plan.occ.kind(x, z)
+                    );
+                }
+            }
+        }
+        let volume = fill_volume(&plan);
+        let check = check_town(&plan, &volume);
+        let mill_fails: Vec<_> = check
+            .failures()
+            .into_iter()
+            .filter(|b| b.name.contains("Watermill"))
+            .map(|b| {
+                format!(
+                    "{} leak={:?} sky={} float={}",
+                    b.name, b.leak, b.sky_open, b.floating_roofs
+                )
+            })
+            .collect();
+        assert!(
+            mill_fails.is_empty(),
+            "watermill envelope should close except the barred wheel opening: {mill_fails:?}"
+        );
+        let mut rim = 0;
+        let mut spokes = 0;
+        let sea = plan.heights.sea_level;
+        for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
+            for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
+                if plan.occ.kind(x, z) != CellKind::WaterWheel {
+                    continue;
+                }
+                for y in sea - 5..=sea + 5 {
+                    let Some(state) = volume.get(x, y, z) else {
+                        continue;
+                    };
+                    let id = Block::from_state_id(state.id).id;
+                    if id == Block::STRIPPED_OAK_LOG.id || id == Block::OAK_PLANKS.id {
+                        rim += 1;
+                    }
+                    if id == Block::OAK_FENCE.id {
+                        spokes += 1;
+                    }
+                }
+            }
+        }
+        assert!(rim >= 8, "wheel rim/paddles {rim}");
+        assert!(spokes >= 4, "wheel spokes {spokes}");
     }
 
     struct DamageGuard(String);

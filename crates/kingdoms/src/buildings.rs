@@ -25,6 +25,8 @@ pub enum BuildingKind {
     TownHall,
     /// Riverside mill house with a water wheel (not a windmill).
     Watermill,
+    /// Abbey winepress house with a cellar.
+    Winepress,
 }
 
 impl BuildingKind {
@@ -49,6 +51,7 @@ impl BuildingKind {
             Self::BellTower => (5, 5),
             Self::TownHall => (14, 12),
             Self::Watermill => (7, 6),
+            Self::Winepress => (9, 7),
         }
     }
 
@@ -61,6 +64,7 @@ impl BuildingKind {
             | Self::Barn
             | Self::Windmill
             | Self::Watermill
+            | Self::Winepress
             | Self::Monastery => 1,
             Self::Longhouse | Self::Blacksmith | Self::Cathedral => 1,
             Self::Tavern | Self::Church => 2,
@@ -92,6 +96,7 @@ impl BuildingKind {
             Self::BellTower => 18,
             Self::TownHall => 16,
             Self::Watermill => 8,
+            Self::Winepress => 6,
         }
     }
 
