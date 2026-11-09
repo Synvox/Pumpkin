@@ -387,6 +387,7 @@ pub fn furnish_house(
         BuildingKind::Windmill | BuildingKind::Watermill => {
             furnish_windmill_room(sink, rect, x, floor, z, roof_y);
         }
+        BuildingKind::Winepress => furnish_winepress(sink, rect, x, floor, z, roof_y),
         _ => furnish_dwelling(sink, rect, x, floor, z, roof_y, stories, palette),
     }
 }
@@ -502,6 +503,27 @@ fn furnish_barn(sink: &mut impl BlockSink, rect: Rect, x: i32, floor: i32, z: i3
         sink.put(x, floor + 1, z, Block::CHEST.default_state);
     }
     if light_here(x, z, 5) && roof_y >= floor + 4 {
+        hang_lantern(sink, x, roof_y - 2, z);
+    }
+}
+
+fn furnish_winepress(
+    sink: &mut impl BlockSink,
+    rect: Rect,
+    x: i32,
+    floor: i32,
+    z: i32,
+    roof_y: i32,
+) {
+    let (cx, cz) = rect.center();
+    if x == cx && z == cz {
+        sink.put(x, floor + 1, z, Block::CAULDRON.default_state);
+    } else if (x - cx).abs() + (z - cz).abs() == 1 {
+        sink.put(x, floor + 1, z, Block::BARREL.default_state);
+    } else if (x + z) % 4 == 0 {
+        sink.put(x, floor + 1, z, Block::HAY_BLOCK.default_state);
+    }
+    if light_here(x, z, 4) && roof_y >= floor + 4 {
         hang_lantern(sink, x, roof_y - 2, z);
     }
 }
