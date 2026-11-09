@@ -639,6 +639,10 @@ fn webhook_name(kind: CombatKind) -> Option<&'static str> {
         CombatKind::RamDestroyed => Some("ram_destroyed"),
         CombatKind::Rout => Some("rout"),
         CombatKind::WarClock => Some("war_clock"),
+        CombatKind::Alarm => Some("town_alarm"),
+        CombatKind::Trebuchet => Some("trebuchet_fired"),
+        CombatKind::LaddersRaised => Some("ladders_raised"),
+        CombatKind::Portcullis => Some("portcullis_dropped"),
         _ => None,
     }
 }
@@ -730,6 +734,16 @@ mod tests {
             Some("ram_destroyed")
         );
         assert_eq!(webhook_name(CombatKind::WarClock), Some("war_clock"));
+        assert_eq!(webhook_name(CombatKind::Alarm), Some("town_alarm"));
+        assert_eq!(webhook_name(CombatKind::Trebuchet), Some("trebuchet_fired"));
+        assert_eq!(
+            webhook_name(CombatKind::LaddersRaised),
+            Some("ladders_raised")
+        );
+        assert_eq!(
+            webhook_name(CombatKind::Portcullis),
+            Some("portcullis_dropped")
+        );
         assert!(webhook_name(CombatKind::Kill).is_none());
     }
 

@@ -333,6 +333,35 @@ impl CommandExecutor for KingdomDeployExecutor {
     }
 }
 
+struct KingdomFireExecutor;
+
+impl CommandExecutor for KingdomFireExecutor {
+    fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
+        let Some(player) = context.as_player() else {
+            context.source.send_feedback(
+                TextComponent::text("Only players can fire a trebuchet")
+                    .color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        };
+        match director::try_fire_trebuchet(&player) {
+            Ok(msg) => {
+                context
+                    .source
+                    .send_feedback(TextComponent::text(msg).color_named(NamedColor::Gold), true);
+                Ok(1)
+            }
+            Err(err) => {
+                context
+                    .source
+                    .send_feedback(TextComponent::text(err).color_named(NamedColor::Red), false);
+                Ok(0)
+            }
+        }
+    }
+}
+
 struct RaidStopExecutor;
 
 impl CommandExecutor for RaidStopExecutor {
@@ -391,7 +420,8 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
                             .executes(KingdomDeployExecutor { has_town: true }),
                     ),
             )
-            .then(literal("stats").executes(WarStatsExecutor)),
+            .then(literal("stats").executes(WarStatsExecutor))
+            .then(literal("fire").executes(KingdomFireExecutor)),
     );
 
     dispatcher.register(

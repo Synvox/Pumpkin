@@ -44,6 +44,7 @@ pub mod chunk_fill;
 pub mod command;
 pub mod damage;
 pub mod director;
+pub mod engines;
 pub mod events;
 pub mod faction;
 pub mod flow;

@@ -84,6 +84,7 @@ pub trait TownScene {
     fn raid_camps(&self) -> &[ScenePost];
     fn ram_posts(&self) -> &[ScenePost];
     fn ladder_posts(&self) -> &[ScenePost];
+    fn trebuchet_posts(&self) -> &[ScenePost];
     fn road_approach(&self) -> Option<ScenePost>;
     fn wall(&self) -> &[[i32; 2]];
     fn keep_rect(&self) -> Rect;
@@ -122,6 +123,7 @@ pub struct TownInfoScene {
     raid_camps: Vec<ScenePost>,
     ram_posts: Vec<ScenePost>,
     ladder_posts: Vec<ScenePost>,
+    trebuchet_posts: Vec<ScenePost>,
     road_approach: Option<ScenePost>,
 }
 
@@ -162,6 +164,7 @@ impl TownInfoScene {
         }
         let ram_posts = posts(&info, SpawnRole::SiegeRam);
         let ladder_posts = posts(&info, SpawnRole::SiegeLadder);
+        let trebuchet_posts = posts(&info, SpawnRole::SiegeTreb);
         let road_approach =
             first_role(&info, SpawnRole::PillagerRally).or_else(|| raid_camps.first().copied());
 
@@ -177,6 +180,7 @@ impl TownInfoScene {
             raid_camps,
             ram_posts,
             ladder_posts,
+            trebuchet_posts,
             road_approach,
         }
     }
@@ -243,6 +247,10 @@ impl TownScene for TownInfoScene {
 
     fn ladder_posts(&self) -> &[ScenePost] {
         &self.ladder_posts
+    }
+
+    fn trebuchet_posts(&self) -> &[ScenePost] {
+        &self.trebuchet_posts
     }
 
     fn road_approach(&self) -> Option<ScenePost> {
@@ -318,8 +326,10 @@ mod tests {
                 .any(|s| s.role == SpawnRole::PillagerSpawn || s.role == SpawnRole::PillagerRally)
         );
         assert!(
-            !scene.ram_posts().is_empty() && !scene.ladder_posts().is_empty(),
-            "camp siege yard should expose ram and ladder posts"
+            !scene.ram_posts().is_empty()
+                && !scene.ladder_posts().is_empty()
+                && !scene.trebuchet_posts().is_empty(),
+            "camp siege yard should expose ram, ladder, and trebuchet posts"
         );
         assert_eq!(scene.kingdom().as_str(), "alder");
         let keep = scene.keep();
