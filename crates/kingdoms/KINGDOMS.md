@@ -65,7 +65,7 @@ A town flips only when attackers hold the keep courtyard **and** defenders there
 
 A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). It either breaches the iron-bar gate or is destroyed. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks) or their captain dies; a living captain rallies routed soldiers within 16 blocks.
 
-When no HTTP director has talked to the API in the last 30 s, a war clock starts the next raid on a timer (`KINGDOMS_WAR_CLOCK`, default on; `KINGDOMS_WAR_CLOCK_TICKS`, default 2400 ≈ 2 min). It picks a cached town and the attacking side from current ownership. An authenticated HTTP call marks the external director as connected and pauses the clock.
+When no HTTP director has talked to the API in the last 30 s, a war clock starts the next raid on a timer (`KINGDOMS_WAR_CLOCK`, default on; `KINGDOMS_WAR_CLOCK_TICKS`, default 2400 ≈ 2 min). After a flip it waits out the 400-tick hold lockout **plus** a 400-tick repair window so builders can work for the new owner. It can run several concurrent fronts (`KINGDOMS_WAR_CLOCK_FRONTS`, default 1) and alternates pillager raids with alder↔raven border marches. Size/extras: `KINGDOMS_WAR_CLOCK_SIZE` (default 24) and `KINGDOMS_WAR_CLOCK_DEFENDERS`. An authenticated HTTP call that is not observational (`GET /war`, `GET|POST /lines`) marks the external director as connected and pauses the clock.
 
 Inter-cell roads meet at a crossing hashed from the unordered cell pair. The western/northern cell writes up to the column before the shared edge; the eastern/southern cell writes the edge column. Both sides use the same `z` (or `x`) so the road reads as one line.
 
@@ -207,7 +207,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"name":"Herald","message":"The gate is down"}' http://127.0.0.1:8742/chat
 ```
 
-`GET /state` returns towns (owners, battles, troop counts) and logged-in player positions. `GET /war` is a front-line summary for the Sails war map (scores, clock, keep/gate, occupy hold). It is authenticated but does **not** pause the war clock. `POST /raids` also accepts `"side":"kingdom"` for a counter-raid and an optional `"camp"` (currently unused; waves still spawn from the hinterland camp / relief post).
+`GET /state` returns towns (owners, battles, troop counts) and logged-in player positions. `GET /war` is a front-line summary for the Sails war map (scores, clock, keep/gate, occupy hold, raid side, repair_until). It is authenticated but does **not** pause the war clock. `POST /raids` also accepts `"side":"kingdom"|"alder"|"raven"` for a counter-raid or kingdom-vs-kingdom march and an optional `"camp"` (currently unused; kingdom armies spawn from the road approach). `GET|POST /lines` lets the director read or override captain shout text (`gate_breached`, `rally`, `retreat`, `victory`) without pausing the clock.
 
 `kingdoms-ownership.json` now also stores kingdom scores, `clock_tick`, `next_raid_id`, and `last_clock_tick` so a restart keeps the war. Town ownership and player membership were already there.
 
@@ -306,6 +306,20 @@ Plots: `/opt/cursor/artifacts/live-r5.log`, `live-r5-strip.png` (4460×1024), `l
 
 Gaps: player join still force-loads ~170 chunks in one tick (~8.5 s); the war clock fired on the same tick as the flip so builders did not get a quiet repair window in that run (the clock now waits out the 400-tick hold lockout); leftover camp hostiles can keep `alarm` true after the raid, which also blocks repair and bed respawn.
 
+Round 6 (seed `20261025`, release, LTO off, two `kingdoms-raid-bot`s at gate/keep). Alarm uses the walled town (keep/gates/wall + 24), not the hinterland camp, so leftover palisade pillagers do not keep the bell ringing. Routed stragglers outside that rect despawn; tagged raiders despawn when no raid is running. The war clock waits `hold_lockout + repair_window` (800 ticks) and can open alder/raven fronts on roads. Captains shout to nearby players (rate-limited); `POST /lines` supplies the text. `/war` prints scores and captures.
+
+| Fight | peak bodies | fight MSPT | director_ms | `Can't keep up` | notes |
+| --- | ---: | ---: | ---: | --- | --- |
+| r6 120 vs 40 flip | **170** ticking (40/130 at first contact) | **12–16** (spawn **29.21**, then 12–16) | **3.5–5.3** | join only **8.99 s / 179 ticks**. No raid-spawn hitch ≥ 50 ms after warmup | ram breached **21**; `keep_r=8 hold=200` **captured** tick 3167; leftover despawned 82; `repair_until=3951` |
+| r6 clock retake 80 | **177** (98/79) | **13–20** (peak **20.39** at spawn) | **3.6–4.6** | none during retake | clock Kingdom raid tick **5000** (after repair window); `defenders_in_keep=8` **retaken** tick 7723 owner=alder; scores alder=1 pillager=1 |
+| r6 30 min soak (3 fronts, 100+100 each) | **747** director bodies / **1331** world entities | **p50 60.6 / p95 101 / max 290** (join 558) | 20–38 steady | 3-bot join **43.6 s / 871 ticks**, then catch-up 80 `Can't keep up` while MSPT stayed ~60 | alder captured `20261025:0:1`; raven marched on `0:0`; 3 concurrent fronts; tickets 158→481 (max 514, no leak); RSS 68→810 MiB (chunk cache, not a ticket leak); bodies 747→169 |
+
+Capture: `kingdoms town captured … score=pillager` then webhook `town_captured` / `retaken by alder`. Clock did **not** fire on the flip tick (`repair_until=3951`, clock at 5000). `POST /lines` set rally to `Alder to the gate. Hold fast.`; captains shouted rally / gate_breached / victory to the gate bot. `/war` and `GET /war` showed owner, scores, raid_side, repair_until.
+
+Player-join hitch (investigate only, no pumpkin-core change): `chunker::update_position` on spawn diffs an empty watched section against the full view-distance cylinder (`Cylindrical::changed_chunks`) and, on that same tick, (1) adds view + simulation tickets for every chunk, (2) `enqueue_chunk`s the whole set onto `ChunkSender`, (3) `mark_chunks_as_newly_watched` + `spawn_world_entity_chunks`. `ticker.rs` then logs `Can't keep up` (~8.5–9.0 s / ~175–179 ticks at view distance 16). A tiny isolated hook would be to stagger those first-join tickets the way raid warmup already does (`TICKETS_PER_TICK=12`): cap `loading_chunks` applied per tick on the player's first `watched_section` fill, or start the player at view distance 2 and grow. That lives in `crates/pumpkin-core/src/world/chunker.rs`, not kingdoms.
+
+Plots: `/opt/cursor/artifacts/live-r6.log`, `live-r6-strip.png` (3990×1024), `live-r6-clock-strip.png`, `soak-r6.csv`, `kingdoms-ownership-r6.json`, `webhook-r6.log`.
+
 ### Commands
 
 | Command | |
@@ -316,6 +330,7 @@ Gaps: player join still force-loads ~170 chunks in one tick (~8.5 s); the war cl
 | `/raid start <town> [size] [defenders]` | start a pillager raid. Optional `defenders` is how many kingdom combatants to field (extras spawn at the threatened gate). |
 | `/raid retake <town> [size]` | kingdom counter-raid to retake a pillager-owned town |
 | `/raid stop` | stop all kingdoms raids |
+| `/war` | scores, clock, owners, active fronts and raid sides |
 
 ## Build and run
 

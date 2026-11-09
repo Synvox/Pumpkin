@@ -38,6 +38,7 @@ use tracing::info;
 pub mod buildings;
 pub mod castle;
 pub mod cells;
+pub mod chat;
 pub mod chunk_fill;
 pub mod command;
 pub mod director;
@@ -73,11 +74,12 @@ pub mod town;
 pub mod watertight;
 pub mod wfc;
 
+pub use chat::ShoutKind;
 pub use director::{
     BattleState, RaidId, battle_state, join_kingdom, query_battle_state, set_target_town,
     start_raid, stop_raid,
 };
-pub use faction::{Faction, KingdomId, is_allied, is_hostile};
+pub use faction::{Faction, KingdomId, is_allied, is_hostile, kingdom_color_rgb};
 pub use info::{
     SpawnPoint, SpawnRole, TownInfo, town_id, town_info, town_info_at, town_info_from_id,
 };

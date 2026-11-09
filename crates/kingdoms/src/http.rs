@@ -25,6 +25,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 
+use crate::chat::{self, ShoutKind};
 use crate::director::{self, CombatEvent, CombatKind, RaidId};
 use crate::raid::{RaidSide, RaidSpec};
 
@@ -209,6 +210,7 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/state", get(get_state))
         .route("/war", get(get_war))
+        .route("/lines", get(get_lines).post(post_lines))
         .route("/towns/{id}", get(get_town))
         .route("/raids", post(post_raid))
         .route("/raids/{id}/stop", post(stop_raid))
@@ -284,6 +286,48 @@ async fn get_war(State(state): State<AppState>, headers: HeaderMap) -> Response 
         return err;
     }
     json_ok(war_json())
+}
+
+async fn get_lines(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(err) = gate_observe(&headers, &state) {
+        return err;
+    }
+    json_ok(json!({ "lines": chat::all_lines() }))
+}
+
+#[derive(Deserialize)]
+struct LineBody {
+    event: String,
+    #[serde(default)]
+    text: String,
+}
+
+async fn post_lines(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Some(err) = gate_observe(&headers, &state) {
+        return err;
+    }
+    if body.len() > MAX_BODY {
+        return too_large();
+    }
+    let body: LineBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, format!("invalid json: {err}")).into_response();
+        }
+    };
+    let Some(kind) = ShoutKind::parse(&body.event) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "event must be gate_breached, rally, retreat, or victory",
+        )
+            .into_response();
+    };
+    chat::set_line(kind, &body.text);
+    json_ok(json!({
+        "ok": true,
+        "event": kind.as_str(),
+        "text": chat::line(kind),
+    }))
 }
 
 async fn get_town(
@@ -438,7 +482,10 @@ fn war_json() -> Value {
             "occupy_need": t.occupy_need,
             "defenders": t.defenders,
             "raiders": t.raiders,
+            "raid_side": t.raid_side,
+            "repair_until": t.repair_until,
         })).collect::<Vec<_>>(),
+        "fronts": front.fronts,
     })
 }
 
