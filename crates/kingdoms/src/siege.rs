@@ -110,6 +110,71 @@ impl MarchJob {
 /// File name written next to `level.dat`.
 pub const OWNERSHIP_FILE: &str = "kingdoms-ownership.json";
 
+/// Player rank from kills, captures, and defenses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Rank {
+    Levy,
+    Freeman,
+    Sergeant,
+    Knight,
+    Banneret,
+}
+
+impl Rank {
+    #[must_use]
+    pub const fn from_renown(renown: u32) -> Self {
+        if renown >= 100 {
+            Self::Banneret
+        } else if renown >= 50 {
+            Self::Knight
+        } else if renown >= 25 {
+            Self::Sergeant
+        } else if renown >= 10 {
+            Self::Freeman
+        } else {
+            Self::Levy
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Levy => "levy",
+            Self::Freeman => "freeman",
+            Self::Sergeant => "sergeant",
+            Self::Knight => "knight",
+            Self::Banneret => "banneret",
+        }
+    }
+}
+
+/// Persisted war record for one player.
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlayerStats {
+    #[serde(default)]
+    pub kills: u32,
+    #[serde(default)]
+    pub captures: u32,
+    #[serde(default)]
+    pub defenses: u32,
+    #[serde(default)]
+    pub banner_given: bool,
+}
+
+impl PlayerStats {
+    #[must_use]
+    pub fn renown(&self) -> u32 {
+        self.kills
+            .saturating_add(self.captures.saturating_mul(5))
+            .saturating_add(self.defenses.saturating_mul(3))
+    }
+
+    #[must_use]
+    pub fn rank(&self) -> Rank {
+        Rank::from_renown(self.renown())
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct OwnershipFile {
     towns: HashMap<String, String>,
@@ -125,6 +190,8 @@ struct OwnershipFile {
     last_clock_tick: u32,
     #[serde(default)]
     damage: HashMap<String, String>,
+    #[serde(default)]
+    stats: HashMap<String, PlayerStats>,
 }
 
 /// World-folder path for the ownership file.
@@ -143,6 +210,7 @@ pub struct SavedState {
     pub next_raid_id: u32,
     pub last_clock_tick: u32,
     pub damage: HashMap<String, crate::damage::DamageState>,
+    pub stats: HashMap<String, PlayerStats>,
 }
 
 /// Load town id → owner from `kingdoms-ownership.json`.
@@ -177,6 +245,7 @@ pub fn load_state(path: &Path) -> SavedState {
             .into_iter()
             .map(|(id, raw)| (id, crate::damage::DamageState::parse(&raw)))
             .collect(),
+        stats: file.stats,
     }
 }
 
@@ -213,9 +282,27 @@ pub fn save_state(path: &Path, state: &SavedState) -> std::io::Result<()> {
             .iter()
             .map(|(id, state)| (id.clone(), state.as_str().to_owned()))
             .collect(),
+        stats: state.stats.clone(),
     };
     let json = serde_json::to_string_pretty(&file).unwrap_or_else(|_| "{}".to_owned());
     std::fs::write(path, json)
+}
+
+/// Write ownership off the director tick when a Tokio runtime is running.
+pub fn save_state_async(path: PathBuf, state: SavedState) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(move || save_state(&path, &state)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => tracing::warn!(%err, "failed to persist kingdoms ownership"),
+                Err(err) => tracing::warn!(%err, "failed to persist kingdoms ownership"),
+            }
+        });
+        return;
+    }
+    if let Err(err) = save_state(&path, &state) {
+        tracing::warn!(%err, "failed to persist kingdoms ownership");
+    }
 }
 
 /// Attackers needed in the courtyard: at least 8, or 10% of the surviving force.
@@ -422,6 +509,7 @@ mod tests {
                 next_raid_id: 7,
                 last_clock_tick: 2400,
                 damage: HashMap::new(),
+                stats: HashMap::new(),
             },
         )
         .unwrap();
@@ -528,5 +616,70 @@ mod tests {
         assert_eq!(MarchJob::assign(1, false), MarchJob::Ladder);
         assert_eq!(MarchJob::assign(2, false), MarchJob::Assault);
         assert_eq!(MarchJob::assign(3, true), MarchJob::Ram);
+    }
+
+    #[test]
+    fn renown_ranks_from_kills_captures_and_defenses() {
+        let levy = PlayerStats::default();
+        assert_eq!(levy.renown(), 0);
+        assert_eq!(levy.rank(), Rank::Levy);
+        let freeman = PlayerStats {
+            kills: 10,
+            ..PlayerStats::default()
+        };
+        assert_eq!(freeman.rank(), Rank::Freeman);
+        let sergeant = PlayerStats {
+            captures: 5,
+            ..PlayerStats::default()
+        };
+        assert_eq!(sergeant.renown(), 25);
+        assert_eq!(sergeant.rank(), Rank::Sergeant);
+        let knight = PlayerStats {
+            kills: 20,
+            captures: 4,
+            defenses: 4,
+            ..PlayerStats::default()
+        };
+        assert_eq!(knight.renown(), 52);
+        assert_eq!(knight.rank(), Rank::Knight);
+        let banneret = PlayerStats {
+            captures: 20,
+            ..PlayerStats::default()
+        };
+        assert_eq!(banneret.rank(), Rank::Banneret);
+    }
+
+    #[test]
+    fn player_stats_survive_a_file_round_trip() {
+        let dir = std::env::temp_dir().join(format!("kingdoms-stats-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = ownership_path(&dir);
+        let mut stats = HashMap::new();
+        stats.insert(
+            "uuid-1".to_owned(),
+            PlayerStats {
+                kills: 3,
+                captures: 1,
+                defenses: 2,
+                banner_given: true,
+            },
+        );
+        save_state(
+            &path,
+            &SavedState {
+                stats,
+                ..SavedState::default()
+            },
+        )
+        .unwrap();
+        let back = load_state(&path);
+        let got = back.stats.get("uuid-1").expect("stats");
+        assert_eq!(got.kills, 3);
+        assert_eq!(got.captures, 1);
+        assert_eq!(got.defenses, 2);
+        assert!(got.banner_given);
+        assert_eq!(got.renown(), 14);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

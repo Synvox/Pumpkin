@@ -1,11 +1,5 @@
 use pumpkin_util::math::vector2::Vector2;
-use std::{
-    num::NonZero,
-    sync::{
-        Arc,
-        atomic::{AtomicU8, Ordering},
-    },
-};
+use std::{num::NonZero, sync::Arc};
 
 use pumpkin_protocol::{
     bedrock::client::network_chunk_publisher_update::CNetworkChunkPublisherUpdate,
@@ -17,40 +11,6 @@ use crate::{
     entity::{EntityBase, player::Player},
     net::ClientPlatform,
 };
-
-/// KINGDOMS JOIN STAGGER (opt-in). Vanilla keeps this at 0 so a join still
-/// fills the whole view-distance cylinder in one `update_position`. Kingdoms
-/// sets it to 1 so the first fill grows a few rings per tick instead of
-/// hitching on every chunk ticket at once.
-static JOIN_VIEW_GROW: AtomicU8 = AtomicU8::new(0);
-
-/// Rings of view distance to add per `update_position` after join. `0` is
-/// vanilla (fill the whole cylinder immediately).
-pub fn set_join_view_grow(rings_per_tick: u8) {
-    JOIN_VIEW_GROW.store(rings_per_tick, Ordering::Relaxed);
-}
-
-/// True when this player's watched cylinder is still growing toward the
-/// configured view distance. Kingdoms uses this from `Player::tick` so a
-/// standing client still receives the next ring.
-#[must_use]
-pub fn join_view_needs_grow(player: &Player) -> bool {
-    if JOIN_VIEW_GROW.load(Ordering::Relaxed) == 0 {
-        return false;
-    }
-    player.watched_section.load().view_distance.get() < get_view_distance(player).get()
-}
-
-fn staged_view_distance(old: Cylindrical, target: NonZero<u8>) -> NonZero<u8> {
-    let grow = JOIN_VIEW_GROW.load(Ordering::Relaxed);
-    if grow == 0 {
-        return target;
-    }
-    // `1` is the uninit sentinel (`is_within_distance` is always false).
-    let current = old.view_distance.get().max(1);
-    let next = current.saturating_add(grow).clamp(2, target.get());
-    NonZero::new(next).unwrap_or(target)
-}
 
 pub fn get_view_distance(player: &Player) -> NonZero<u8> {
     let fallback = NonZero::new(2).unwrap_or(NonZero::<u8>::MIN);
@@ -94,7 +54,7 @@ pub fn update_position(player: &Arc<Player>) {
     //     return;
     // }
 
-    let view_distance = staged_view_distance(old_cylindrical, get_view_distance(player));
+    let view_distance = get_view_distance(player);
     let new_cylindrical = Cylindrical::new(new_chunk_center, view_distance);
 
     if old_cylindrical == new_cylindrical {
@@ -137,7 +97,7 @@ pub fn update_position(player: &Arc<Player>) {
 
     let new_view_level = (!is_spectator || spectators_generate_chunks).then(|| {
         pumpkin_world::chunk_system::ChunkLoading::get_level_from_view_distance(
-            view_distance.get() + 1,
+            u8::from(view_distance) + 1,
         )
     });
 
@@ -145,13 +105,6 @@ pub fn update_position(player: &Arc<Player>) {
         let sim_dist = world.server.upgrade().map_or(10, |s| {
             s.advanced_config.networking.java.simulation_distance.get()
         });
-        // While the join cylinder is growing, do not plant a full simulation
-        // ticket that is larger than the rings we have actually watched.
-        let sim_dist = if JOIN_VIEW_GROW.load(Ordering::Relaxed) > 0 {
-            sim_dist.min(view_distance.get())
-        } else {
-            sim_dist
-        };
         pumpkin_world::chunk_system::ChunkLoading::get_level_from_simulation_distance(sim_dist)
     });
 
@@ -221,28 +174,5 @@ pub fn update_position(player: &Arc<Player>) {
 
     if !loading_chunks.is_empty() {
         world.spawn_world_entity_chunks(player.clone(), loading_chunks);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pumpkin_util::math::vector2::Vector2;
-
-    #[test]
-    fn staged_view_grows_one_ring_when_enabled() {
-        let old = JOIN_VIEW_GROW.swap(1, Ordering::Relaxed);
-        let dummy = Cylindrical::new(
-            Vector2::new(0, 0),
-            NonZero::new(1).unwrap_or(NonZero::<u8>::MIN),
-        );
-        let target = NonZero::new(16).unwrap_or(NonZero::<u8>::MIN);
-        let first = staged_view_distance(dummy, target);
-        assert_eq!(first.get(), 2);
-        let grown = Cylindrical::new(Vector2::new(4, 5), first);
-        assert_eq!(staged_view_distance(grown, target).get(), 3);
-        JOIN_VIEW_GROW.store(0, Ordering::Relaxed);
-        assert_eq!(staged_view_distance(dummy, target).get(), 16);
-        JOIN_VIEW_GROW.store(old, Ordering::Relaxed);
     }
 }

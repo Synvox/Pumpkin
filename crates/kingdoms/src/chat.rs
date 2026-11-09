@@ -25,6 +25,9 @@ pub enum ShoutKind {
     Rally,
     Retreat,
     Victory,
+    Charge,
+    Hold,
+    Fallen,
 }
 
 impl ShoutKind {
@@ -35,6 +38,9 @@ impl ShoutKind {
             Self::Rally => "rally",
             Self::Retreat => "retreat",
             Self::Victory => "victory",
+            Self::Charge => "charge",
+            Self::Hold => "hold",
+            Self::Fallen => "fallen",
         }
     }
 
@@ -45,6 +51,9 @@ impl ShoutKind {
             "rally" | "raid_started" | "war_clock" => Some(Self::Rally),
             "retreat" | "rout" => Some(Self::Retreat),
             "victory" | "town_captured" | "capture" | "retake" => Some(Self::Victory),
+            "charge" | "advance" => Some(Self::Charge),
+            "hold" => Some(Self::Hold),
+            "fallen" | "captain_down" => Some(Self::Fallen),
             _ => None,
         }
     }
@@ -55,6 +64,9 @@ impl ShoutKind {
             Self::Rally => "To the walls. Hold the line.",
             Self::Retreat => "Fall back to the keep. Do not break.",
             Self::Victory => "The town is ours. Raise the colours.",
+            Self::Charge => "With me. Take the keep!",
+            Self::Hold => "Shields! Hold this ground.",
+            Self::Fallen => "Captain is down. Stand fast.",
         }
     }
 }
@@ -98,6 +110,9 @@ pub fn all_lines() -> HashMap<&'static str, String> {
         ShoutKind::Rally,
         ShoutKind::Retreat,
         ShoutKind::Victory,
+        ShoutKind::Charge,
+        ShoutKind::Hold,
+        ShoutKind::Fallen,
     ] {
         out.insert(kind.as_str(), line(kind));
     }
@@ -117,6 +132,21 @@ pub fn try_shout(
     z: f64,
     last: &mut ShoutLog,
 ) -> bool {
+    try_shout_as(world, tick, town_id, kind, x, z, last, "captain", None)
+}
+
+/// Same as [`try_shout`] with a named speaker and optional supplied text.
+pub fn try_shout_as(
+    world: &World,
+    tick: u32,
+    town_id: &str,
+    kind: ShoutKind,
+    x: f64,
+    z: f64,
+    last: &mut ShoutLog,
+    speaker: &str,
+    spoken: Option<&str>,
+) -> bool {
     let key = (town_id.to_owned(), kind);
     if last
         .get(&key)
@@ -125,8 +155,17 @@ pub fn try_shout(
         return false;
     }
     last.insert(key, tick);
-    let text = line(kind);
-    let msg = TextComponent::text(format!("<captain> {text}")).color_named(NamedColor::Gold);
+    let text = spoken
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| line(kind), ToOwned::to_owned);
+    let speaker = speaker.trim();
+    let speaker = if speaker.is_empty() {
+        "soldier"
+    } else {
+        speaker
+    };
+    let msg = TextComponent::text(format!("<{speaker}> {text}")).color_named(NamedColor::Gold);
     let mut n = 0u32;
     for player in world.players.load().iter() {
         let pos = player.living_entity.entity.pos.load();
@@ -138,6 +177,7 @@ pub fn try_shout(
     tracing::info!(
         town = town_id,
         kind = kind.as_str(),
+        speaker,
         heard = n,
         "kingdoms captain shout"
     );
@@ -159,6 +199,10 @@ mod tests {
             Some(ShoutKind::GateBreached)
         );
         assert_eq!(ShoutKind::parse("rout"), Some(ShoutKind::Retreat));
+        assert_eq!(ShoutKind::parse("charge"), Some(ShoutKind::Charge));
+        assert_eq!(ShoutKind::parse("hold"), Some(ShoutKind::Hold));
+        assert_eq!(ShoutKind::parse("fallen"), Some(ShoutKind::Fallen));
+        assert!(line(ShoutKind::Charge).contains("keep"));
         assert!(ShoutKind::parse("kill").is_none());
     }
 

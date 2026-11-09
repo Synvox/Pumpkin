@@ -17,7 +17,6 @@ use tracing::debug;
 
 use crate::director;
 use crate::info::TownInfo;
-use crate::plan::plan_from_cache;
 use crate::roles::{PopulationSpec, citizen_slots};
 use crate::scene::{TownInfoScene, TownScene};
 use crate::town::towns_touching_chunk;
@@ -46,7 +45,8 @@ fn populate_chunk(world: &Arc<World>, chunk_x: i32, chunk_z: i32) {
     }
     let seed = world.level.seed.0;
     for town in towns_touching_chunk(seed, chunk_x, chunk_z) {
-        let Some(plan) = plan_from_cache(seed, town.cell_x, town.cell_z) else {
+        let Some(plan) = crate::plan::cached_plan(seed, town.cell_x, town.cell_z) else {
+            crate::plan::request_plan(seed, town.cell_x, town.cell_z);
             continue;
         };
         let info = TownInfo::from_plan(&plan);
@@ -103,13 +103,7 @@ pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
         return;
     }
     let seed = world.level.seed.0;
-    let Some(info) = crate::info::town_info_from_id(seed, town_id).or_else(|| {
-        let mut parts = town_id.split(':');
-        let s: u64 = parts.next()?.parse().ok()?;
-        let cx: i32 = parts.next()?.parse().ok()?;
-        let cz: i32 = parts.next()?.parse().ok()?;
-        crate::plan::plan_from_cache(s, cx, cz).map(|p| TownInfo::from_plan(&p))
-    }) else {
+    let Some(info) = crate::info::town_info_from_id(seed, town_id) else {
         return;
     };
     let scene = TownInfoScene::from_info(info);

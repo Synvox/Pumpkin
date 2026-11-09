@@ -2771,13 +2771,6 @@ impl Player {
     #[expect(clippy::too_many_lines)]
     pub fn tick<'a>(&'a self, server: &'a Server) {
         self.process_inbound_packets();
-        // KINGDOMS JOIN STAGGER: grow the watched cylinder a ring per tick
-        // even if the client is standing still (no movement packet).
-        if crate::world::chunker::join_view_needs_grow(self)
-            && let Some(player) = self.world().get_player_by_uuid(self.gameprofile.id)
-        {
-            crate::world::chunker::update_position(&player);
-        }
 
         if self.is_spectator() {
             self.living_entity

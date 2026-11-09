@@ -27,7 +27,7 @@ The planner is geometry only today, but each town exposes a serializable [`TownI
 ```rust
 use pumpkin_kingdoms::info::{town_info, town_info_at, TownInfo};
 
-let info = town_info(seed, cell_x, cell_z)?;          // cached cell
+let info = town_info(seed, cell_x, cell_z)?;          // memory/disk only; never generates
 let info = town_info_at(seed, block_x, block_z)?;     // cell containing a column
 let json = info.to_json()?;
 ```
@@ -65,7 +65,7 @@ A town flips only when attackers hold the keep courtyard **and** defenders there
 
 A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). It either breaches the iron-bar gate or is destroyed. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks) or their captain dies; a living captain rallies routed soldiers within 16 blocks.
 
-When no HTTP director has talked to the API in the last 30 s, a war clock starts the next raid on a timer (`KINGDOMS_WAR_CLOCK`, default on; `KINGDOMS_WAR_CLOCK_TICKS`, default 2400 ≈ 2 min). After a flip it waits out the 400-tick hold lockout **plus** a 400-tick repair window so builders can work for the new owner. It can run several concurrent fronts (`KINGDOMS_WAR_CLOCK_FRONTS`, default 1) and alternates pillager raids with alder↔raven border marches. Size/extras: `KINGDOMS_WAR_CLOCK_SIZE` (default 24) and `KINGDOMS_WAR_CLOCK_DEFENDERS`. An authenticated HTTP call that is not observational (`GET /war`, `GET|POST /lines`) marks the external director as connected and pauses the clock.
+When no HTTP director has talked to the API in the last 30 s, a war clock starts the next raid on a timer (`KINGDOMS_WAR_CLOCK`, default on; `KINGDOMS_WAR_CLOCK_TICKS`, default 2400 ≈ 2 min). After a flip it waits out the 400-tick hold lockout **plus** a 400-tick repair window so builders can work for the new owner. It can run several concurrent fronts (`KINGDOMS_WAR_CLOCK_FRONTS`, default 1) and alternates pillager raids with alder↔raven border marches. Size/extras: `KINGDOMS_WAR_CLOCK_SIZE` (default 24) and `KINGDOMS_WAR_CLOCK_DEFENDERS`. An authenticated HTTP call that is not observational (`GET /war`, `GET|POST /lines`, `GET|POST /heroes`) marks the external director as connected and pauses the clock.
 
 Inter-cell roads meet at a crossing hashed from the unordered cell pair. The western/northern cell writes up to the column before the shared edge; the eastern/southern cell writes the edge column. Both sides use the same `z` (or `x`) so the road reads as one line.
 
@@ -217,11 +217,16 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 curl -sS -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8742/raids/1/stop
 curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"name":"Herald","message":"The gate is down"}' http://127.0.0.1:8742/chat
+curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"kingdom":"alder","name":"Sir Aldric","title":"marshal","line":"Hold the gate."}' \
+  http://127.0.0.1:8742/heroes
+curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"text":"Alder to the wall."}' http://127.0.0.1:8742/heroes/alder/shout
 ```
 
-`GET /state` returns towns (owners, battles, troop counts) and logged-in player positions. `GET /war` is a front-line summary for the Sails war map (scores, clock, keep/gate, occupy hold, raid side, repair_until). It is authenticated but does **not** pause the war clock. `POST /raids` also accepts `"side":"kingdom"|"alder"|"raven"` for a counter-raid or kingdom-vs-kingdom march and an optional `"camp"` (currently unused; kingdom armies spawn from the road approach). `GET|POST /lines` lets the director read or override captain shout text (`gate_breached`, `rally`, `retreat`, `victory`) without pausing the clock.
+`GET /state` returns towns (owners, battles, troop counts) and logged-in player positions. `GET /war` is a front-line summary for the Sails war map (scores, clock, keep/gate, occupy hold, raid side, repair_until, heroes). It is authenticated but does **not** pause the war clock. `POST /raids` also accepts `"side":"kingdom"|"alder"|"raven"` for a counter-raid or kingdom-vs-kingdom march and an optional `"camp"` (currently unused; kingdom armies spawn from the road approach). `GET|POST /lines` lets the director read or override captain shout text (`gate_breached`, `rally`, `retreat`, `victory`, `charge`, `hold`, `fallen`) without pausing the clock. `GET|POST /heroes` names a commander per kingdom; `POST /heroes/{kingdom}/shout` broadcasts as that hero (this one does pause the clock, same as `POST /chat`).
 
-`kingdoms-ownership.json` now also stores kingdom scores, `clock_tick`, `next_raid_id`, and `last_clock_tick` so a restart keeps the war. Town ownership and player membership were already there.
+`kingdoms-ownership.json` now also stores kingdom scores, `clock_tick`, `next_raid_id`, `last_clock_tick`, and per-player stats (kills, captures, defenses, banner) so a restart keeps the war. Town ownership and player membership were already there.
 
 Civilians work at a workstation by day (ticks 2000–11000) and go home to a bed at night. The town bell still sends them to the keep when a raid starts. Guards patrol the wall between raids. Empty bed slots refill at most two citizens per 200 ticks, and never during a fight.
 
@@ -334,7 +339,7 @@ Player-join hitch (investigate only, no pumpkin-core change): `chunker::update_p
 
 Plots: `/opt/cursor/artifacts/live-r6.log`, `live-r6-strip.png` (3990×1024), `live-r6-clock-strip.png`, `soak-r6.csv`, `kingdoms-ownership-r6.json`, `webhook-r6.log`.
 
-Round 7 is a performance pass. Remote fronts (no player within 128 blocks of keep/gate/camp) no longer spawn soldiers or force-load towns: they keep virtual counts and resolve Lanchester combat on a 20-tick timer after a 400-tick march. `KINGDOMS_BODY_BUDGET` (default 240) caps live bodies; the war clock still opens up to `KINGDOMS_WAR_CLOCK_FRONTS` raids, but extras stay abstract. Live tickets cover the battle line only (1-chunk ring, 8-step corridor). Camp pillagers inside `plan.bounds` no longer hold the alarm. Join hitch: kingdoms calls `pumpkin_core::world::chunker::set_join_view_grow(1)` so a new player's view cylinder grows one ring per tick (vanilla keeps 0).
+Round 7 is a performance pass. Remote fronts (no player within 128 blocks of keep/gate/camp) no longer spawn soldiers or force-load towns: they keep virtual counts and resolve Lanchester combat on a 20-tick timer after a 400-tick march. `KINGDOMS_BODY_BUDGET` (default 240) caps live bodies; the war clock still opens up to `KINGDOMS_WAR_CLOCK_FRONTS` raids, but extras stay abstract. Live tickets cover the battle line only (1-chunk ring, 8-step corridor). Camp pillagers inside `plan.bounds` no longer hold the alarm. Join hitch: r7 added `set_join_view_grow(1)` in pumpkin-core; a warm-world join was still 8.9 s (town-plan ensure), so r8 reverts both pumpkin-core hooks.
 
 | Fight | peak bodies | fight MSPT | director_ms | `Can't keep up` | notes |
 | --- | ---: | ---: | ---: | --- | --- |
@@ -345,17 +350,62 @@ Target was p50 ≤ 25 / p95 ≤ 45. Director time is 3.5 ms; the leftover ~30 ms
 
 Plots: `/opt/cursor/artifacts/live-r7.log`, `soak-r7.csv`, `soak-r7-summary.json`, `kingdoms-ownership-r7.json`, `webhook-r7.log`.
 
+Round 8: town plans precompute on a background thread at world attach (spawn cell ±1 and owned fronts) and persist `TownInfo` JSON under `kingdoms-plans/v2/` (`PLAN_CACHE_VERSION`; bump it when plan layout changes). The tick never calls `plan_for`; a miss queues work and defers that town's AI. Idle civilians/guards farther than 64 blocks from every player sleep (`NoAI`); kingdoms-tagged mobs never run vanilla villager brains; workstation/home/wall Y uses planner height instead of per-entity `sample_surface_height`. Join-view-grow pumpkin-core hooks are reverted (r7 warm-world join was still 8.9 s of town-plan ensure).
+
+| Fight | peak bodies | fight MSPT | director_ms | `Can't keep up` | notes |
+| --- | ---: | ---: | ---: | --- | --- |
+| r7 30 min soak (before) | **230** live / 556 entities | **p50 34.2 / p95 47.4 / max 65** after join (join sample 522, 40 s first-plan hitch) | p50 **3.5** / p95 92 | 8 (join 41 s / 819 ticks) | 1 live + 3 abstract; 9 captures, 7 kingdom |
+| r8 30 min soak (after warmup) | **256** live / 836 entities | **p50 34.9 / p95 49.4 / max 71** after join | p50 **0.26** / p95 **1.48** (max 902 on a dual-capture tick) | 14 (join catch-up 2.2 s / 43 ticks; later 2 s bursts) | warmup 9 cells in **78 s**; 9 JSON plans on disk; **36 captures, 25 kingdom / 11 pillager**; tickets 0→85 (no leak); RSS 88→733 MiB |
+
+First join after warmup no longer runs `plan_for` on the tick (r7 director **40 s**). Worst director on that join was **154 ms** (ensure + first civilian scan). Target “no tick over 100 ms” still misses that 154 ms join director and raid-start bursts (554 ms spawning the first live wave). Steady p50 **34.9** vs target **25**: director is 0.26 ms; the leftover ~34 ms is vanilla chunk/entity tick of the live player in the PR #17 capital (entity loop `loop_us≈300`, ~60/165 villagers asleep). Kingdom occupy of pillager towns resolves (`tick_hold` + `occupy`).
+
+Plots: `/opt/cursor/artifacts/soak-r8.log`, `soak-r8.csv`, `soak-r8-summary.json`, `kingdoms-ownership-r8.json`, `webhook-r8.log`.
+
+Round 9 spreads leftover director spikes and puts players in the war. Soldiers spawn 3 per town (4 across the world); ram, extras, and wave take turns; rout/rally tags cap at 8; leftover despawns and ticket drops drain 12/tick; ownership JSON writes off-thread; the war clock starts one front per tick; repair scans one column per tick and skips the post-flip lockout. Players earn persisted renown (kills + 5×captures + 3×defenses) with kit tiers (leather → chain → iron) and a kingdom banner at banneret. `/kingdom fronts` lists battles; `/kingdom deploy` teleports to a friendly rally and materialises an abstract front on the existing warmup. Soldiers shout rate-limited contextual lines; `POST /heroes` lets Sails name a commander per kingdom.
+
+It did not hit “no director tick ≥ 50 ms”. Leftover spikes are `mark_chunks_as_newly_watched` while applying live raid tickets (4/tick still 170–530 ms), a 1163 ms live-front tick during first contact, and dual abstract captures (760 ms when two towns flipped on the same tick, down from 902). War-clock raid 1 was 2 ms. Spawn batches are 3. Captains/soldiers shouted 197 times. Player stats persist but the standing bots scored 0 kills. `/kingdom deploy` was not in-game tested.
+
+Plots: `/opt/cursor/artifacts/soak-r9.log`, `soak-r9.csv`, `soak-r9-summary.json`, `kingdoms-ownership-r9.json`, `webhook-r9.log`.
+
+| Fight | peak bodies | fight MSPT | director_ms | `Can't keep up` | notes |
+| --- | ---: | ---: | ---: | --- | --- |
+| r8 30 min soak (before) | **256** live / 836 entities | **p50 34.9 / p95 49.4 / max 71** after join | p50 **0.26** / p95 **1.48** (max 902 dual-capture) | 14 | 36 captures; raid-start 554 / rout 708 / dual-capture 902 |
+| r9 30 min soak | **266** live / 942 entities | **p50 39.7 / p95 53.1 / max 73** after join | p50 **0.64** / p95 **1.66** (max **1163** on a live-ticket tick) | 12 | 1 live + 3 abstract; **38 captures** (alder 11 / raven 18 / pillager 9); tickets 0→86; RSS 88→848 MiB; **16 director ticks ≥ 50 ms** (log); soldier shouts 197; pumpkin-core untouched |
+
+Round 9b (same branch, r8 config: 1 bot, 3 fronts, 30 min) re-soaked this branch against master `6166fc32` in parallel. Capture bookkeeping is one flip per tick; raid tickets are 1/tick with async chunk fetch (no `mark_chunks_as_newly_watched` on the director tick); approach/deploy pre-tickets a 256-block ring. Both soaks ran on the same machine with a live-test server, so MSPT is higher than the single-server r8 34.9 and is only comparable to each other.
+
+| | branch (this PR) | master `6166fc32` |
+| --- | ---: | ---: |
+| MSPT p50 / p95 / max | 44.04 / 61.49 / 79.04 | 44.51 / 64.24 / 88.23 |
+| director_ms p50 / p95 / max | **0.39 / 0.62 / 2.07** | 0.46 / 0.73 / 4.07 |
+| director ticks ≥ 50 ms | **0** | **0** |
+| captures | 30 | 29 |
+| `Can't keep up` | 37 | 43 |
+| tickets max | 85 | 86 |
+| live bodies max | 247 | 258 |
+| soldier shouts | 187 | 89 |
+
+This branch is not slower than master on the same config. The r8→r9 p50 34.9→39.7 was the 3-bot r9 soak, not rank/chat/spreading. Dual-capture 760 ms and first-contact 1163 ms did not recur (`director_max` 2.07).
+
+`kingdoms-raid-bot --fight` joined alder, listed `/kingdom fronts`, deployed to the threatened gate (`TELEPORT 1504.5, 80, 597.5`, not the keep roof), melee-hit pillagers (entity 104) and witches, and ranked up: `You are now a freeman (renown 10).` then `/war stats` `rank=freeman renown=17 kills=17`. Freeman kit is leather plus a stone sword (`kit_player` on that event). Soldier chat on the same run: `The gate is down. Through the breach!` / `To the walls. Hold the line.` Two abstract towns flipped in the same second with `director_ms=0.71` (capture queue). Gaps: levy still has no weapon until freeman; keep respawn sometimes dumps the bot at world spawn `(10.5, 75)` after `inWall`; inventory packets were not dumped so the stone sword is inferred from the rank-up kit path.
+
+Plots: `/opt/cursor/artifacts/soak-r9b-branch.csv`, `soak-r8-master.csv`, `raid-bot-fight.log`, `raid-bot-fight-live.txt`.
+
 ### Commands
 
 | Command | |
 | --- | --- |
 | `/locatetown` | nearest planned town |
 | `/kingdom info` | town, kingdom, owner, battle counts, gate breach |
-| `/kingdom join <kingdom>` | `alder` or `raven`. Leather team colour, name tag, friendly fire off, respawn at the keep |
+| `/kingdom join <kingdom>` | `alder` or `raven`. Rank kit, name tag, friendly fire off, respawn at the keep |
+| `/kingdom fronts` | active battles (side, owner, live, counts) |
+| `/kingdom deploy [town]` | teleport to the threatened gate (live surface Y, not the keep roof); abstract fronts materialise on a staggered warmup |
+| `/kingdom stats` | your rank, renown, kills, captures, defenses |
 | `/raid start <town> [size] [defenders]` | start a pillager raid. Optional `defenders` is how many kingdom combatants to field (extras spawn at the threatened gate). |
 | `/raid retake <town> [size]` | kingdom counter-raid to retake a pillager-owned town |
 | `/raid stop` | stop all kingdoms raids |
 | `/war` | scores, clock, owners, active fronts and raid sides |
+| `/war stats` | same as `/kingdom stats` |
 
 ## Build and run
 
