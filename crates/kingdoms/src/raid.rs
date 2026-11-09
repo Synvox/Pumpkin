@@ -32,6 +32,10 @@ impl RaidSpec {
     #[must_use]
     pub fn with_extra_defenders(mut self, extra: u16) -> Self {
         self.extra_defenders = extra;
+        // Field both sides at once for an N-vs-N live fight.
+        if extra > 0 {
+            self.waves = 1;
+        }
         self
     }
 

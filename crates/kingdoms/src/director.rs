@@ -4,6 +4,8 @@
 //! `ServerTickStart`.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
@@ -13,6 +15,7 @@ use pumpkin_core::entity::mob::Mob;
 use pumpkin_core::entity::player::Player;
 use pumpkin_core::world::World;
 use pumpkin_core::world::scoreboard::{CollisionRule, NameTagVisibility, Team};
+use pumpkin_data::damage::DamageType;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_data::entity::EntityType;
 use pumpkin_util::math::boundingbox::BoundingBox;
@@ -25,8 +28,8 @@ use crate::faction::{
     Faction, KingdomId, TAG_RAIDER, faction_of_entity, is_kingdoms_tagged, kingdom_tag,
     role_from_tags,
 };
-use crate::flow::FlowField;
-use crate::goals::{PostTarget, already_wired, bind_citizen, bind_golem, bind_raider};
+use crate::flow::{DIRECT_RANGE, FlowField};
+use crate::goals::{PostTarget, already_wired, bind_citizen, bind_golem, bind_raider, drive_live};
 use crate::info::TownInfo;
 use crate::lod::{
     ACQUIRE_RANGE, ALARM_RANGE, DEFAULT_PATH_CAP, LodTier, PathBudget, SpatialBuckets,
@@ -37,9 +40,18 @@ use crate::raid::{
 };
 use crate::roles::{PopulationSpec, VillagerRole, citizen_slots};
 use crate::scene::{ScenePost, TownInfoScene, TownScene};
+use crate::sim::{SimSnapshot, write_named_snapshots_with_kills};
 use crate::town::town_containing;
 
 const FORCELOAD_CAP: usize = 256;
+/// Director slide when the mob has not been world-ticked (blocks / tick).
+const SLIDE_STEP: f64 = 0.28;
+/// Set a vanilla target only this close, so `HoldGroundAttackGoal` does not
+/// stop the navigator while they are still marching in.
+const SET_TARGET_RANGE: f64 = 12.0;
+const LIVE_MELEE_RANGE: f64 = 2.75;
+const LIVE_MELEE_DAMAGE: f32 = 4.0;
+const LIVE_MELEE_PERIOD: u32 = 10;
 
 const COMBAT_LOG_CAP: usize = 512;
 const RESPAWN_PERIOD: u32 = 200;
@@ -115,6 +127,8 @@ struct TownWar {
     wired: HashMap<i32, Wired>,
     fields: HashMap<(i32, i32), Arc<FlowField>>,
     raider_gate_dist: f64,
+    ticketed: Vec<Vector2<i32>>,
+    live_snaps: Vec<SimSnapshot>,
 }
 
 struct Wired {
@@ -245,15 +259,20 @@ impl Director {
             town = town_id,
             size = spec.raiders,
             waves = spec.waves,
+            camp_x = camp.x,
+            camp_z = camp.z,
+            gate_x = gate.map(|g| g.x),
+            gate_z = gate.map(|g| g.z),
             "kingdoms raid started"
         );
         Ok(id)
     }
 
-    pub fn stop_raid(&mut self, town_id: Option<&str>) -> u32 {
+    pub fn stop_raid(&mut self, town_id: Option<&str>) -> (u32, Vec<Vector2<i32>>) {
         let mut stopped = 0;
         let tick = self.tick;
         let mut notes = Vec::new();
+        let mut tickets = Vec::new();
         for (id, war) in &mut self.towns {
             if town_id.is_some_and(|want| want != id) {
                 continue;
@@ -262,6 +281,7 @@ impl Director {
                 stopped += 1;
                 notes.push((raid.id.0, id.clone()));
                 war.alarm = false;
+                tickets.append(&mut war.ticketed);
             }
         }
         for (raid_id, town) in notes {
@@ -275,7 +295,7 @@ impl Director {
                 note: format!("stopped raid {raid_id} on {town}"),
             });
         }
-        stopped
+        (stopped, tickets)
     }
 
     pub fn set_target_town(&mut self, raid_id: RaidId, town_id: &str) -> Result<(), String> {
@@ -404,6 +424,8 @@ impl Director {
             wired: HashMap::new(),
             fields: HashMap::new(),
             raider_gate_dist: f64::INFINITY,
+            ticketed: Vec::new(),
+            live_snaps: Vec::new(),
         };
         self.towns.insert(town_id.to_owned(), war);
         self.towns
@@ -427,6 +449,8 @@ impl Director {
                 wired: HashMap::new(),
                 fields: HashMap::new(),
                 raider_gate_dist: f64::INFINITY,
+                ticketed: Vec::new(),
+                live_snaps: Vec::new(),
             }
         });
     }
@@ -796,6 +820,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
 
     let mut wave_to_spawn: Option<(u8, RaidSpec, ScenePost, RaidId)> = None;
     let mut pending_events = Vec::new();
+    let mut pending_release: Vec<Vector2<i32>> = Vec::new();
+    let mut dump_plots = false;
     {
         let mut dir = lock();
         {
@@ -872,6 +898,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             if finished {
                 war.raid = None;
                 war.alarm = pillagers_near;
+                pending_release.append(&mut war.ticketed);
                 pending_events.push(CombatEvent {
                     tick,
                     kind: CombatKind::Victory,
@@ -882,25 +909,65 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     note: format!("{town_id} raid defeated"),
                 });
                 tracing::info!(town = town_id, "raid defeated");
+                dump_plots = true;
             }
         }
         for event in pending_events {
             dir.push_event(event);
         }
     }
+    if !pending_release.is_empty() {
+        apply_force_tickets(world, &pending_release, false);
+    }
+    if dump_plots {
+        dump_live_plots(Some(town_id));
+    }
 
     // Assign targets + LOD without holding the director lock across nav.
+    let (alarm, march_dest, keep_dest) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        let dest = war.threatened.unwrap_or_else(|| war.scene.keep());
+        let y = standing_y(world, dest);
+        let keep = war.scene.keep();
+        (
+            war.alarm,
+            PostTarget::from_post(dest, y),
+            PostTarget::from_post(keep, standing_y(world, keep)),
+        )
+    };
+    let mut n_ticking = 0u32;
+    let mut n_loaded = 0u32;
+    let mut n_active = 0u32;
+    let mut n_no_ai = 0u32;
+    let mut n_slid = 0u32;
+    let active_chunks = world
+        .active_chunks
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     for (entity, faction) in &snapshots {
+        let base = entity.get_entity();
+        let chunk = base.chunk_pos.load();
+        if world.level.is_chunk_loaded(&chunk) {
+            n_loaded += 1;
+        }
+        if active_chunks.contains(&chunk) {
+            n_active += 1;
+        }
+        if base.tick_count.load(Ordering::Relaxed) > 0 {
+            n_ticking += 1;
+        }
         let Some(mob) = entity.get_mob() else {
             continue;
         };
-        let pos = entity.get_entity().pos.load();
+        let pos = base.pos.load();
         let hostile = buckets.nearest_hostile(pos.x, pos.z, faction, ACQUIRE_RANGE);
         let in_combat = hostile.is_some();
-        let alarm = {
-            let dir = lock();
-            dir.towns.get(town_id).is_some_and(|w| w.alarm)
-        };
+        let close_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, SET_TARGET_RANGE);
+        let melee_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, LIVE_MELEE_RANGE);
         let tier = if in_combat {
             LodTier::Combat
         } else if alarm {
@@ -908,21 +975,96 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         } else {
             LodTier::Idle
         };
-        let id = entity.get_entity().entity_id;
+        let id = base.entity_id;
         // Cheap flow-field steering still needs the goal tick. Only idle
         // garrisons get `set_no_ai`; a live raid must actually walk.
         let skip = !alarm && !tier.should_tick(id, tick);
         mob.get_mob_entity().set_no_ai(skip);
         if skip {
+            n_no_ai += 1;
             continue;
         }
-        if let Some(h) = hostile
+        if let Some(h) = close_hostile
             && let Some(target) = world.get_entity_by_id(h.entity_id)
         {
             mob.set_mob_target(Some(target));
-        } else if !in_combat {
+        } else if close_hostile.is_none() {
             mob.set_mob_target(None);
         }
+        let dest = match faction {
+            Faction::Pillager => march_dest,
+            Faction::Kingdom(_) if in_combat || alarm => march_dest,
+            Faction::Kingdom(_) => keep_dest,
+            Faction::Neutral => continue,
+        };
+        let _ = drive_live(mob, dest, in_combat);
+        // World::tick skips entities whose chunk is not in `active_chunks`
+        // and `is_chunk_loaded`. If this mob has never been world-ticked,
+        // or vanilla pathfinding has stalled far from the gate, slide along
+        // the flow field. Director melee covers the same missed-tick case
+        // and also fires when they are in range so live kills show up even
+        // if vanilla melee goals never lock.
+        let dest_v = dest.vec();
+        let far = (pos.x - dest_v.x).hypot(pos.z - dest_v.z) > DIRECT_RANGE;
+        let unticked = base.tick_count.load(Ordering::Relaxed) == 0;
+        if unticked || far {
+            slide_along_field(base, town_id, dest);
+            n_slid += 1;
+        }
+        if tick.is_multiple_of(LIVE_MELEE_PERIOD)
+            && let Some(h) = melee_hostile
+            && let Some(target) = world.get_entity_by_id(h.entity_id)
+        {
+            let _ = target.damage_with_context(
+                target.as_ref(),
+                LIVE_MELEE_DAMAGE,
+                DamageType::MOB_ATTACK,
+                None,
+                Some(entity.as_ref()),
+                Some(entity.as_ref()),
+            );
+        }
+    }
+
+    if alarm && tick.is_multiple_of(20) {
+        let snap = SimSnapshot {
+            tick,
+            positions: snapshots
+                .iter()
+                .map(|(e, f)| {
+                    let p = e.get_entity().pos.load();
+                    (
+                        e.get_entity().entity_id,
+                        p.x,
+                        p.z,
+                        matches!(f, Faction::Pillager),
+                    )
+                })
+                .collect(),
+        };
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            if war.live_snaps.len() >= 64 {
+                war.live_snaps.remove(0);
+            }
+            war.live_snaps.push(snap);
+        }
+    }
+    if tick.is_multiple_of(400) && alarm {
+        let town = town_id.to_owned();
+        std::thread::spawn(move || dump_live_plots(Some(&town)));
+    }
+    if tick.is_multiple_of(100) && alarm {
+        tracing::info!(
+            town = town_id,
+            n_ticking,
+            n_loaded,
+            n_active,
+            n_no_ai,
+            n_slid,
+            entities = snapshots.len(),
+            "kingdoms raid entity tick"
+        );
     }
 
     if let Some((wave, spec, camp, raid_id)) = wave_to_spawn {
@@ -1084,9 +1226,11 @@ pub fn rebind_if_needed(entity: &dyn EntityBase) {
 
 /// Public start-raid used by commands and a future HTTP director.
 pub fn start_raid(world: &Arc<World>, town_id: &str, spec: RaidSpec) -> Result<RaidId, String> {
+    let extra = spec.extra_defenders;
     let id = lock().start_raid(world, town_id, spec)?;
     prepare_raid_chunks(world, town_id);
-    spawn_garrison_if_needed(world, town_id);
+    let have = spawn_garrison_if_needed(world, town_id);
+    spawn_extra_defenders(world, town_id, extra, have);
     Ok(id)
 }
 
@@ -1121,14 +1265,27 @@ fn prepare_raid_chunks(world: &Arc<World>, town_id: &str) {
             forced.insert(*pos);
         }
     }
+    // `forced_chunks` only puts the column in `World::active_chunks`. The
+    // chunk scheduler still unloads block data unless a FULL ticket stays
+    // on it — same pair game tests use (`forced_chunks` + `add_force_ticket`).
+    // `get_or_fetch_chunk` adds a ticket then *removes* it, so a fetch
+    // without this lease is not enough.
+    apply_force_tickets(world, &chunks, true);
+    {
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.ticketed.clone_from(&chunks);
+            war.live_snaps.clear();
+        }
+    }
     world.level.mark_chunks_as_newly_watched(&chunks);
     world.update_active_chunks();
     let loaded_world = Arc::clone(world);
     let level = Arc::clone(&world.level);
     let n = chunks.len();
     world.level.spawn_task(async move {
-        for pos in chunks {
-            level.get_or_fetch_chunk(pos, |_| ()).await;
+        for pos in &chunks {
+            level.get_or_fetch_chunk(*pos, |_| ()).await;
         }
         loaded_world.update_active_chunks();
         tracing::info!(
@@ -1140,6 +1297,25 @@ fn prepare_raid_chunks(world: &Arc<World>, town_id: &str) {
             "kingdoms raid chunks loaded"
         );
     });
+}
+
+fn apply_force_tickets(world: &World, chunks: &[Vector2<i32>], add: bool) {
+    if chunks.is_empty() {
+        return;
+    }
+    let mut loading = world
+        .level
+        .chunk_loading
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for pos in chunks {
+        if add {
+            loading.add_force_ticket(*pos);
+        } else {
+            loading.remove_force_ticket(*pos);
+        }
+    }
+    loading.send_change();
 }
 
 fn raid_chunk_list(town_id: &str) -> Option<(Vec<Vector2<i32>>, ScenePost, ScenePost)> {
@@ -1182,15 +1358,122 @@ fn raid_chunk_list(town_id: &str) -> Option<(Vec<Vector2<i32>>, ScenePost, Scene
     Some((chunks, camp, keep))
 }
 
-fn spawn_garrison_if_needed(world: &Arc<World>, town_id: &str) {
-    let Some((chunks, _, _)) = raid_chunk_list(town_id) else {
+fn slide_along_field(entity: &Entity, town_id: &str, dest: PostTarget) {
+    let pos = entity.pos.load();
+    let (wx, wz) = flow_waypoint(town_id, pos.x, pos.z, dest);
+    let dx = wx - pos.x;
+    let dz = wz - pos.z;
+    let len = dx.hypot(dz);
+    if len < 0.05 {
         return;
+    }
+    let step = SLIDE_STEP.min(len);
+    entity.set_pos(Vector3::new(
+        pos.x + dx / len * step,
+        pos.y,
+        pos.z + dz / len * step,
+    ));
+}
+
+fn plot_dir() -> Option<PathBuf> {
+    let raw = std::env::var("KINGDOMS_PLOT_DIR").ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw))
+}
+
+/// Write start/mid/end top-down frames from live entity positions.
+pub fn dump_live_plots(town_id: Option<&str>) {
+    let Some(dir) = plot_dir() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let towns: Vec<(String, TownInfoScene, Vec<SimSnapshot>, u32, u32)> = {
+        let locked = lock();
+        locked
+            .towns
+            .iter()
+            .filter(|(id, _)| town_id.is_none_or(|want| want == *id))
+            .filter(|(_, war)| !war.live_snaps.is_empty())
+            .map(|(id, war)| {
+                (
+                    id.clone(),
+                    war.scene.clone(),
+                    war.live_snaps.clone(),
+                    war.raiders_killed,
+                    war.defenders_killed,
+                )
+            })
+            .collect()
+    };
+    for (id, scene, snaps, raider_kills, defender_kills) in towns {
+        let stem = format!(
+            "live-{}-d{defender_kills}-r{raider_kills}",
+            id.replace(':', "_")
+        );
+        match write_named_snapshots_with_kills(
+            &scene,
+            &snaps,
+            &dir,
+            &stem,
+            defender_kills,
+            raider_kills,
+        ) {
+            Ok(paths) => tracing::info!(town = id, ?paths, "wrote live raid plots"),
+            Err(err) => tracing::warn!(town = id, %err, "live raid plot failed"),
+        }
+    }
+}
+
+fn spawn_extra_defenders(world: &Arc<World>, town_id: &str, want: u16, have: u16) {
+    if want == 0 {
+        return;
+    }
+    let (kingdom, gate) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        let gate = war.threatened.unwrap_or_else(|| war.scene.keep());
+        (war.kingdom.clone(), gate)
+    };
+    let extra = want.saturating_sub(have);
+    if extra == 0 {
+        return;
+    }
+    let y = standing_y(world, gate);
+    let mut spawned = 0u32;
+    for i in 0..extra {
+        let pos = spawn_offset(gate, i, y);
+        let role = if i % 3 == 2 {
+            VillagerRole::Archer
+        } else {
+            VillagerRole::Guard
+        };
+        if spawn_citizen(world, town_id, &kingdom, role, false, pos).is_some() {
+            spawned += 1;
+        }
+    }
+    if spawned > 0 {
+        tracing::info!(
+            town = town_id,
+            spawned,
+            want,
+            "spawned extra defenders for raid"
+        );
+    }
+}
+
+fn spawn_garrison_if_needed(world: &Arc<World>, town_id: &str) -> u16 {
+    let Some((chunks, _, _)) = raid_chunk_list(town_id) else {
+        return 0;
     };
     let hot: std::collections::HashSet<(i32, i32)> = chunks.iter().map(|c| (c.x, c.y)).collect();
     let (scene, kingdom, existing) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
-            return;
+            return 0;
         };
         let existing = war
             .wired
@@ -1201,7 +1484,7 @@ fn spawn_garrison_if_needed(world: &Arc<World>, town_id: &str) {
     };
     let spec = PopulationSpec::from_scene(&scene);
     if existing >= spec.total() as usize / 2 {
-        return;
+        return existing as u16;
     }
     let slots = citizen_slots(&scene, spec);
     let mut spawned = 0u32;
@@ -1222,10 +1505,17 @@ fn spawn_garrison_if_needed(world: &Arc<World>, town_id: &str) {
     if spawned > 0 {
         tracing::info!(town = town_id, spawned, "spawned town garrison for raid");
     }
+    existing as u16 + spawned as u16
 }
 
 pub fn stop_raid(town_id: Option<&str>) -> u32 {
-    lock().stop_raid(town_id)
+    let worlds = lock().attached_worlds();
+    dump_live_plots(town_id);
+    let (n, tickets) = lock().stop_raid(town_id);
+    for world in worlds {
+        apply_force_tickets(&world, &tickets, false);
+    }
+    n
 }
 
 pub fn set_target_town(raid_id: RaidId, town_id: &str) -> Result<(), String> {
@@ -1277,7 +1567,7 @@ mod tests {
     #[test]
     fn raid_spec_round_trip_on_director_state() {
         let mut dir = Director::new();
-        assert_eq!(dir.stop_raid(None), 0);
+        assert_eq!(dir.stop_raid(None).0, 0);
         let spec = RaidSpec::new(40);
         assert_eq!(spec.waves, 1);
         assert!(is_hostile(

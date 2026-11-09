@@ -3262,15 +3262,19 @@ dependencies = [
 name = "pumpkin-kingdoms"
 version = "0.2.1+26.3-26.51"
 dependencies = [
+ "bytes",
  "image",
  "pumpkin-core",
  "pumpkin-data",
+ "pumpkin-protocol",
  "pumpkin-util",
  "pumpkin-world",
  "rayon",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

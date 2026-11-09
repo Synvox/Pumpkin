@@ -143,6 +143,7 @@ impl CommandExecutor for KingdomJoinExecutor {
 
 struct RaidStartExecutor {
     has_size: bool,
+    has_defenders: bool,
 }
 
 impl CommandExecutor for RaidStartExecutor {
@@ -163,13 +164,17 @@ impl CommandExecutor for RaidStartExecutor {
         } else {
             24
         };
-        let spec = RaidSpec::new(size as u16);
+        let mut spec = RaidSpec::new(size as u16);
+        if self.has_defenders {
+            spec =
+                spec.with_extra_defenders(IntegerArgumentType::get(context, "defenders")? as u16);
+        }
         match director::start_raid(&world, &town_id, spec) {
             Ok(id) => {
                 context.source.send_feedback(
                     TextComponent::text(format!(
-                        "Raid {} started on {town_id} ({} raiders, {} waves)",
-                        id.0, spec.raiders, spec.waves
+                        "Raid {} started on {town_id} ({} raiders, {} waves, {} extra defenders)",
+                        id.0, spec.raiders, spec.waves, spec.extra_defenders
                     ))
                     .color_named(NamedColor::Gold),
                     true,
@@ -238,10 +243,23 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
             .then(
                 literal("start").then(
                     argument("town", StringArgumentType::QuotablePhrase)
-                        .executes(RaidStartExecutor { has_size: false })
+                        .executes(RaidStartExecutor {
+                            has_size: false,
+                            has_defenders: false,
+                        })
                         .then(
                             argument("size", IntegerArgumentType::new(1, 400))
-                                .executes(RaidStartExecutor { has_size: true }),
+                                .executes(RaidStartExecutor {
+                                    has_size: true,
+                                    has_defenders: false,
+                                })
+                                .then(
+                                    argument("defenders", IntegerArgumentType::new(0, 400))
+                                        .executes(RaidStartExecutor {
+                                            has_size: true,
+                                            has_defenders: true,
+                                        }),
+                                ),
                         ),
                 ),
             )

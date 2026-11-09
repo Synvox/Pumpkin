@@ -18,17 +18,25 @@ path = "src/bin/pregen.rs"
 name = "kingdoms-siege-bench"
 path = "src/bin/siege_bench.rs"
 
+[[bin]]
+name = "kingdoms-raid-bot"
+path = "src/bin/raid_bot.rs"
+
 [dependencies]
 pumpkin-core.workspace = true
 pumpkin-data = { workspace = true, features = ["default"] }
+pumpkin-protocol.workspace = true
 pumpkin-util.workspace = true
 pumpkin-world.workspace = true
 
+bytes.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
 tracing.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

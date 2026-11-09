@@ -20,7 +20,6 @@ use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::sound::{Sound, SoundCategory};
 use pumpkin_util::Difficulty;
-use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
 
 use crate::faction::{
@@ -65,10 +64,6 @@ impl PostTarget {
     }
 }
 
-fn surface_y(world: &World, x: i32, z: i32) -> i32 {
-    world.sample_surface_height(x, z).unwrap_or(world.sea_level)
-}
-
 fn town_id_of(entity: &pumpkin_core::entity::Entity) -> Option<String> {
     let tags = entity
         .scoreboard_tags
@@ -109,6 +104,13 @@ fn set_nav(mob: &dyn Mob, dest: Vector3<f64>, speed: f64) {
         .steered()
         .navigator()
         .set_progress(NavigatorGoal::new(pos, dest, speed));
+}
+
+/// Director-driven walk toward `dest`. Used when vanilla goals lose MOVE or
+/// the mob has not been world-ticked yet.
+pub fn drive_live(mob: &dyn Mob, dest: PostTarget, in_combat: bool) -> bool {
+    let speed = if in_combat { MELEE_SPEED } else { MARCH_SPEED };
+    try_path_steered(mob, dest, speed, false)
 }
 
 /// Live navigator update. Close / follower steering is free; only a far-away
@@ -653,7 +655,7 @@ pub fn bind_golem(mob: &dyn Mob, town_id: &str, kingdom: &crate::faction::Kingdo
 }
 
 /// Extra raid behaviour on top of vanilla pillager / vindicator goals.
-pub fn bind_raider(mob: &dyn Mob, town_id: &str, captain: bool, world: &World, camp: ScenePost) {
+pub fn bind_raider(mob: &dyn Mob, town_id: &str, captain: bool, _world: &World, _camp: ScenePost) {
     let entity = mob.get_entity();
     mob.get_mob_entity()
         .persistence_required
@@ -670,9 +672,10 @@ pub fn bind_raider(mob: &dyn Mob, town_id: &str, captain: bool, world: &World, c
         mob.get_mob_entity()
             .set_item_slot(&EquipmentSlot::HEAD, banner);
     }
-    let y = surface_y(world, camp.x, camp.z);
     if let Some(raider) = mob.as_raider() {
-        raider.set_patrol_target(BlockPos::new(camp.x, y, camp.z));
+        // Do not pin `patrol_target` on the camp: `LongDistancePatrolGoal`
+        // would hold them there, and `HoldGroundAttackGoal` stops the
+        // navigator once they have a target.
         raider.set_can_join_raid(true);
     }
     let town = town_id.to_owned();

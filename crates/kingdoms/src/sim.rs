@@ -551,19 +551,58 @@ pub fn write_plot_snapshots(
     dir: &std::path::Path,
     n: usize,
 ) -> std::io::Result<Vec<std::path::PathBuf>> {
-    let snaps = pick_keyframes(report);
+    write_named_snapshots(scene, &report.snapshots, dir, &format!("siege-{n}"))
+}
+
+/// Same frames as [`write_plot_snapshots`], with a caller-chosen file stem.
+pub fn write_named_snapshots(
+    scene: &dyn TownScene,
+    snapshots: &[SimSnapshot],
+    dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    write_named_snapshots_with_kills(scene, snapshots, dir, stem, 0, 0)
+}
+
+/// Live plots: start/mid/end from captured entity positions.
+pub fn write_named_snapshots_with_kills(
+    scene: &dyn TownScene,
+    snapshots: &[SimSnapshot],
+    dir: &std::path::Path,
+    stem: &str,
+    defender_kills: u32,
+    raider_kills: u32,
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let report = SimReport {
+        ticks: snapshots.last().map_or(0, |s| s.tick),
+        defenders: 0,
+        raiders: 0,
+        defenders_left: 0,
+        raiders_left: 0,
+        defender_kills,
+        raider_kills,
+        ms_per_tick: 0.0,
+        worst_ms: 0.0,
+        total_ms: 0.0,
+        path_attempts: 0,
+        path_capped: 0,
+        melee_engaged: 0,
+        peak_melee: 0,
+        snapshots: snapshots.to_vec(),
+    };
+    let snaps = pick_keyframes(&report);
     let labels = ["START", "MID", "END"];
     let mut paths = Vec::new();
     let mut frames = Vec::new();
     for (label, snap) in labels.iter().zip(snaps.iter()) {
-        let path = dir.join(format!("siege-{n}-{}.png", label.to_ascii_lowercase()));
-        let img = render_image(scene, snap.as_ref(), report, label);
+        let path = dir.join(format!("{stem}-{}.png", label.to_ascii_lowercase()));
+        let img = render_image(scene, snap.as_ref(), &report, label);
         img.save(&path).map_err(std::io::Error::other)?;
         frames.push(img);
         paths.push(path);
     }
     if let Some(strip) = stitch_h(&frames) {
-        let path = dir.join(format!("siege-{n}-strip.png"));
+        let path = dir.join(format!("{stem}-strip.png"));
         strip.save(&path).map_err(std::io::Error::other)?;
         paths.push(path);
     }

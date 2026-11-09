@@ -119,6 +119,7 @@ crates/kingdoms/
   src/watertight.rs    flood-fill envelope check
   src/render.rs        top-down + isometric + cutaway PNG
   src/bin/pregen.rs    offline proof + renders + watertight report
+  src/bin/raid_bot.rs  headless Java client that stands in a town so it ticks
 ```
 
 `/locatetown` prints the nearest planned town, a sampled surface Y, and the castle size.
@@ -190,7 +191,36 @@ CARGO_PROFILE_RELEASE_LTO=off cargo run --release -p pumpkin-kingdoms --bin king
 
 Plots are ≥1024 px, wall/keep/gates under the dots, legend, start/mid/end frames plus a strip (`siege-{n}-start/mid/end/strip.png`).
 
-Live Pumpkin (release, LTO off, seed `20261025`, no player): `/raid start here 40` spawned 40 raiders at hinterland camp `(1532, 476)` and 35 garrison, forceloaded 170 chunks, civilians rang the bell. Director MSPT stayed ~0.5 ms. Raiders did not walk (`raider_gate_dist` stuck at 109 for 2000+ ticks). Headless sim is the engagement evidence; a real client in the town is still needed for live melee.
+### Live ticking (why a headless raid used to freeze)
+
+Pumpkin ticks an entity only when its chunk is in `World::active_chunks` **and** `Level::is_chunk_loaded`. `forced_chunks` (what `/forceload` and the first raid code wrote) only fills `active_chunks`. The chunk scheduler still unpublishes block data unless a lasting `ChunkLoading::add_force_ticket` is held. `get_or_fetch_chunk` adds a FULL ticket then **removes** it after the fetch, so a one-shot load is not enough. Game tests already pair `forced_chunks` with `add_force_ticket`; vanilla `/forceload` in Pumpkin does not.
+
+That is why a console-only raid spawned 40 raiders, civilians rang the bell in the ~1 s window while tickets were draining, then `raider_gate_dist` sat at 109.28 for thousands of ticks: the camp chunks were no longer `is_chunk_loaded`, so `World::tick` skipped them. `set_no_ai` was already cleared for an active raid.
+
+The raid now leases those chunks with `add_force_ticket` (released on `/raid stop` / victory). The director also drives flow-field navigation every tick, and if a mob's `tick_count` is still 0 it slides along the field and applies melee itself so a missed ticket cannot freeze the fight.
+
+A logged-in player is still how a real game ticks a region. `kingdoms-raid-bot` joins offline, stands at the threatened gate (client-authoritative `SPlayerPosition`), and answers keep-alives. Use it for live evidence:
+
+```bash
+# pumpkin.toml: networking.java.online_mode=false encryption=false (compression can stay on)
+KINGDOMS_PLOT_DIR=/opt/cursor/artifacts cargo run --release -p pumpkin
+# other terminal:
+kingdoms-raid-bot --host 127.0.0.1:25565 --x GATE_X --y GATE_Y --z GATE_Z --seconds 180
+# console:
+raid start here 40
+raid start here 200 200
+```
+
+`Server::get_tps()` is `1000 / get_mspt()`, not a capped 20 Hz counter. An empty tick at 0.5 ms reports ~2000 TPS. That number is inverted MSPT, not proof that entities are running, and not proof that they are not. Read `mspt` and the `n_ticking` line instead.
+
+Live Pumpkin (release, LTO off, seed `20261025`, `kingdoms-raid-bot` standing at the threatened gate, `KINGDOMS_PLOT_DIR` plots). Combat is `EntityDamageByEntity` (`kingdoms combat` in the log).
+
+| Fight | `raider_gate_dist` | kills (def/raid) | fight MSPT | `n_ticking` |
+| --- | ---: | ---: | ---: | ---: |
+| 40 vs ~35 | 57 → 15 (gate) | 58 / 40 | ~17–33 ms | 31–78 |
+| 200 vs 200 | 15 (already at the gate) | +200 raider deaths (238 total / 266 def) | ~38–68 ms at peak | ~90–200 |
+
+40-raid: spawned at hinterland camp `(1532, 476)`, gate `(1504, 597)`, all 40 raiders dead, melee `DamageType::MOB_ATTACK`. 200-raid: one wave of 200 plus 157 extra defenders, server ran behind (`Can't keep up` 8 s / 165 ticks) while ~300 combatants were in contact. Plots: `/opt/cursor/artifacts/live-40-strip.png`, `live-200-strip.png`.
 
 ### Commands
 
@@ -199,7 +229,7 @@ Live Pumpkin (release, LTO off, seed `20261025`, no player): `/raid start here 4
 | `/locatetown` | nearest planned town |
 | `/kingdom info` | town, kingdom, battle counts |
 | `/kingdom join <kingdom>` | `alder` or `raven` (players fight with that side) |
-| `/raid start <town> [size]` | start a pillager raid |
+| `/raid start <town> [size] [defenders]` | start a pillager raid. Optional `defenders` is how many kingdom combatants to field (extras spawn at the threatened gate). |
 | `/raid stop` | stop all kingdoms raids |
 
 ## Build and run
