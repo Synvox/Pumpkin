@@ -45,7 +45,7 @@ let json = info.to_json()?;
 | `roads` (polylines + endpoints) | March graph |
 | `buildings` | Civilian / economic sites |
 | `scenes` | Hinterland and civic scenes (farmstead, hamlet, camp, monastery, …) |
-| `spawns` | Villager beds, workstations, wall/tower guard posts, market and keep rallies, gates, pillager camp spawn/rally |
+| `spawns` | Villager beds, workstations, wall/tower guard posts, market and keep rallies, gates, pillager camp tent spawn/rally, covered ram, siege ladders |
 
 `spawns` is a pure function of seed+cell (planner height + occupancy). `y` is the sampled surface + 1, the standing height the stamper aims for, not a live chunk Y. The villager AI layer can query:
 
@@ -57,9 +57,9 @@ let beds: Vec<_> = info.spawns.iter().filter(|s| s.role == SpawnRole::VillagerBe
 let camp: Vec<_> = info.spawns.iter().filter(|s| s.role == SpawnRole::PillagerSpawn).collect();
 ```
 
-Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `Gate`, `PillagerSpawn`, `PillagerRally`.
+Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `Gate`, `PillagerSpawn`, `PillagerRally`, `SiegeRam`, `SiegeLadder`.
 
-No capture, siege, or AI logic lives here yet. `TownPlan` still holds the occupancy grid used to stamp chunks; `TownInfo` is the small struct game systems should store.
+`TownInfo` stays geometry only. Capture, siege jobs, and AI live in the director (`siege.rs`). Town ownership is `kingdoms-ownership.json` in the world folder and shows up on `battle_state.owner`.
 
 Inter-cell roads meet at a crossing hashed from the unordered cell pair. The western/northern cell writes up to the column before the shared edge; the eastern/southern cell writes the edge column. Both sides use the same `z` (or `x`) so the road reads as one line.
 
@@ -185,6 +185,8 @@ Headless numbers (flow-field steering on a planned town, **not** a full server t
 
 200 vs 200 stays under ~10 ms/tick of sim AI, with most combatants reaching melee. Path budget is only spent on squad-leader refreshes; 400 vs 400 starts to clip those.
 
+Live 200 vs 200 was 38–68 ms MSPT when vanilla `MeleeAttackGoal` / `RangedCrossbowAttackGoal` and `LivingEntity::push_entities` still ran. The director now tags raid soldiers `NoAI` and slides them on the flow field; batched target acquisition and throttled melee/bow replace the vanilla goals. The one upstream hook is skipping `push_entities` for NoAI mobs (documented next to the call in `living.rs`). Target: sustained ≤40 ms MSPT at 200 vs 200, ideally ≤25.
+
 ```bash
 CARGO_PROFILE_RELEASE_LTO=off cargo run --release -p pumpkin-kingdoms --bin kingdoms-siege-bench -- --n 200 --ticks 800 --out-dir /opt/cursor/artifacts
 ```
@@ -213,21 +215,26 @@ raid start here 200 200
 
 `Server::get_tps()` is `1000 / get_mspt()`, not a capped 20 Hz counter. An empty tick at 0.5 ms reports ~2000 TPS. That number is inverted MSPT, not proof that entities are running, and not proof that they are not. Read `mspt` and the `n_ticking` line instead.
 
-Live Pumpkin (release, LTO off, seed `20261025`, `kingdoms-raid-bot` standing at the threatened gate, `KINGDOMS_PLOT_DIR` plots). Combat is `EntityDamageByEntity` (`kingdoms combat` in the log).
+Live Pumpkin (release, LTO off, seed `20261025`, `kingdoms-raid-bot` standing at the threatened gate, `KINGDOMS_PLOT_DIR` plots). Combat is sampled `kingdoms combat` lines. Raid soldiers are `NoAI`; the director slides them on the flow field and applies throttled melee/bow. Vanilla goal A* and entity shoving are off (the shove skip is the one-line `push_entities` hook in `living.rs`).
 
-| Fight | `raider_gate_dist` | kills (def/raid) | fight MSPT | `n_ticking` |
-| --- | ---: | ---: | ---: | ---: |
-| 40 vs ~35 | 57 → 15 (gate) | 58 / 40 | ~17–33 ms | 31–78 |
-| 200 vs 200 | 15 (already at the gate) | +200 raider deaths (238 total / 266 def) | ~38–68 ms at peak | ~90–200 |
+| Fight | peak bodies | fight MSPT | director_ms | `Can't keep up` | notes |
+| --- | ---: | ---: | ---: | --- | --- |
+| before (vanilla goals) | ~300 | 38–68 ms | n/a | yes, during contact | PR #6 live 200 |
+| 200 vs 200 (+ leftovers) | 197 / 355 | **9–20 ms** (peak 19.8) | 3–5 (133 at spawn) | start only (8.6 s / 172 ticks, chunk tickets) | ram breach; capture |
+| 400 vs 400 (+ leftovers) | 400 / 708 | **10–30 ms** (peak 30.4 then 15) | 4–9 | none during fight | packed at gate |
 
-40-raid: spawned at hinterland camp `(1532, 476)`, gate `(1504, 597)`, all 40 raiders dead, melee `DamageType::MOB_ATTACK`. 200-raid: one wave of 200 plus 157 extra defenders, server ran behind (`Can't keep up` 8 s / 165 ticks) while ~300 combatants were in contact. Plots: `/opt/cursor/artifacts/live-40-strip.png`, `live-200-strip.png`.
+Capture: `kingdoms town captured town=20261025:0:0 raiders_in_keep=27 hold=200`. Ownership file `world/kingdoms-ownership.json` → `"pillager"`. `battle_state.owner` exposes it. Gates closed at `(1504, 597)` and `(1327, 669)`; ram cleared 18 iron bars at the town gate.
+
+Plots: `/opt/cursor/artifacts/live-r2.log`, `live-r2-strip.png`, `live-200-r2-strip.png`, `live-400-r2-strip.png`, `kingdoms-ownership.json`.
+
+Gaps: 400 was stacked on leftover bodies so it is not a clean 400 vs 400; the start hitch is still force-load catch-up, not AI; archers at this scale deal director damage rather than arrow entities; the covered ram is a spawn/job, not a moving block.
 
 ### Commands
 
 | Command | |
 | --- | --- |
 | `/locatetown` | nearest planned town |
-| `/kingdom info` | town, kingdom, battle counts |
+| `/kingdom info` | town, kingdom, owner, battle counts, gate breach |
 | `/kingdom join <kingdom>` | `alder` or `raven` (players fight with that side) |
 | `/raid start <town> [size] [defenders]` | start a pillager raid. Optional `defenders` is how many kingdom combatants to field (extras spawn at the threatened gate). |
 | `/raid stop` | stop all kingdoms raids |

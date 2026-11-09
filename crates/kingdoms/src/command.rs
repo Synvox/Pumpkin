@@ -89,7 +89,8 @@ impl CommandExecutor for KingdomInfoExecutor {
         }
         if let Some(b) = battle {
             lines.push(format!(
-                "alarm={} raid={} wave {}/{} defenders {} raiders {} killed d/r {}/{}",
+                "owner={} alarm={} raid={} wave {}/{} defenders {} raiders {} killed d/r {}/{} breached={}",
+                b.owner,
                 b.alarm,
                 b.raid_active,
                 b.wave,
@@ -97,7 +98,8 @@ impl CommandExecutor for KingdomInfoExecutor {
                 b.defenders_alive,
                 b.raiders_alive,
                 b.defenders_killed,
-                b.raiders_killed
+                b.raiders_killed,
+                b.gate_breached
             ));
         } else {
             lines.push("no active battle".to_owned());
