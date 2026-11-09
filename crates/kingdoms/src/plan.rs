@@ -20,7 +20,7 @@ use crate::info::{GateInfo, GateKind, RoadInfo};
 use crate::palette::PaletteKind;
 use crate::rng::TownRng;
 use crate::scenes::{Scene, SceneKind, place_scenes, record_harbour};
-use crate::town::{TOWN_INFLUENCE, TownPos, town_in_cell};
+use crate::town::{CELL_SIZE, TownPos, border_crossing, border_goal, town_in_cell};
 
 /// Pad around castle+town so hinterland farms, hamlets and camps fit.
 const HINTERLAND_PAD: i32 = 120;
@@ -49,6 +49,8 @@ pub struct TownPlan {
     pub lots: Vec<Lot>,
     pub scenes: Vec<Scene>,
     pub occ: Occupancy,
+    /// Road columns outside hinterland occupancy, used to stitch cell borders.
+    pub border_roads: HashMap<(i32, i32), CellKind>,
     pub heights: HeightGrid,
 }
 
@@ -81,13 +83,14 @@ pub fn plan_for(seed: u64, cell_x: i32, cell_z: i32, world_gen: &WorldGenerator)
         return Arc::clone(plan);
     }
     let origin = town_in_cell(seed, cell_x, cell_z);
-    let pad = TOWN_INFLUENCE;
+    let min_x = origin.cell_x * CELL_SIZE;
+    let min_z = origin.cell_z * CELL_SIZE;
     let grid = HeightGrid::sample(
         world_gen,
-        origin.x - pad,
-        origin.z - pad,
-        origin.x + pad,
-        origin.z + pad,
+        min_x,
+        min_z,
+        min_x + CELL_SIZE,
+        min_z + CELL_SIZE,
         SAMPLE_STEP,
     );
     let palette = sample_palette(world_gen, origin.x, origin.z);
@@ -175,7 +178,17 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     let mut waypoints = vec![well, castle.gatehouse.center()];
     waypoints.extend(gate_pts);
     let mut roads = paint_roads(&mut occ, &grid, &waypoints);
-    paint_outbound_roads(&mut occ, &grid, origin, seed, well, &gates, &mut roads);
+    let mut border_roads = HashMap::new();
+    paint_outbound_roads(
+        &mut occ,
+        &mut border_roads,
+        &grid,
+        origin,
+        seed,
+        well,
+        &gates,
+        &mut roads,
+    );
 
     let mut lots = place_lots(&mut occ, &grid, town_rect, market, &mut rng, seed);
     place_farms(&mut occ, &grid, town_rect, castle_rect, &mut rng);
@@ -214,6 +227,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         lots,
         scenes,
         occ,
+        border_roads,
         heights: grid,
     }
 }
@@ -560,9 +574,10 @@ fn town_gates(town: Rect, castle_gate: (i32, i32), dir: Dir) -> Vec<(i32, i32)> 
 fn paint_roads(occ: &mut Occupancy, grid: &HeightGrid, waypoints: &[(i32, i32)]) -> Vec<RoadInfo> {
     let mut roads = Vec::new();
     let bounds = occ.bounds;
+    let mut unused = HashMap::new();
     let mut push = |path: Vec<(i32, i32)>| {
         if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
-            paint_path(occ, grid, &path);
+            paint_path(occ, &mut unused, grid, &path);
             roads.push(RoadInfo {
                 from: [first.0, first.1],
                 to: [last.0, last.1],
@@ -591,6 +606,7 @@ fn paint_roads(occ: &mut Occupancy, grid: &HeightGrid, waypoints: &[(i32, i32)])
 
 fn paint_outbound_roads(
     occ: &mut Occupancy,
+    overlay: &mut HashMap<(i32, i32), CellKind>,
     grid: &HeightGrid,
     origin: TownPos,
     seed: u64,
@@ -598,21 +614,33 @@ fn paint_outbound_roads(
     gates: &[GateInfo],
     roads: &mut Vec<RoadInfo>,
 ) {
-    let bounds = occ.bounds;
     let start = gates
         .iter()
         .find(|gate| gate.kind == GateKind::Town)
         .map_or(well, |gate| (gate.x, gate.z));
     for dir in Dir::ALL {
         let neighbor = town_in_cell(seed, origin.cell_x + dir.dx(), origin.cell_z + dir.dz());
-        let goal = clip_toward(bounds, start, (neighbor.x, neighbor.z));
-        if (goal.0 - start.0).abs() + (goal.1 - start.1).abs() < 28 {
+        let crossing = border_crossing(seed, origin, neighbor);
+        let goal = border_goal(origin, neighbor, crossing);
+        let clipped = clip_to_grid(grid, Rect::new(goal.0, goal.1, goal.0, goal.1));
+        let route_goal = (clipped.min_x, clipped.min_z);
+        if (route_goal.0 - start.0).abs() + (route_goal.1 - start.1).abs() < 28 {
             continue;
         }
-        let path = astar(grid, bounds, start, goal)
-            .unwrap_or_else(|| bresenham(start.0, start.1, goal.0, goal.1));
+        let search = clip_to_grid(
+            grid,
+            Rect::new(start.0, start.1, route_goal.0, route_goal.1).inflate(80),
+        );
+        let path = astar(grid, search, start, route_goal)
+            .unwrap_or_else(|| bresenham(start.0, start.1, route_goal.0, route_goal.1));
         if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
-            paint_path(occ, grid, &path);
+            paint_path(occ, overlay, grid, &path);
+            stamp_road_cell(occ, overlay, goal.0, goal.1, CellKind::Road);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    stamp_road_cell(occ, overlay, goal.0 + dx, goal.1 + dz, CellKind::Road);
+                }
+            }
             roads.push(RoadInfo {
                 from: [first.0, first.1],
                 to: [last.0, last.1],
@@ -622,21 +650,12 @@ fn paint_outbound_roads(
     }
 }
 
-fn clip_toward(bounds: Rect, start: (i32, i32), target: (i32, i32)) -> (i32, i32) {
-    let inner = bounds.deflate(6);
-    let line = bresenham(start.0, start.1, target.0, target.1);
-    let mut last = start;
-    for point in line {
-        if inner.contains(point.0, point.1) {
-            last = point;
-        } else {
-            break;
-        }
-    }
-    last
-}
-
-fn paint_path(occ: &mut Occupancy, grid: &HeightGrid, path: &[(i32, i32)]) {
+fn paint_path(
+    occ: &mut Occupancy,
+    overlay: &mut HashMap<(i32, i32), CellKind>,
+    grid: &HeightGrid,
+    path: &[(i32, i32)],
+) {
     for window in path.windows(2) {
         let (x, z) = window[0];
         let (nx, nz) = window[1];
@@ -661,25 +680,47 @@ fn paint_path(occ: &mut Occupancy, grid: &HeightGrid, path: &[(i32, i32)]) {
                 } else {
                     CellKind::Road
                 };
-                let cell = occ.kind(x + dx, z + dz);
-                if !cell.is_castle() && cell != CellKind::Well {
-                    occ.set(
-                        x + dx,
-                        z + dz,
-                        kind,
-                        matches!(
-                            cell,
-                            CellKind::Empty
-                                | CellKind::Farm
-                                | CellKind::FarmEdge
-                                | CellKind::Market
-                                | CellKind::Plaza
-                                | CellKind::Green
-                        ),
-                    );
-                }
+                stamp_road_cell(occ, overlay, x + dx, z + dz, kind);
             }
         }
+    }
+    if let Some(&(x, z)) = path.last() {
+        stamp_road_cell(occ, overlay, x, z, CellKind::Road);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                stamp_road_cell(occ, overlay, x + dx, z + dz, CellKind::Road);
+            }
+        }
+    }
+}
+
+fn stamp_road_cell(
+    occ: &mut Occupancy,
+    overlay: &mut HashMap<(i32, i32), CellKind>,
+    x: i32,
+    z: i32,
+    kind: CellKind,
+) {
+    if occ.bounds.contains(x, z) {
+        let cell = occ.kind(x, z);
+        if !cell.is_castle() && cell != CellKind::Well {
+            occ.set(
+                x,
+                z,
+                kind,
+                matches!(
+                    cell,
+                    CellKind::Empty
+                        | CellKind::Farm
+                        | CellKind::FarmEdge
+                        | CellKind::Market
+                        | CellKind::Plaza
+                        | CellKind::Green
+                ),
+            );
+        }
+    } else {
+        overlay.entry((x, z)).or_insert(kind);
     }
 }
 
@@ -728,7 +769,7 @@ fn astar(
     let mut guard = 0u32;
     while let Some(Node { x, z, .. }) = open.pop() {
         guard += 1;
-        if guard > 8_000 {
+        if guard > 24_000 {
             break;
         }
         if (x, z) == goal {
@@ -1113,5 +1154,43 @@ mod tests {
             town_dry >= 70,
             "market neighborhood should be mostly dry, got {town_dry}"
         );
+    }
+
+    #[test]
+    fn outbound_roads_meet_the_cell_border() {
+        let seed = 7u64;
+        let origin = town_in_cell(seed, 0, 0);
+        let grid = HeightGrid::synthetic_slope(0, 0, CELL_SIZE, CELL_SIZE, 8, 70, 2, 1);
+        let plan = build_plan(seed, origin, grid, PaletteKind::Oak);
+        let neighbor = town_in_cell(seed, 1, 0);
+        let cross = border_crossing(seed, origin, neighbor);
+        let goal = border_goal(origin, neighbor, cross);
+        let mut found = false;
+        for dz in -4..=4 {
+            for dx in -4..=4 {
+                let x = goal.0 + dx;
+                let z = goal.1 + dz;
+                let kind = plan
+                    .border_roads
+                    .get(&(x, z))
+                    .copied()
+                    .unwrap_or_else(|| plan.occ.kind(x, z));
+                if matches!(
+                    kind,
+                    CellKind::Road
+                        | CellKind::RoadStairN
+                        | CellKind::RoadStairS
+                        | CellKind::RoadStairE
+                        | CellKind::RoadStairW
+                ) {
+                    found = true;
+                }
+            }
+        }
+        assert!(
+            found,
+            "expected a stitched road at the hashed crossing {goal:?}"
+        );
+        assert_eq!(cross.0, CELL_SIZE);
     }
 }

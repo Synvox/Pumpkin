@@ -25,6 +25,8 @@ pub enum SceneKind {
     Graveyard,
     Harbour,
     Plaza,
+    Cathedral,
+    MountainFortress,
 }
 
 impl SceneKind {
@@ -43,6 +45,8 @@ impl SceneKind {
             Self::Graveyard => "Graveyard",
             Self::Harbour => "Harbour",
             Self::Plaza => "Plaza",
+            Self::Cathedral => "Cathedral",
+            Self::MountainFortress => "Mountain fortress",
         }
     }
 }
@@ -116,7 +120,29 @@ pub fn place_scenes(
         &mut scenes,
     );
     place_graveyard(occ, grid, town, lots, rng, &mut scenes);
-    place_pillager_camp(occ, grid, castle, town, search, rng, &mut scenes);
+    place_pillager_camp(
+        occ,
+        grid,
+        castle,
+        town,
+        search,
+        lots,
+        seed,
+        rng,
+        &mut scenes,
+    );
+    place_hero(
+        occ,
+        grid,
+        castle,
+        town,
+        search,
+        lots,
+        seed,
+        rng,
+        &mut scenes,
+    );
+    paint_wind_sails(occ, lots);
     paint_forge_yards(occ, lots);
     scenes
 }
@@ -375,19 +401,33 @@ fn place_monastery(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
-    let Some(yard) = find_site(occ, grid, search, town, keep_out, 28, 22, true, rng) else {
+    let Some(yard) = find_site(occ, grid, search, town, keep_out, 34, 30, true, rng) else {
         return;
     };
     occ.fill(yard, CellKind::Green, false);
     occ.fill(yard.deflate(1), CellKind::Hedge, false);
     occ.fill(yard.deflate(2), CellKind::Green, true);
     let nave = Rect::new(
-        yard.min_x + 4,
+        yard.min_x + 8,
         yard.min_z + 3,
-        yard.min_x + 23,
-        yard.min_z + 16,
+        yard.min_x + 25,
+        yard.min_z + 14,
     );
-    if try_lot(
+    let cloister = Rect::new(
+        yard.min_x + 10,
+        yard.min_z + 16,
+        yard.min_x + 23,
+        yard.min_z + 27,
+    );
+    occ.fill(cloister, CellKind::Arcade, true);
+    occ.fill(cloister.deflate(2), CellKind::Green, true);
+    let bell = Rect::new(
+        yard.min_x + 3,
+        yard.min_z + 3,
+        yard.min_x + 7,
+        yard.min_z + 7,
+    );
+    let nave_ok = try_lot(
         occ,
         grid,
         lots,
@@ -396,8 +436,17 @@ fn place_monastery(
         nave,
         Dir::South,
     )
-    .is_some()
-    {
+    .is_some();
+    let _ = try_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::BellTower,
+        bell,
+        Dir::South,
+    );
+    if nave_ok {
         scenes.push(Scene {
             kind: SceneKind::Monastery,
             rect: yard,
@@ -421,20 +470,20 @@ fn place_graveyard(
         Rect::new(
             anchor.max_x + 2,
             anchor.min_z,
-            anchor.max_x + 13,
-            anchor.min_z + 10,
+            anchor.max_x + 19,
+            anchor.min_z + 13,
         ),
         Rect::new(
-            anchor.min_x - 13,
+            anchor.min_x - 19,
             anchor.min_z,
             anchor.min_x - 2,
-            anchor.min_z + 10,
+            anchor.min_z + 13,
         ),
         Rect::new(
             anchor.min_x,
             anchor.max_z + 2,
-            anchor.min_x + 12,
-            anchor.max_z + 11,
+            anchor.min_x + 17,
+            anchor.max_z + 15,
         ),
     ];
     for rect in candidates {
@@ -449,8 +498,7 @@ fn place_graveyard(
         if !rng.chance(4, 5) {
             continue;
         }
-        occ.fill(rect, CellKind::FarmEdge, false);
-        occ.fill(rect.deflate(1), CellKind::Grave, true);
+        paint_graveyard(occ, rect);
         scenes.push(Scene {
             kind: SceneKind::Graveyard,
             rect,
@@ -463,18 +511,29 @@ fn place_graveyard(
         occ.bounds,
         town,
         town.inflate(8),
-        12,
-        10,
+        18,
+        14,
         false,
         rng,
     ) {
-        occ.fill(rect, CellKind::FarmEdge, false);
-        occ.fill(rect.deflate(1), CellKind::Grave, true);
+        paint_graveyard(occ, rect);
         scenes.push(Scene {
             kind: SceneKind::Graveyard,
             rect,
         });
     }
+}
+
+fn paint_graveyard(occ: &mut Occupancy, rect: Rect) {
+    occ.fill(rect, CellKind::FarmEdge, false);
+    occ.fill(rect.deflate(1), CellKind::Grave, true);
+    let gate = Rect::new(
+        rect.center().0 - 1,
+        rect.max_z - 2,
+        rect.center().0 + 1,
+        rect.max_z,
+    );
+    occ.fill(gate, CellKind::Lychgate, true);
 }
 
 fn place_pillager_camp(
@@ -483,6 +542,8 @@ fn place_pillager_camp(
     castle: Rect,
     town: Rect,
     search: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
@@ -491,54 +552,402 @@ fn place_pillager_camp(
     let dx = (tx - cx).signum();
     let dz = (tz - cz).signum();
     let aim = (
-        (tx + dx * 108).clamp(search.min_x + 16, search.max_x - 16),
-        (tz + dz * 108).clamp(search.min_z + 16, search.max_z - 16),
+        (tx + dx * 108).clamp(search.min_x + 18, search.max_x - 18),
+        (tz + dz * 108).clamp(search.min_z + 18, search.max_z - 18),
     );
     let mut best = None;
     let mut best_score = i32::MIN;
     let mut z = search.min_z + 8;
-    while z + 24 < search.max_z {
+    while z + 32 < search.max_z {
         let mut x = search.min_x + 8;
-        while x + 28 < search.max_x {
-            let rect = Rect::new(x, z, x + 26, z + 22);
-            x += 14;
+        while x + 36 < search.max_x {
+            let rect = Rect::new(x, z, x + 34, z + 28);
+            x += 16;
             if town.inflate(36).intersects(rect) || castle.inflate(20).intersects(rect) {
                 continue;
             }
-            if !site_ok(occ, grid, rect, 10) {
+            if !site_ok(occ, grid, rect, 12) {
                 continue;
             }
             let (mx, mz) = rect.center();
             let dist_aim = (mx - aim.0).abs() + (mz - aim.1).abs();
-            let score = 200 - dist_aim + rng.gen_range(0, 8);
+            let score = 240 - dist_aim + rng.gen_range(0, 8);
             if score > best_score {
                 best_score = score;
                 best = Some(rect);
             }
         }
-        z += 12;
+        z += 14;
     }
     let Some(rect) = best else {
         return;
     };
     occ.fill(rect, CellKind::Palisade, false);
     occ.fill(rect.deflate(1), CellKind::CampCourt, true);
-    let mut tents = 0;
-    for tz in (rect.min_z + 4..rect.max_z - 5).step_by(8) {
-        for tx in (rect.min_x + 4..rect.max_x - 5).step_by(8) {
-            if tents >= 5 {
-                break;
-            }
-            let tent = Rect::new(tx, tz, tx + 2, tz + 2);
-            if occ.kind(tx, tz) == CellKind::CampCourt {
-                occ.fill(tent, CellKind::Tent, true);
-                tents += 1;
-            }
-        }
+    let face = gate_face_toward(rect, town);
+    paint_palisade_gate(occ, rect, face);
+
+    let (cx, cz) = rect.center();
+    occ.fill(
+        Rect::new(cx - 3, cz - 2, cx + 3, cz + 2),
+        CellKind::WarTent,
+        true,
+    );
+    let tents = [
+        Rect::new(
+            rect.min_x + 4,
+            rect.min_z + 4,
+            rect.min_x + 8,
+            rect.min_z + 7,
+        ),
+        Rect::new(
+            rect.max_x - 8,
+            rect.min_z + 4,
+            rect.max_x - 4,
+            rect.min_z + 7,
+        ),
+        Rect::new(
+            rect.min_x + 4,
+            rect.max_z - 8,
+            rect.min_x + 8,
+            rect.max_z - 5,
+        ),
+        Rect::new(
+            rect.max_x - 8,
+            rect.max_z - 8,
+            rect.max_x - 4,
+            rect.max_z - 5,
+        ),
+    ];
+    for tent in tents {
+        occ.fill(tent, CellKind::Tent, true);
     }
+    occ.fill(
+        Rect::new(cx - 5, cz + 4, cx - 3, cz + 6),
+        CellKind::Cage,
+        true,
+    );
+    occ.fill(
+        Rect::new(cx + 3, cz + 4, cx + 5, cz + 6),
+        CellKind::Cage,
+        true,
+    );
+
+    let outpost = Rect::new(
+        rect.min_x + 3,
+        rect.min_z + 10,
+        rect.min_x + 7,
+        rect.min_z + 14,
+    );
+    let _ = try_lot(occ, grid, lots, seed, BuildingKind::Outpost, outpost, face);
+
+    paint_siege_yard(occ, rect, face);
     scenes.push(Scene {
         kind: SceneKind::PillagerCamp,
         rect,
+    });
+}
+
+fn gate_face_toward(rect: Rect, town: Rect) -> Dir {
+    let (tx, tz) = town.center();
+    let (cx, cz) = rect.center();
+    if (tx - cx).abs() >= (tz - cz).abs() {
+        if tx >= cx { Dir::East } else { Dir::West }
+    } else if tz >= cz {
+        Dir::South
+    } else {
+        Dir::North
+    }
+}
+
+fn paint_palisade_gate(occ: &mut Occupancy, rect: Rect, face: Dir) {
+    let (cx, cz) = rect.center();
+    match face {
+        Dir::North => {
+            for x in cx - 1..=cx + 1 {
+                occ.set(x, rect.min_z, CellKind::PalisadeGate, true);
+            }
+        }
+        Dir::South => {
+            for x in cx - 1..=cx + 1 {
+                occ.set(x, rect.max_z, CellKind::PalisadeGate, true);
+            }
+        }
+        Dir::West => {
+            for z in cz - 1..=cz + 1 {
+                occ.set(rect.min_x, z, CellKind::PalisadeGate, true);
+            }
+        }
+        Dir::East => {
+            for z in cz - 1..=cz + 1 {
+                occ.set(rect.max_x, z, CellKind::PalisadeGate, true);
+            }
+        }
+    }
+}
+
+fn paint_siege_yard(occ: &mut Occupancy, rect: Rect, face: Dir) {
+    let inner = rect.deflate(2);
+    match face {
+        Dir::South => {
+            occ.fill(
+                Rect::new(
+                    inner.min_x + 2,
+                    inner.max_z - 3,
+                    inner.min_x + 9,
+                    inner.max_z - 1,
+                ),
+                CellKind::SiegeTreb,
+                true,
+            );
+            occ.fill(
+                Rect::new(
+                    inner.max_x - 8,
+                    inner.max_z - 3,
+                    inner.max_x - 3,
+                    inner.max_z - 1,
+                ),
+                CellKind::SiegeRam,
+                true,
+            );
+            for x in inner.min_x..=inner.max_x {
+                if x % 3 == 0 {
+                    occ.set(x, inner.max_z, CellKind::SiegeLadder, true);
+                }
+            }
+        }
+        Dir::North => {
+            occ.fill(
+                Rect::new(
+                    inner.min_x + 2,
+                    inner.min_z + 1,
+                    inner.min_x + 9,
+                    inner.min_z + 3,
+                ),
+                CellKind::SiegeTreb,
+                true,
+            );
+            occ.fill(
+                Rect::new(
+                    inner.max_x - 8,
+                    inner.min_z + 1,
+                    inner.max_x - 3,
+                    inner.min_z + 3,
+                ),
+                CellKind::SiegeRam,
+                true,
+            );
+            for x in inner.min_x..=inner.max_x {
+                if x % 3 == 0 {
+                    occ.set(x, inner.min_z, CellKind::SiegeLadder, true);
+                }
+            }
+        }
+        Dir::East => {
+            occ.fill(
+                Rect::new(
+                    inner.max_x - 3,
+                    inner.min_z + 2,
+                    inner.max_x - 1,
+                    inner.min_z + 9,
+                ),
+                CellKind::SiegeTreb,
+                true,
+            );
+            occ.fill(
+                Rect::new(
+                    inner.max_x - 3,
+                    inner.max_z - 8,
+                    inner.max_x - 1,
+                    inner.max_z - 3,
+                ),
+                CellKind::SiegeRam,
+                true,
+            );
+            for z in inner.min_z..=inner.max_z {
+                if z % 3 == 0 {
+                    occ.set(inner.max_x, z, CellKind::SiegeLadder, true);
+                }
+            }
+        }
+        Dir::West => {
+            occ.fill(
+                Rect::new(
+                    inner.min_x + 1,
+                    inner.min_z + 2,
+                    inner.min_x + 3,
+                    inner.min_z + 9,
+                ),
+                CellKind::SiegeTreb,
+                true,
+            );
+            occ.fill(
+                Rect::new(
+                    inner.min_x + 1,
+                    inner.max_z - 8,
+                    inner.min_x + 3,
+                    inner.max_z - 3,
+                ),
+                CellKind::SiegeRam,
+                true,
+            );
+            for z in inner.min_z..=inner.max_z {
+                if z % 3 == 0 {
+                    occ.set(inner.min_x, z, CellKind::SiegeLadder, true);
+                }
+            }
+        }
+    }
+}
+
+fn paint_wind_sails(occ: &mut Occupancy, lots: &[Lot]) {
+    for lot in lots {
+        if lot.kind != BuildingKind::Windmill {
+            continue;
+        }
+        let (cx, cz) = lot.rect.center();
+        for dist in 3..=7 {
+            for dir in Dir::ALL {
+                let x = cx + dir.dx() * dist;
+                let z = cz + dir.dz() * dist;
+                if matches!(
+                    occ.kind(x, z),
+                    CellKind::Empty | CellKind::Farm | CellKind::FarmEdge | CellKind::Green
+                ) {
+                    occ.set(x, z, CellKind::WindSail, true);
+                }
+            }
+        }
+    }
+}
+
+fn place_hero(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    castle: Rect,
+    town: Rect,
+    search: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let keep = castle.inflate(10);
+    let town_h = grid.mean(town.min_x, town.min_z, town.max_x, town.max_z);
+    let peak = find_peak_site(occ, grid, search, town, keep, 28, 24, rng);
+    let peak_high = peak.is_some_and(|yard| {
+        grid.mean(yard.min_x, yard.min_z, yard.max_x, yard.max_z) >= town_h + 12
+    });
+    if peak_high {
+        if let Some(yard) = peak {
+            paint_mountain_fortress(occ, yard, scenes);
+        }
+        return;
+    }
+    place_cathedral_district(occ, grid, town, keep, search, lots, seed, rng, scenes);
+    if !scenes
+        .iter()
+        .any(|scene| scene.kind == SceneKind::Cathedral)
+        && let Some(yard) = peak
+    {
+        paint_mountain_fortress(occ, yard, scenes);
+    }
+}
+
+fn place_cathedral_district(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    town: Rect,
+    keep_out: Rect,
+    search: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let Some(yard) = find_site(occ, grid, search, town, keep_out, 32, 26, false, rng) else {
+        return;
+    };
+    occ.fill(yard, CellKind::Plaza, false);
+    let nave = Rect::new(
+        yard.min_x + 2,
+        yard.min_z + 2,
+        yard.min_x + 29,
+        yard.min_z + 17,
+    );
+    let plaza = Rect::new(
+        yard.min_x + 6,
+        yard.min_z + 19,
+        yard.min_x + 25,
+        yard.max_z - 1,
+    );
+    occ.fill(plaza, CellKind::Plaza, true);
+    occ.set(plaza.center().0, plaza.center().1, CellKind::Fountain, true);
+    if try_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::Cathedral,
+        nave,
+        Dir::South,
+    )
+    .is_some()
+    {
+        scenes.push(Scene {
+            kind: SceneKind::Cathedral,
+            rect: yard,
+        });
+    }
+}
+
+fn paint_mountain_fortress(occ: &mut Occupancy, yard: Rect, scenes: &mut Vec<Scene>) {
+    occ.fill(yard, CellKind::FortressWall, false);
+    occ.fill(yard.deflate(1), CellKind::FortressCourt, true);
+    let keep = Rect::new(
+        yard.min_x + 9,
+        yard.min_z + 7,
+        yard.min_x + 18,
+        yard.min_z + 16,
+    );
+    occ.fill(keep, CellKind::FortressKeep, true);
+    let towers = [
+        Rect::new(
+            yard.min_x + 1,
+            yard.min_z + 1,
+            yard.min_x + 5,
+            yard.min_z + 5,
+        ),
+        Rect::new(
+            yard.max_x - 5,
+            yard.min_z + 1,
+            yard.max_x - 1,
+            yard.min_z + 5,
+        ),
+        Rect::new(
+            yard.min_x + 1,
+            yard.max_z - 5,
+            yard.min_x + 5,
+            yard.max_z - 1,
+        ),
+        Rect::new(
+            yard.max_x - 5,
+            yard.max_z - 5,
+            yard.max_x - 1,
+            yard.max_z - 1,
+        ),
+    ];
+    for tower in towers {
+        occ.fill(tower, CellKind::FortressTower, true);
+    }
+    let (cx, _) = yard.center();
+    for x in cx - 1..=cx + 1 {
+        occ.set(x, yard.max_z, CellKind::PalisadeGate, true);
+        occ.set(x, yard.max_z - 1, CellKind::FortressCourt, true);
+    }
+    scenes.push(Scene {
+        kind: SceneKind::MountainFortress,
+        rect: yard,
     });
 }
 
@@ -611,7 +1020,10 @@ fn try_lot(
     let id = lots.iter().map(|lot| lot.id).max().unwrap_or(0) + 1;
     let lot = Lot::new(id, kind, rect, facing, seed ^ (u64::from(id) << 8));
     occ.fill_building(rect, id, true);
-    if kind != BuildingKind::Watchtower {
+    if !matches!(
+        kind,
+        BuildingKind::Watchtower | BuildingKind::Outpost | BuildingKind::BellTower
+    ) {
         paint_eaves(occ, rect);
     }
     lots.push(lot);
@@ -821,5 +1233,85 @@ mod tests {
         let back: TownInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back.spawns.len(), info.spawns.len());
         assert_eq!(back.scenes.len(), info.scenes.len());
+    }
+
+    #[test]
+    fn round7_camps_mills_and_hero_are_detailed() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            14,
+            8,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let kinds: Vec<_> = plan.scenes.iter().map(|s| s.kind).collect();
+        if let Some(camp) = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == SceneKind::PillagerCamp)
+        {
+            let mut tents = 0;
+            let mut war = 0;
+            let mut treb = 0;
+            let mut ram = 0;
+            for z in camp.rect.min_z..=camp.rect.max_z {
+                for x in camp.rect.min_x..=camp.rect.max_x {
+                    match plan.occ.kind(x, z) {
+                        CellKind::Tent => tents += 1,
+                        CellKind::WarTent => war += 1,
+                        CellKind::SiegeTreb => treb += 1,
+                        CellKind::SiegeRam => ram += 1,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(tents >= 12, "camp tents {tents}");
+            assert!(war >= 8, "war tent {war}");
+            assert!(treb >= 8, "trebuchet {treb}");
+            assert!(ram >= 6, "ram {ram}");
+            assert!(
+                plan.lots
+                    .iter()
+                    .any(|lot| lot.kind == BuildingKind::Outpost)
+            );
+        }
+        if plan
+            .lots
+            .iter()
+            .any(|lot| lot.kind == BuildingKind::Windmill)
+        {
+            let mut sail_n = 0;
+            for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
+                for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
+                    if plan.occ.kind(x, z) == CellKind::WindSail {
+                        sail_n += 1;
+                    }
+                }
+            }
+            assert!(sail_n >= 12, "windmill sails {sail_n}");
+        }
+        if kinds.contains(&SceneKind::Monastery) {
+            let mut arcade = 0;
+            for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
+                for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
+                    if plan.occ.kind(x, z) == CellKind::Arcade {
+                        arcade += 1;
+                    }
+                }
+            }
+            assert!(arcade >= 20, "cloister arcade {arcade}");
+        }
+        assert!(
+            kinds.contains(&SceneKind::Cathedral)
+                || kinds.contains(&SceneKind::MountainFortress)
+                || kinds.contains(&SceneKind::Monastery)
+                || kinds.contains(&SceneKind::PillagerCamp),
+            "expected a round-7 scene, got {kinds:?}"
+        );
     }
 }

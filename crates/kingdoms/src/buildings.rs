@@ -19,6 +19,9 @@ pub enum BuildingKind {
     Stall,
     Monastery,
     Watchtower,
+    Outpost,
+    Cathedral,
+    BellTower,
 }
 
 impl BuildingKind {
@@ -36,8 +39,11 @@ impl BuildingKind {
             Self::Barn => (14, 10),
             Self::Windmill => (7, 7),
             Self::Stall => (5, 5),
-            Self::Monastery => (20, 14),
+            Self::Monastery => (18, 12),
             Self::Watchtower => (7, 7),
+            Self::Outpost => (5, 5),
+            Self::Cathedral => (28, 16),
+            Self::BellTower => (5, 5),
         }
     }
 
@@ -46,9 +52,9 @@ impl BuildingKind {
     pub const fn stories(self) -> i32 {
         match self {
             Self::Cottage | Self::Stall | Self::Barn | Self::Windmill | Self::Monastery => 1,
-            Self::Longhouse | Self::Blacksmith => 1,
+            Self::Longhouse | Self::Blacksmith | Self::Cathedral => 1,
             Self::Timber | Self::Tavern | Self::Church => 2,
-            Self::Townhouse | Self::Watchtower => 3,
+            Self::Townhouse | Self::Watchtower | Self::Outpost | Self::BellTower => 3,
         }
     }
 
@@ -65,6 +71,9 @@ impl BuildingKind {
             Self::Windmill => 12,
             Self::Monastery => 9,
             Self::Watchtower => 14,
+            Self::Outpost => 12,
+            Self::Cathedral => 12,
+            Self::BellTower => 18,
         }
     }
 

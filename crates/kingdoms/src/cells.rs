@@ -66,6 +66,32 @@ pub enum CellKind {
     Fountain,
     /// Open dirt court inside a palisade.
     CampCourt,
+    /// Larger command tent.
+    WarTent,
+    /// Iron-bar cage.
+    Cage,
+    /// Palisade opening with posts.
+    PalisadeGate,
+    /// Multi-column trebuchet.
+    SiegeTreb,
+    /// Covered battering ram.
+    SiegeRam,
+    /// Stacked siege ladders.
+    SiegeLadder,
+    /// Windmill sail column (outside the tower lot).
+    WindSail,
+    /// Cloister arcade.
+    Arcade,
+    /// Graveyard lychgate.
+    Lychgate,
+    /// Mountain-fortress curtain.
+    FortressWall,
+    /// Mountain-fortress keep.
+    FortressKeep,
+    /// Mountain-fortress tower.
+    FortressTower,
+    /// Mountain-fortress court.
+    FortressCourt,
 }
 
 impl CellKind {

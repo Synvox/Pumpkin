@@ -120,7 +120,12 @@ fn write_scene_renders(
         seen.push(scene.kind);
         let pad = match scene.kind {
             SceneKind::Harbour => 4,
-            SceneKind::PillagerCamp | SceneKind::Farmstead | SceneKind::Hamlet => 4,
+            SceneKind::PillagerCamp
+            | SceneKind::Farmstead
+            | SceneKind::Hamlet
+            | SceneKind::Cathedral
+            | SceneKind::MountainFortress
+            | SceneKind::Monastery => 4,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -132,6 +137,16 @@ fn write_scene_renders(
         save(
             &out_dir.join(format!("{stem}-scene-{name}.png")),
             &render_exterior(volume, rect, pad, scene.kind.label()),
+        )?;
+    }
+    if let Some(mill) = plan
+        .lots
+        .iter()
+        .find(|lot| lot.kind == BuildingKind::Windmill)
+    {
+        save(
+            &out_dir.join(format!("{stem}-scene-windmill.png")),
+            &render_exterior(volume, mill.rect.inflate(8), 2, "Windmill"),
         )?;
     }
     Ok(())
@@ -412,8 +427,27 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     {
         return [220, 214, 200];
     }
-    if id == Block::DARK_OAK_STAIRS.id || id == Block::DARK_OAK_SLAB.id {
-        return [67, 43, 20];
+    if id == Block::DARK_OAK_STAIRS.id
+        || id == Block::DARK_OAK_SLAB.id
+        || id == Block::DARK_OAK_LOG.id
+        || id == Block::STRIPPED_DARK_OAK_LOG.id
+        || id == Block::DARK_OAK_PLANKS.id
+        || id == Block::DARK_OAK_FENCE.id
+        || id == Block::DARK_OAK_FENCE_GATE.id
+    {
+        return [78, 52, 24];
+    }
+    if id == Block::DARK_OAK_LEAVES.id {
+        return [36, 90, 28];
+    }
+    if id == Block::BROWN_WOOL.id {
+        return [114, 71, 40];
+    }
+    if id == Block::CAMPFIRE.id {
+        return [220, 110, 32];
+    }
+    if id == Block::ANVIL.id {
+        return [72, 72, 76];
     }
     if id == Block::SPRUCE_STAIRS.id
         || id == Block::SPRUCE_PLANKS.id

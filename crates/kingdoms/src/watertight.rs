@@ -157,8 +157,15 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
             !matches!(mass.spec.roof, crate::castle::RoofKind::Crenellated),
         ));
     }
+    push_if_any(
+        &mut buildings,
+        "fortress-keep",
+        collect_kind(plan, CellKind::FortressKeep, plan.bounds),
+        volume,
+        plan,
+    );
     for lot in &plan.lots {
-        if matches!(lot.kind, BuildingKind::Stall) {
+        if matches!(lot.kind, BuildingKind::Stall | BuildingKind::Outpost) {
             continue;
         }
         let mut cols = collect_lot(plan, lot.id, lot.rect);
@@ -173,7 +180,10 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
         if cols.is_empty() {
             continue;
         }
-        let check_sky = !matches!(lot.kind, BuildingKind::Watchtower);
+        let check_sky = !matches!(
+            lot.kind,
+            BuildingKind::Watchtower | BuildingKind::Outpost | BuildingKind::BellTower
+        );
         buildings.push(check_columns(
             &format!("lot{}-{:?}", lot.id, lot.kind),
             cols,
@@ -403,6 +413,9 @@ fn is_exterior(kind: CellKind) -> bool {
             | CellKind::TownWall
             | CellKind::TownTower
             | CellKind::TownGate
+            | CellKind::FortressKeep
+            | CellKind::FortressTower
+            | CellKind::FortressWall
     )
 }
 
