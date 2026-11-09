@@ -1,10 +1,10 @@
 //! Automated envelope check: interiors must not flood to the outside.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use pumpkin_data::{Block, BlockState};
 
-use crate::buildings::BuildingKind;
+use crate::buildings::{BuildingKind, Lot};
 use crate::cells::CellKind;
 use crate::geom::Rect;
 use crate::plan::TownPlan;
@@ -191,6 +191,9 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
             plan,
             check_sky,
         ));
+        if lot.kind == BuildingKind::Windmill {
+            buildings.push(check_mill_connected(plan, lot, volume));
+        }
     }
     TownCheck {
         seed: plan.seed,
@@ -319,6 +322,120 @@ fn check_columns(
         leak,
         floating_roofs,
         sky_open,
+    }
+}
+
+fn mill_hub_y(plan: &TownPlan, mill: &Lot) -> i32 {
+    plan.heights
+        .mean(
+            mill.rect.min_x,
+            mill.rect.min_z,
+            mill.rect.max_x,
+            mill.rect.max_z,
+        )
+        .max(plan.heights.sea_level + 2)
+        + 18
+}
+
+fn is_mill_part(plan: &TownPlan, mill: &Lot, x: i32, z: i32) -> bool {
+    if mill.rect.contains(x, z) {
+        return true;
+    }
+    if plan.occ.kind(x, z) != CellKind::WindSail
+        || !crate::stamp::mill_owns_sail(&plan.lots, mill, x, z)
+    {
+        return false;
+    }
+    let (cx, cz) = mill.rect.center();
+    let dx = x - cx;
+    let dz = z - cz;
+    dx != 0
+        && dz != 0
+        && (dx.abs() - dz.abs()).abs() <= 1
+        && (1..=10).contains(&dx.abs().max(dz.abs()))
+}
+
+fn is_mill_sail_block(state: &BlockState) -> bool {
+    let id = Block::from_state_id(state.id).id;
+    id == Block::WHITE_WOOL.id
+        || id == Block::WHITE_BANNER.id
+        || id == Block::OAK_TRAPDOOR.id
+        || id == Block::OAK_LOG.id
+        || id == Block::DARK_OAK_LOG.id
+        || id == Block::OAK_FENCE.id
+        || id == Block::DARK_OAK_FENCE.id
+        || id == Block::OAK_SLAB.id
+        || id == Block::OAK_STAIRS.id
+        || id == Block::DARK_OAK_SLAB.id
+        || id == Block::DARK_OAK_STAIRS.id
+        || id == Block::SPRUCE_SLAB.id
+        || id == Block::SPRUCE_STAIRS.id
+        || id == Block::SMOOTH_SANDSTONE_SLAB.id
+        || id == Block::SANDSTONE_STAIRS.id
+}
+
+fn check_mill_connected(plan: &TownPlan, mill: &Lot, volume: &VolumeSink) -> BuildingCheck {
+    let (cx, cz) = mill.rect.center();
+    let hub_y = mill_hub_y(plan, mill);
+    let mut parts = HashSet::new();
+    for z in mill.rect.min_z - 12..=mill.rect.max_z + 12 {
+        for x in mill.rect.min_x - 12..=mill.rect.max_x + 12 {
+            if !is_mill_part(plan, mill, x, z) {
+                continue;
+            }
+            let dx = x - cx;
+            let dz = z - cz;
+            let diagonal = dx.abs() == dz.abs() && dx != 0;
+            let on_tower = mill.rect.contains(x, z);
+            let y0 = if diagonal { hub_y - 3 } else { hub_y - 1 };
+            let y1 = if diagonal { hub_y + 4 } else { hub_y + 1 };
+            for y in y0..=y1 {
+                let Some(state) = volume.get(x, y, z) else {
+                    continue;
+                };
+                if state.is_air() {
+                    continue;
+                }
+                if on_tower && y < hub_y - 1 && !is_mill_sail_block(state) {
+                    continue;
+                }
+                if !on_tower && !is_mill_sail_block(state) {
+                    continue;
+                }
+                parts.insert((x, y, z));
+            }
+        }
+    }
+    let start = (cx, hub_y, cz);
+    let mut reached = HashSet::new();
+    let mut queue = VecDeque::new();
+    if parts.contains(&start) {
+        reached.insert(start);
+        queue.push_back(start);
+    }
+    while let Some((x, y, z)) = queue.pop_front() {
+        for (dx, dy, dz) in [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            let n = (x + dx, y + dy, z + dz);
+            if parts.contains(&n) && reached.insert(n) {
+                queue.push_back(n);
+            }
+        }
+    }
+    let leak = parts.iter().copied().find(|p| !reached.contains(p));
+    BuildingCheck {
+        name: format!("mill{}-sails", mill.id),
+        columns: parts.len(),
+        seed: Some(start),
+        leak,
+        floating_roofs: 0,
+        sky_open: 0,
     }
 }
 
@@ -609,6 +726,7 @@ fn is_roof_block(state: &BlockState) -> bool {
         || id == Block::DEEPSLATE_TILES.id
         || id == Block::SANDSTONE_SLAB.id
         || id == Block::SMOOTH_SANDSTONE_SLAB.id
+        || id == Block::SMOOTH_SANDSTONE.id
         || id == Block::SNOW.id
         || id == Block::SNOW_BLOCK.id
 }
@@ -909,23 +1027,32 @@ mod tests {
                 "tower mill should taper to 5 wide, radius={upper_r}"
             );
             let mut cloth = 0;
+            let mut span = 0;
             let hub = floor + 18;
             for z in mill.rect.min_z - 12..=mill.rect.max_z + 12 {
                 for x in mill.rect.min_x - 12..=mill.rect.max_x + 12 {
-                    if let Some(state) = volume.get(x, hub, z) {
+                    let dist = (x - cx).abs().max((z - cz).abs());
+                    let diagonal = (x - cx).abs() == (z - cz).abs() && (x - cx) != 0;
+                    for y in hub - 4..=hub + 5 {
+                        let Some(state) = volume.get(x, y, z) else {
+                            continue;
+                        };
                         let id = Block::from_state_id(state.id).id;
-                        if (id == Block::WHITE_WOOL.id
-                            || id == Block::DARK_OAK_FENCE.id
-                            || id == Block::OAK_TRAPDOOR.id)
-                            && (x - cx).abs() == (z - cz).abs()
-                            && (x - cx).abs() >= 5
-                        {
+                        if id == Block::WHITE_WOOL.id && diagonal {
                             cloth += 1;
+                            span = span.max(dist);
                         }
                     }
                 }
             }
-            assert!(cloth >= 8, "lattice sails at hub {hub} count {cloth}");
+            assert!(cloth >= 16, "lattice sails at hub {hub} count {cloth}");
+            assert!(span >= 9, "blade length {span}");
+            let mill_check = check_mill_connected(&plan, mill, &volume);
+            assert!(
+                mill_check.ok(),
+                "mill sails must be 6-connected, leak={:?}",
+                mill_check.leak
+            );
             let mut stones = 0;
             for z in mill.rect.min_z..=mill.rect.max_z {
                 for x in mill.rect.min_x..=mill.rect.max_x {
@@ -966,26 +1093,149 @@ mod tests {
                 &plan,
                 crate::geom::Rect::new(nave_west, min_z, nave_east, max_z),
             );
-            let mut ring = 0;
-            let mut inner = 0;
+            let mut glass = 0;
+            let mut stone = 0;
+            let mut rose_lo = i32::MAX;
+            let mut rose_hi = i32::MIN;
+            let cy = floor + 11;
             for z in min_z..=max_z {
-                for y in floor + 8..=floor + 14 {
+                for y in cy - 5..=cy + 5 {
                     if let Some(state) = volume.get(nave_west, y, z) {
                         let id = Block::from_state_id(state.id).id;
-                        let glass = id == Block::PURPLE_STAINED_GLASS_PANE.id
+                        let is_glass = id == Block::PURPLE_STAINED_GLASS.id
+                            || id == Block::YELLOW_STAINED_GLASS.id
+                            || id == Block::PURPLE_STAINED_GLASS_PANE.id
                             || id == Block::YELLOW_STAINED_GLASS_PANE.id;
-                        let d2 = (y - (floor + 11)) * (y - (floor + 11)) + (z - cz) * (z - cz);
-                        if glass && (8..=13).contains(&d2) {
-                            ring += 1;
+                        let d2 = (y - cy) * (y - cy) + (z - cz) * (z - cz);
+                        if d2 > 25 {
+                            continue;
                         }
-                        if id == Block::CALCITE.id && d2 < 8 {
-                            inner += 1;
+                        if is_glass || id == Block::CALCITE.id {
+                            rose_lo = rose_lo.min(z);
+                            rose_hi = rose_hi.max(z);
+                        }
+                        if is_glass {
+                            glass += 1;
+                        }
+                        if id == Block::CALCITE.id {
+                            stone += 1;
                         }
                     }
                 }
             }
-            assert!(ring >= 6, "rose ring glass {ring}");
-            assert!(inner >= 3, "rose tracery {inner}");
+            assert!(glass >= 8, "rose glass {glass}");
+            assert!(stone >= 12, "rose tracery {stone}");
+            assert!(
+                rose_hi - rose_lo >= 10,
+                "rose should be at least 11 wide, span={}",
+                rose_hi - rose_lo + 1
+            );
         }
+    }
+
+    #[test]
+    fn desert_houses_meet_the_roof() {
+        let origin = town_in_cell(314_159, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            8,
+            6,
+        );
+        let plan = build_plan(314_159, origin, grid, PaletteKind::Sandstone);
+        let volume = fill_volume(&plan);
+        let check = check_town(&plan, &volume);
+        let desert_fails: Vec<_> = check
+            .failures()
+            .into_iter()
+            .filter(|b| {
+                b.name.contains("Cottage")
+                    || b.name.contains("Townhouse")
+                    || b.name.contains("Tavern")
+                    || b.name.contains("Church")
+            })
+            .map(|b| format!("{} leak={:?} sky={}", b.name, b.leak, b.sky_open))
+            .collect();
+        assert!(
+            desert_fails.is_empty(),
+            "desert envelopes failed: {}",
+            desert_fails.join("; ")
+        );
+        let mut sealed = 0;
+        let mut dome_span = 0;
+        for lot in &plan.lots {
+            if !matches!(
+                lot.kind,
+                BuildingKind::Cottage
+                    | BuildingKind::Townhouse
+                    | BuildingKind::Tavern
+                    | BuildingKind::Church
+            ) {
+                continue;
+            }
+            let floor = plan
+                .heights
+                .mean(
+                    lot.rect.min_x,
+                    lot.rect.min_z,
+                    lot.rect.max_x,
+                    lot.rect.max_z,
+                )
+                .max(plan.heights.sea_level + 2);
+            let eaves = floor + lot.kind.wall_h();
+            for z in lot.rect.min_z..=lot.rect.max_z {
+                for x in lot.rect.min_x..=lot.rect.max_x {
+                    if !lot.rect.on_edge(x, z) {
+                        continue;
+                    }
+                    let roof = volume.get(x, eaves, z);
+                    let under = volume.get(x, eaves - 1, z);
+                    let roof_id = roof.map(|s| Block::from_state_id(s.id).id);
+                    assert!(
+                        roof.is_some_and(|s| !s.is_air()),
+                        "desert wall/roof gap at {x},{eaves},{z}"
+                    );
+                    assert!(
+                        under.is_some_and(|s| !s.is_air()),
+                        "desert wall does not meet roof at {x},{},{z}",
+                        eaves - 1
+                    );
+                    assert_ne!(
+                        roof_id,
+                        Some(Block::SPRUCE_LOG.id),
+                        "desert eave should not be a dark log seam"
+                    );
+                    sealed += 1;
+                }
+            }
+            if matches!(lot.kind, BuildingKind::Church | BuildingKind::Townhouse) {
+                let (cx, cz) = lot.rect.center();
+                let mut xs = Vec::new();
+                for z in lot.rect.min_z..=lot.rect.max_z {
+                    for x in lot.rect.min_x..=lot.rect.max_x {
+                        if volume.get(x, eaves + 2, z).is_some_and(|s| !s.is_air()) {
+                            xs.push(x);
+                        }
+                    }
+                }
+                if !xs.is_empty() {
+                    dome_span = dome_span.max(
+                        xs.iter().max().copied().unwrap_or(cx)
+                            - xs.iter().min().copied().unwrap_or(cx),
+                    );
+                }
+                let _ = cz;
+            }
+        }
+        assert!(sealed >= 20, "desert eave columns {sealed}");
+        assert!(
+            dome_span >= 4,
+            "desert dome should be at least 5 wide, span={}",
+            dome_span + 1
+        );
     }
 }

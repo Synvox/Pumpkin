@@ -129,7 +129,8 @@ fn write_scene_renders(
             | SceneKind::MountainFortress
             | SceneKind::Monastery
             | SceneKind::Mine
-            | SceneKind::Ruin => 6,
+            | SceneKind::Ruin
+            | SceneKind::Tourney => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -150,7 +151,7 @@ fn write_scene_renders(
     {
         save(
             &out_dir.join(format!("{stem}-scene-windmill.png")),
-            &render_exterior(volume, mill.rect.inflate(12), 2, "Windmill"),
+            &render_exterior(volume, mill.rect.inflate(14), 2, "Windmill"),
         )?;
     }
     Ok(())
@@ -170,7 +171,7 @@ pub fn overview_bounds(plan: &TownPlan) -> Rect {
     }
     for lot in &plan.lots {
         if lot.kind == BuildingKind::Windmill {
-            bounds = union_rect(bounds, lot.rect.inflate(12));
+            bounds = union_rect(bounds, lot.rect.inflate(14));
         }
     }
     Rect::new(
@@ -368,6 +369,16 @@ fn write_cutaways(
                     "Cathedral · nave cutaway, pews and rose",
                 ),
             )?;
+            let cz = nave.center().1;
+            save(
+                &out_dir.join(format!("{stem}-scene-rose.png")),
+                &render_exterior(
+                    volume,
+                    Rect::new(nave.min_x - 2, cz - 8, nave.min_x + 4, cz + 8),
+                    3,
+                    "Cathedral · rose window",
+                ),
+            )?;
         }
     }
     Ok(())
@@ -471,8 +482,11 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     if id == Block::SMOOTH_STONE.id || id == Block::SMOOTH_STONE_SLAB.id {
         return [176, 176, 172];
     }
-    if id == Block::PURPLE_STAINED_GLASS_PANE.id {
+    if id == Block::PURPLE_STAINED_GLASS_PANE.id || id == Block::PURPLE_STAINED_GLASS.id {
         return [118, 46, 156];
+    }
+    if id == Block::YELLOW_STAINED_GLASS_PANE.id || id == Block::YELLOW_STAINED_GLASS.id {
+        return [216, 178, 56];
     }
     if id == Block::VINE.id {
         return [46, 110, 40];

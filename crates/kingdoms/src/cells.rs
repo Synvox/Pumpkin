@@ -110,6 +110,12 @@ pub enum CellKind {
     MineRail,
     /// Gravel and cobble spoil heap.
     MineSpoil,
+    /// Cog hull on harbor water.
+    Ship,
+    /// Jousting lists (sand lane).
+    TourneyList,
+    /// Tournament stand or pavilion pad.
+    TourneyStand,
 }
 
 impl CellKind {

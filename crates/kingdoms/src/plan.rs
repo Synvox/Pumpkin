@@ -19,7 +19,7 @@ use crate::height::{HeightGrid, SAMPLE_STEP, world_gen_for};
 use crate::info::{GateInfo, GateKind, RoadInfo};
 use crate::palette::PaletteKind;
 use crate::rng::TownRng;
-use crate::scenes::{Scene, SceneKind, place_scenes, record_harbour};
+use crate::scenes::{Scene, SceneKind, paint_harbour_town, place_scenes};
 use crate::town::{CELL_SIZE, TownPos, border_crossing, border_goal, town_in_cell};
 
 /// Pad around castle+town so hinterland farms, hamlets and camps fit.
@@ -207,7 +207,16 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         rect: market,
     });
     paint_water_uses(&mut occ, &grid, bounds, castle_rect);
-    record_harbour(&occ, bounds, &mut scenes);
+    paint_harbour_town(
+        &mut occ,
+        &grid,
+        bounds,
+        town_rect,
+        &mut lots,
+        seed,
+        &mut rng,
+        &mut scenes,
+    );
 
     debug_assert!(castle.bounds.width() >= CASTLE_MIN);
     debug_assert!(castle.bounds.depth() >= CASTLE_MIN);
