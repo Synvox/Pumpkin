@@ -22,6 +22,7 @@ pub enum BuildingKind {
     Outpost,
     Cathedral,
     BellTower,
+    TownHall,
 }
 
 impl BuildingKind {
@@ -44,6 +45,7 @@ impl BuildingKind {
             Self::Outpost => (5, 5),
             Self::Cathedral => (32, 22),
             Self::BellTower => (5, 5),
+            Self::TownHall => (14, 12),
         }
     }
 
@@ -53,8 +55,13 @@ impl BuildingKind {
         match self {
             Self::Cottage | Self::Stall | Self::Barn | Self::Windmill | Self::Monastery => 1,
             Self::Longhouse | Self::Blacksmith | Self::Cathedral => 1,
-            Self::Timber | Self::Tavern | Self::Church => 2,
-            Self::Townhouse | Self::Watchtower | Self::Outpost | Self::BellTower => 3,
+            Self::Tavern | Self::Church => 2,
+            Self::Timber
+            | Self::Townhouse
+            | Self::Watchtower
+            | Self::Outpost
+            | Self::BellTower
+            | Self::TownHall => 3,
         }
     }
 
@@ -65,8 +72,9 @@ impl BuildingKind {
             Self::Stall => 3,
             Self::Cottage => 5,
             Self::Longhouse | Self::Blacksmith | Self::Barn => 6,
-            Self::Timber | Self::Tavern => 8,
-            Self::Townhouse => 11,
+            Self::Timber => 11,
+            Self::Tavern => 8,
+            Self::Townhouse => 13,
             Self::Church => 8,
             Self::Windmill => 18,
             Self::Monastery => 9,
@@ -74,6 +82,7 @@ impl BuildingKind {
             Self::Outpost => 12,
             Self::Cathedral => 16,
             Self::BellTower => 18,
+            Self::TownHall => 16,
         }
     }
 
