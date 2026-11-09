@@ -113,6 +113,8 @@ pub const OWNERSHIP_FILE: &str = "kingdoms-ownership.json";
 #[derive(Default, Serialize, Deserialize)]
 struct OwnershipFile {
     towns: HashMap<String, String>,
+    #[serde(default)]
+    players: HashMap<String, String>,
 }
 
 /// World-folder path for the ownership file.
@@ -121,25 +123,52 @@ pub fn ownership_path(world_root: &Path) -> PathBuf {
     world_root.join(OWNERSHIP_FILE)
 }
 
+/// Loaded towns and player kingdom membership.
+#[derive(Default)]
+pub struct SavedState {
+    pub towns: HashMap<String, TownOwner>,
+    pub players: HashMap<String, String>,
+}
+
 /// Load town id → owner from `kingdoms-ownership.json`.
 #[must_use]
 pub fn load_ownership(path: &Path) -> HashMap<String, TownOwner> {
+    load_state(path).towns
+}
+
+/// Load towns and players from `kingdoms-ownership.json`.
+#[must_use]
+pub fn load_state(path: &Path) -> SavedState {
     let Ok(bytes) = std::fs::read_to_string(path) else {
-        return HashMap::new();
+        return SavedState::default();
     };
     let Ok(file) = serde_json::from_str::<OwnershipFile>(&bytes) else {
         tracing::warn!(?path, "kingdoms ownership file unreadable");
-        return HashMap::new();
+        return SavedState::default();
     };
-    file.towns
-        .into_iter()
-        .map(|(id, owner)| (id, TownOwner::parse(&owner)))
-        .collect()
+    SavedState {
+        towns: file
+            .towns
+            .into_iter()
+            .map(|(id, owner)| (id, TownOwner::parse(&owner)))
+            .collect(),
+        players: file.players,
+    }
 }
 
 /// Persist town ownership. Overwrites the file.
 #[allow(clippy::implicit_hasher)]
 pub fn save_ownership(path: &Path, owners: &HashMap<String, TownOwner>) -> std::io::Result<()> {
+    save_state(path, owners, &HashMap::new())
+}
+
+/// Persist towns and player membership. Overwrites the file.
+#[allow(clippy::implicit_hasher)]
+pub fn save_state(
+    path: &Path,
+    owners: &HashMap<String, TownOwner>,
+    players: &HashMap<String, String>,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -148,6 +177,7 @@ pub fn save_ownership(path: &Path, owners: &HashMap<String, TownOwner>) -> std::
             .iter()
             .map(|(id, owner)| (id.clone(), owner.as_str().to_owned()))
             .collect(),
+        players: players.clone(),
     };
     let json = serde_json::to_string_pretty(&file).unwrap_or_else(|_| "{}".to_owned());
     std::fs::write(path, json)

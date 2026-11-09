@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pumpkin_core::plugin::api::events::entity::entity_damage_by_entity::EntityDamageByEntityEvent;
 use pumpkin_core::plugin::api::events::entity::entity_death::EntityDeathEvent;
+use pumpkin_core::plugin::api::events::player::player_join::PlayerJoinEvent;
 use pumpkin_core::plugin::api::events::server::ServerTickStartEvent;
 use pumpkin_core::plugin::{EventHandler, EventPriority, Payload, PluginFuture, TypedEventHandler};
 use pumpkin_core::server::Server;
@@ -47,6 +48,16 @@ pub fn register(server: &Server) {
         server,
         Arc::new(TypedEventHandler {
             handler: Arc::new(DeathHandler),
+            priority: EventPriority::Normal,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(JoinHandler),
             priority: EventPriority::Normal,
             blocking: true,
             source: Some("kingdoms".to_owned()),
@@ -121,6 +132,21 @@ impl EventHandler<EntityDamageByEntityEvent> for FriendlyFireHandler {
                 }
                 return;
             }
+        })
+    }
+}
+
+struct JoinHandler;
+
+impl EventHandler<PlayerJoinEvent> for JoinHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        _server: &'a Arc<Server>,
+        event: &'a mut PlayerJoinEvent,
+    ) -> PluginFuture<'a, ()> {
+        let player = Arc::clone(&event.player);
+        Box::pin(async move {
+            director::restore_player(&player);
         })
     }
 }

@@ -76,7 +76,7 @@ impl PopulationSpec {
             guards,
             archers,
             civilians,
-            builders: 1,
+            builders: 4,
             golems: 2,
         }
     }

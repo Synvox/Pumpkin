@@ -6,8 +6,18 @@
 
 use pumpkin_data::entity::EntityType;
 use pumpkin_util::math::vector3::Vector3;
+use serde::{Deserialize, Serialize};
 
 use crate::scene::ScenePost;
+
+/// Who is marching on the town.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RaidSide {
+    #[default]
+    Pillager,
+    Kingdom,
+}
 
 /// How to size a raid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +26,7 @@ pub struct RaidSpec {
     /// Extra town defenders to spawn for large sieges (0 = standing garrison only).
     pub extra_defenders: u16,
     pub waves: u8,
+    pub side: RaidSide,
 }
 
 impl RaidSpec {
@@ -26,6 +37,7 @@ impl RaidSpec {
             raiders,
             extra_defenders: 0,
             waves,
+            side: RaidSide::Pillager,
         }
     }
 
@@ -36,6 +48,12 @@ impl RaidSpec {
         if extra > 0 {
             self.waves = 1;
         }
+        self
+    }
+
+    #[must_use]
+    pub const fn with_side(mut self, side: RaidSide) -> Self {
+        self.side = side;
         self
     }
 
