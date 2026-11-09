@@ -124,6 +124,8 @@ pub enum CellKind {
     Boat,
     /// Timber adit portal into the hillside.
     MineAdit,
+    /// Charred house shell in a siege-scarred frontier town.
+    Burnt,
 }
 
 impl CellKind {

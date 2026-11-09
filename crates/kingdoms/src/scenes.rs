@@ -11,6 +11,15 @@ use crate::geom::{Dir, Rect};
 use crate::height::HeightGrid;
 use crate::palette::PaletteKind;
 use crate::rng::TownRng;
+use crate::town::TownPos;
+
+/// Extra blocks around every scene where feature trees and floating plants
+/// are stripped. Occupancy Green/Harbor fill plus stamp clear.
+pub const SCENE_YARD_MARGIN: i32 = 6;
+
+/// Cog hull along the keel. Beam is 5.
+const COG_LEN: i32 = 15;
+const COG_BEAM: i32 = 5;
 
 /// What a hinterland rect is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -30,6 +39,8 @@ pub enum SceneKind {
     MountainFortress,
     Mine,
     Tourney,
+    /// Siege-scarred border town between Alder and Raven.
+    Frontier,
 }
 
 impl SceneKind {
@@ -52,6 +63,7 @@ impl SceneKind {
             Self::MountainFortress => "Mountain fortress",
             Self::Mine => "Mine",
             Self::Tourney => "Jousting lists",
+            Self::Frontier => "Frontier town",
         }
     }
 }
@@ -70,6 +82,7 @@ pub fn place_scenes(
     grid: &HeightGrid,
     castle: Rect,
     town: Rect,
+    origin: TownPos,
     lots: &mut Vec<Lot>,
     seed: u64,
     rng: &mut TownRng,
@@ -141,6 +154,7 @@ pub fn place_scenes(
     place_hero(occ, grid, castle, town, search, rng, &mut scenes);
     place_mine(occ, grid, search, town, keep_out, rng, &mut scenes);
     place_tourney(occ, grid, castle, town, search, rng, &mut scenes);
+    place_frontier(occ, grid, search, town, keep_out, origin, rng, &mut scenes);
     place_edge_mills(occ, grid, search, town, keep_out, lots, seed, rng);
     paint_wind_sails(occ, lots);
     paint_forge_yards(occ, lots);
@@ -197,8 +211,6 @@ pub fn paint_harbour_town(
         max_z = max_z.max(z);
     }
     paint_quay_and_cranes(occ, grid, search, &docks);
-    let mut ships = 0;
-    let mut boats = 0;
     for (i, &(x, z)) in docks.iter().enumerate() {
         if i % 4 != 0 {
             continue;
@@ -206,7 +218,7 @@ pub fn paint_harbour_town(
         let Some(dir) = harbour_out(occ, grid, x, z) else {
             continue;
         };
-        for step in 1..=10 {
+        for step in 1..=12 {
             let px = x + dir.dx() * step;
             let pz = z + dir.dz() * step;
             if !search.contains(px, pz) {
@@ -216,33 +228,35 @@ pub fn paint_harbour_town(
                 occ.set(px, pz, CellKind::Dock, true);
             }
         }
-        if ships < 3 {
-            let side = match dir {
-                Dir::North | Dir::South => Dir::East,
-                Dir::East | Dir::West => Dir::South,
-            };
-            let sx = x + dir.dx() * 7 + side.dx() * 3;
-            let sz = z + dir.dz() * 7 + side.dz() * 3;
-            if place_hull(occ, grid, search, sx, sz, dir, true) {
-                ships += 1;
-            }
+    }
+    let _ = place_harbour_cog(occ, grid, search, &docks);
+    let mut boats = 0;
+    for &(x, z) in &docks {
+        if boats >= 3 {
+            break;
         }
-        if boats < 4 {
-            let bx = x + dir.dx() * 4;
-            let bz = z + dir.dz() * 4;
-            if place_hull(occ, grid, search, bx, bz, dir, false) {
-                boats += 1;
-            }
+        let Some(dir) = harbour_out(occ, grid, x, z) else {
+            continue;
+        };
+        let side = match dir {
+            Dir::North | Dir::South => Dir::East,
+            Dir::East | Dir::West => Dir::South,
+        };
+        let bx = x + dir.dx() * 4 + side.dx() * 2;
+        let bz = z + dir.dz() * 4 + side.dz() * 2;
+        if place_hull(occ, grid, search, bx, bz, dir, false) {
+            boats += 1;
         }
     }
-    if ships == 0 {
-        for &(x, z) in &docks {
-            if let Some(dir) = harbour_out(occ, grid, x, z) {
-                let sx = x + dir.dx() * 7;
-                let sz = z + dir.dz() * 7;
-                if place_hull(occ, grid, search, sx, sz, dir, true) {
-                    break;
-                }
+    if boats < 3 {
+        for &(x, z) in &harbors {
+            if boats >= 3 {
+                break;
+            }
+            if let Some(dir) = harbour_out(occ, grid, x, z)
+                && place_hull(occ, grid, search, x, z, dir, false)
+            {
+                boats += 1;
             }
         }
     }
@@ -283,19 +297,107 @@ pub fn paint_harbour_town(
             Dir::South,
         )
     });
-    let mut rect = Rect::new(min_x, min_z, max_x, max_z).inflate(10);
-    if rect.width() > 56 {
-        let (cx, _) = rect.center();
-        rect = Rect::new(cx - 28, rect.min_z, cx + 27, rect.max_z);
-    }
-    if rect.depth() > 56 {
-        let (_, cz) = rect.center();
-        rect = Rect::new(rect.min_x, cz - 28, rect.max_x, cz + 27);
+    for z in search.min_z..=search.max_z {
+        for x in search.min_x..=search.max_x {
+            if matches!(
+                occ.kind(x, z),
+                CellKind::Ship | CellKind::Boat | CellKind::Quay | CellKind::Crane | CellKind::Dock
+            ) {
+                min_x = min_x.min(x);
+                min_z = min_z.min(z);
+                max_x = max_x.max(x);
+                max_z = max_z.max(z);
+            }
+        }
     }
     scenes.push(Scene {
         kind: SceneKind::Harbour,
-        rect,
+        rect: harbour_focus_rect(occ, Rect::new(min_x, min_z, max_x, max_z)),
     });
+}
+
+fn harbour_focus_rect(occ: &Occupancy, docks: Rect) -> Rect {
+    let mut hull: Option<Rect> = None;
+    for z in docks.min_z..=docks.max_z {
+        for x in docks.min_x..=docks.max_x {
+            if occ.kind(x, z) != CellKind::Ship {
+                continue;
+            }
+            hull = Some(hull.map_or_else(
+                || Rect::new(x, z, x, z),
+                |rect| {
+                    Rect::new(
+                        rect.min_x.min(x),
+                        rect.min_z.min(z),
+                        rect.max_x.max(x),
+                        rect.max_z.max(z),
+                    )
+                },
+            ));
+        }
+    }
+    let core = hull.map_or(docks, |h| {
+        Rect::new(
+            h.min_x.min(docks.min_x),
+            h.min_z.min(docks.min_z),
+            h.max_x.max(docks.max_x),
+            h.max_z.max(docks.max_z),
+        )
+    });
+    let mut rect = hull.map_or(core.inflate(8), |h| h.inflate(16));
+    // Keep the pier in frame without swallowing the whole coast forest.
+    if rect.width() > 56 {
+        let cx = hull.map_or(rect.center().0, |h| h.center().0);
+        rect = Rect::new(cx - 28, rect.min_z, cx + 27, rect.max_z);
+    }
+    if rect.depth() > 56 {
+        let cz = hull.map_or(rect.center().1, |h| h.center().1);
+        rect = Rect::new(rect.min_x, cz - 28, rect.max_x, cz + 27);
+    }
+    rect
+}
+
+/// Remap leftover Empty columns in every scene yard so Features trees and
+/// lily pads cannot survive the stamper.
+pub fn paint_scene_yards(occ: &mut Occupancy, grid: &HeightGrid, scenes: &[Scene]) {
+    for scene in scenes {
+        let pad = scene.rect.inflate(SCENE_YARD_MARGIN);
+        for z in pad.min_z..=pad.max_z {
+            for x in pad.min_x..=pad.max_x {
+                if !occ.bounds.contains(x, z) {
+                    continue;
+                }
+                let kind = occ.kind(x, z);
+                if !grid.is_dry(x, z) {
+                    if matches!(
+                        kind,
+                        CellKind::Empty
+                            | CellKind::Green
+                            | CellKind::Farm
+                            | CellKind::FarmEdge
+                            | CellKind::Orchard
+                            | CellKind::Pasture
+                            | CellKind::Plaza
+                            | CellKind::Market
+                            | CellKind::Hedge
+                            | CellKind::Eave
+                    ) {
+                        occ.set(x, z, CellKind::Harbor, true);
+                    }
+                    continue;
+                }
+                if kind != CellKind::Empty {
+                    continue;
+                }
+                let fill = if scene.kind == SceneKind::Plaza {
+                    CellKind::Plaza
+                } else {
+                    CellKind::Green
+                };
+                occ.set(x, z, fill, false);
+            }
+        }
+    }
 }
 
 fn harbour_out(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> Option<Dir> {
@@ -309,8 +411,19 @@ fn wet_berth(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> bool {
     !grid.is_dry(x, z)
         && matches!(
             occ.kind(x, z),
-            CellKind::Harbor | CellKind::Dock | CellKind::Empty | CellKind::Quay
+            CellKind::Harbor | CellKind::Dock | CellKind::Empty | CellKind::Quay | CellKind::Green
         )
+}
+
+fn hull_rect(sx: i32, sz: i32, dir: Dir, len: i32, beam: i32) -> Rect {
+    let along_x = dir == Dir::East || dir == Dir::West;
+    let hl = (len - 1) / 2;
+    let hb = (beam - 1) / 2;
+    if along_x {
+        Rect::new(sx - hl, sz - hb, sx + hl, sz + hb)
+    } else {
+        Rect::new(sx - hb, sz - hl, sx + hb, sz + hl)
+    }
 }
 
 fn hull_cells_ok(occ: &Occupancy, grid: &HeightGrid, search: Rect, hull: Rect) -> bool {
@@ -319,7 +432,9 @@ fn hull_cells_ok(occ: &Occupancy, grid: &HeightGrid, search: Rect, hull: Rect) -
             if !search.contains(x, z) {
                 return false;
             }
-            if grid.is_dry(x, z) || grid.water_depth(x, z) == 0 {
+            // Shallow water is allowed: the stamper dredges the hull in water
+            // only and never flattens land.
+            if grid.is_dry(x, z) {
                 return false;
             }
             if !matches!(
@@ -330,6 +445,7 @@ fn hull_cells_ok(occ: &Occupancy, grid: &HeightGrid, search: Rect, hull: Rect) -
                     | CellKind::Quay
                     | CellKind::Ship
                     | CellKind::Boat
+                    | CellKind::Green
             ) {
                 return false;
             }
@@ -347,17 +463,10 @@ fn place_hull(
     dir: Dir,
     cog: bool,
 ) -> bool {
-    let along_x = dir == Dir::East || dir == Dir::West;
     let hull = if cog {
-        if along_x {
-            Rect::new(sx - 4, sz - 1, sx + 4, sz + 1)
-        } else {
-            Rect::new(sx - 1, sz - 4, sx + 1, sz + 4)
-        }
-    } else if along_x {
-        Rect::new(sx - 2, sz, sx + 2, sz)
+        hull_rect(sx, sz, dir, COG_LEN, COG_BEAM)
     } else {
-        Rect::new(sx, sz - 2, sx, sz + 2)
+        hull_rect(sx, sz, dir, 5, 3)
     };
     if !hull_cells_ok(occ, grid, search, hull) {
         return false;
@@ -370,6 +479,100 @@ fn place_hull(
     true
 }
 
+fn place_harbour_cog(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    docks: &[(i32, i32)],
+) -> bool {
+    let mut best: Option<(Rect, i32)> = None;
+    for &(x, z) in docks {
+        let Some(dir) = harbour_out(occ, grid, x, z) else {
+            continue;
+        };
+        let side = match dir {
+            Dir::North | Dir::South => Dir::East,
+            Dir::East | Dir::West => Dir::South,
+        };
+        for step in 5..=14 {
+            for offset in [0, 2, -2, 3, -3, 4, -4] {
+                let sx = x + dir.dx() * step + side.dx() * offset;
+                let sz = z + dir.dz() * step + side.dz() * offset;
+                for &(len, beam) in &[(COG_LEN, COG_BEAM), (COG_LEN, 3)] {
+                    let hull = hull_rect(sx, sz, dir, len, beam);
+                    if !hull_cells_ok(occ, grid, search, hull) {
+                        continue;
+                    }
+                    let mut score = 0;
+                    for hz in hull.min_z..=hull.max_z {
+                        for hx in hull.min_x..=hull.max_x {
+                            score += grid.water_depth(hx, hz);
+                        }
+                    }
+                    score += hull.width() * hull.depth();
+                    if best.is_none_or(|(_, s)| score > s) {
+                        best = Some((hull, score));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((hull, _)) = best {
+        occ.fill(hull, CellKind::Ship, true);
+        return true;
+    }
+    force_harbour_cog(occ, grid, search, docks)
+}
+
+fn force_harbour_cog(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    docks: &[(i32, i32)],
+) -> bool {
+    for &(x, z) in docks {
+        let Some(dir) = harbour_out(occ, grid, x, z) else {
+            continue;
+        };
+        let side = match dir {
+            Dir::North | Dir::South => Dir::East,
+            Dir::East | Dir::West => Dir::South,
+        };
+        let sx = x + dir.dx() * 9 + side.dx() * 3;
+        let sz = z + dir.dz() * 9 + side.dz() * 3;
+        let hull = hull_rect(sx, sz, dir, COG_LEN, COG_BEAM);
+        let mut wet = 0;
+        let mut cells = 0;
+        for hz in hull.min_z..=hull.max_z {
+            for hx in hull.min_x..=hull.max_x {
+                if !search.contains(hx, hz) {
+                    continue;
+                }
+                cells += 1;
+                if !grid.is_dry(hx, hz) {
+                    wet += 1;
+                    if matches!(
+                        occ.kind(hx, hz),
+                        CellKind::Empty
+                            | CellKind::Green
+                            | CellKind::Harbor
+                            | CellKind::Dock
+                            | CellKind::Quay
+                            | CellKind::Boat
+                    ) {
+                        occ.set(hx, hz, CellKind::Harbor, true);
+                    }
+                }
+            }
+        }
+        if wet >= (cells * 3) / 4 && wet >= 30 && hull_cells_ok(occ, grid, search, hull) {
+            occ.fill(hull, CellKind::Ship, true);
+            return true;
+        }
+    }
+    false
+}
+
 fn paint_quay_and_cranes(
     occ: &mut Occupancy,
     grid: &HeightGrid,
@@ -379,44 +582,38 @@ fn paint_quay_and_cranes(
     let mut quay = Vec::new();
     for &(x, z) in docks {
         for dir in Dir::ALL {
-            let nx = x + dir.dx();
-            let nz = z + dir.dz();
-            if !search.contains(nx, nz) {
-                continue;
-            }
-            if grid.is_dry(nx, nz)
-                && matches!(
-                    occ.kind(nx, nz),
-                    CellKind::Empty
-                        | CellKind::Green
-                        | CellKind::Farm
-                        | CellKind::Plaza
-                        | CellKind::FarmEdge
-                )
-            {
-                occ.set(nx, nz, CellKind::Quay, true);
-                quay.push((nx, nz));
-            }
-            let nx2 = nx + dir.dx();
-            let nz2 = nz + dir.dz();
-            if search.contains(nx2, nz2)
-                && grid.is_dry(nx2, nz2)
-                && matches!(
-                    occ.kind(nx2, nz2),
-                    CellKind::Empty | CellKind::Green | CellKind::Farm | CellKind::FarmEdge
-                )
-            {
-                occ.set(nx2, nz2, CellKind::Quay, true);
-                quay.push((nx2, nz2));
+            for step in 1..=3 {
+                let nx = x + dir.dx() * step;
+                let nz = z + dir.dz() * step;
+                if !search.contains(nx, nz) {
+                    continue;
+                }
+                if grid.is_dry(nx, nz)
+                    && matches!(
+                        occ.kind(nx, nz),
+                        CellKind::Empty
+                            | CellKind::Green
+                            | CellKind::Farm
+                            | CellKind::Plaza
+                            | CellKind::FarmEdge
+                            | CellKind::Hedge
+                            | CellKind::Eave
+                            | CellKind::Road
+                            | CellKind::Market
+                    )
+                {
+                    occ.set(nx, nz, CellKind::Quay, true);
+                    quay.push((nx, nz));
+                }
             }
         }
     }
     let mut cranes = 0;
     for &(x, z) in &quay {
-        if cranes >= 4 {
+        if cranes >= 2 {
             break;
         }
-        if (x + z).rem_euclid(7) != 0 {
+        if (x + z).rem_euclid(11) != 0 {
             continue;
         }
         occ.set(x, z, CellKind::Crane, true);
@@ -427,6 +624,174 @@ fn paint_quay_and_cranes(
     {
         occ.set(x, z, CellKind::Crane, true);
     }
+}
+
+fn place_frontier(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    origin: TownPos,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let dir = frontier_dir(origin);
+    let Some(yard) = find_frontier_site(occ, grid, search, town, keep_out, dir, rng)
+        .or_else(|| find_site(occ, grid, search, town, keep_out, 28, 22, false, rng))
+    else {
+        return;
+    };
+    occ.fill(yard.inflate(SCENE_YARD_MARGIN), CellKind::Green, false);
+    occ.fill(yard, CellKind::Green, true);
+    for z in yard.min_z..=yard.max_z {
+        for x in yard.min_x..=yard.max_x {
+            if !yard.on_edge(x, z) {
+                continue;
+            }
+            let mix = (x.wrapping_mul(13) + z.wrapping_mul(7)).unsigned_abs();
+            if mix % 5 == 0 {
+                continue;
+            }
+            occ.set(
+                x,
+                z,
+                if mix % 4 == 0 {
+                    CellKind::Ruin
+                } else {
+                    CellKind::Palisade
+                },
+                true,
+            );
+        }
+    }
+    let houses = [
+        Rect::new(
+            yard.min_x + 3,
+            yard.min_z + 3,
+            yard.min_x + 9,
+            yard.min_z + 8,
+        ),
+        Rect::new(
+            yard.min_x + 12,
+            yard.min_z + 4,
+            yard.min_x + 18,
+            yard.min_z + 9,
+        ),
+        Rect::new(
+            yard.min_x + 4,
+            yard.max_z - 9,
+            yard.min_x + 11,
+            yard.max_z - 4,
+        ),
+        Rect::new(
+            yard.max_x - 10,
+            yard.max_z - 10,
+            yard.max_x - 4,
+            yard.max_z - 4,
+        ),
+        Rect::new(
+            yard.max_x - 12,
+            yard.min_z + 11,
+            yard.max_x - 5,
+            yard.min_z + 16,
+        ),
+    ];
+    for house in houses {
+        if yard.contains(house.min_x, house.min_z) && yard.contains(house.max_x, house.max_z) {
+            occ.fill(house, CellKind::Burnt, true);
+        }
+    }
+    let (cx, cz) = yard.center();
+    let pits = [
+        Rect::new(
+            yard.min_x - 5,
+            yard.min_z + 6,
+            yard.min_x - 1,
+            yard.min_z + 10,
+        ),
+        Rect::new(
+            yard.max_x + 1,
+            yard.max_z - 12,
+            yard.max_x + 5,
+            yard.max_z - 8,
+        ),
+        Rect::new(
+            yard.min_x + 10,
+            yard.min_z - 5,
+            yard.min_x + 14,
+            yard.min_z - 1,
+        ),
+        Rect::new(cx - 2, cz + 2, cx + 2, cz + 6),
+    ];
+    for pit in pits {
+        fill_green(occ, pit, CellKind::SiegeTreb);
+    }
+    occ.set(cx, cz, CellKind::Fountain, true);
+    scenes.push(Scene {
+        kind: SceneKind::Frontier,
+        rect: yard.inflate(SCENE_YARD_MARGIN),
+    });
+}
+
+fn frontier_dir(origin: TownPos) -> Dir {
+    // Cardinal neighbours are always the other kingdom. Face east from
+    // Alder (even cell sum) and west from Raven so the scar sits on the
+    // border the war clock later marches.
+    if origin.cell_x.wrapping_add(origin.cell_z).rem_euclid(2) == 0 {
+        Dir::East
+    } else {
+        Dir::West
+    }
+}
+
+fn find_frontier_site(
+    occ: &Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    dir: Dir,
+    rng: &mut TownRng,
+) -> Option<Rect> {
+    let w = 28;
+    let d = 22;
+    let strip = match dir {
+        Dir::East => Rect::new(
+            town.max_x + 8,
+            town.min_z - 24,
+            search.max_x - 4,
+            town.max_z + 24,
+        ),
+        Dir::West => Rect::new(
+            search.min_x + 4,
+            town.min_z - 24,
+            town.min_x - 8,
+            town.max_z + 24,
+        ),
+        Dir::South => Rect::new(
+            town.min_x - 24,
+            town.max_z + 8,
+            town.max_x + 24,
+            search.max_z - 4,
+        ),
+        Dir::North => Rect::new(
+            town.min_x - 24,
+            search.min_z + 4,
+            town.max_x + 24,
+            town.min_z - 8,
+        ),
+    };
+    let clipped = Rect::new(
+        strip.min_x.max(search.min_x + 6),
+        strip.min_z.max(search.min_z + 6),
+        strip.max_x.min(search.max_x - 6),
+        strip.max_z.min(search.max_z - 6),
+    );
+    if clipped.width() < w || clipped.depth() < d {
+        return None;
+    }
+    find_site(occ, grid, clipped, town, keep_out, w, d, false, rng)
 }
 
 fn place_farmsteads(
@@ -1238,6 +1603,7 @@ fn mill_keepout(kind: CellKind, lot: u16, skip: Option<u16>) -> bool {
             | CellKind::MineRail
             | CellKind::MineSpoil
             | CellKind::MineAdit
+            | CellKind::Burnt
             | CellKind::TourneyList
             | CellKind::TourneyStand
             | CellKind::CathedralNave
@@ -1775,6 +2141,7 @@ pub(crate) fn try_lot(
                     | CellKind::Crane
                     | CellKind::Boat
                     | CellKind::MineAdit
+                    | CellKind::Burnt
             ) {
                 return None;
             }
@@ -1794,6 +2161,75 @@ pub(crate) fn try_lot(
     }
     lots.push(lot);
     Some(id)
+}
+
+pub(crate) fn force_lot(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    kind: BuildingKind,
+    rect: Rect,
+    facing: Dir,
+) -> Option<u16> {
+    if !occ.bounds.contains(rect.min_x, rect.min_z) || !occ.bounds.contains(rect.max_x, rect.max_z)
+    {
+        return None;
+    }
+    if !grid.rect_is_dry(rect) {
+        return None;
+    }
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            if matches!(
+                occ.kind(x, z),
+                CellKind::Building
+                    | CellKind::TownWall
+                    | CellKind::TownTower
+                    | CellKind::TownGate
+                    | CellKind::Well
+                    | CellKind::CastleKeep
+                    | CellKind::CastleWall
+                    | CellKind::CastleTower
+                    | CellKind::CastleGate
+                    | CellKind::WindSail
+                    | CellKind::Ship
+                    | CellKind::Boat
+                    | CellKind::Quay
+                    | CellKind::Crane
+                    | CellKind::MineAdit
+                    | CellKind::MineHead
+                    | CellKind::Burnt
+            ) {
+                return None;
+            }
+        }
+    }
+    let id = lots.iter().map(|lot| lot.id).max().unwrap_or(0) + 1;
+    let lot = Lot::new(id, kind, rect, facing, seed ^ (u64::from(id) << 8));
+    occ.fill_building(rect, id, true);
+    if !matches!(
+        kind,
+        BuildingKind::Watchtower
+            | BuildingKind::Outpost
+            | BuildingKind::BellTower
+            | BuildingKind::Windmill
+            | BuildingKind::Stall
+    ) {
+        paint_eaves(occ, rect);
+    }
+    lots.push(lot);
+    Some(id)
+}
+
+fn fill_green(occ: &mut Occupancy, rect: Rect, kind: CellKind) {
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            if occ.kind(x, z) == CellKind::Green {
+                occ.set(x, z, kind, true);
+            }
+        }
+    }
 }
 
 fn paint_eaves(occ: &mut Occupancy, rect: Rect) {
@@ -2472,6 +2908,177 @@ mod tests {
         );
         assert!(boats >= 3, "fishing boats {boats}");
         assert!(quay >= 2, "stone quay/cranes {quay}");
+    }
+
+    #[test]
+    fn round12_cog_market_frontier_and_clear_yards() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let oak = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let kinds: Vec<_> = oak.scenes.iter().map(|s| s.kind).collect();
+        assert!(
+            kinds.contains(&SceneKind::Frontier),
+            "missing frontier town: {kinds:?}"
+        );
+        let stalls = oak
+            .lots
+            .iter()
+            .filter(|lot| lot.kind == BuildingKind::Stall)
+            .count();
+        assert!(stalls >= 10, "packed market stalls {stalls}");
+        assert!(
+            oak.lots
+                .iter()
+                .any(|lot| lot.kind == BuildingKind::TownHall),
+            "clocktower hall facing the square"
+        );
+        let market = oak.market;
+        let facing = |lot: &Lot| {
+            matches!(
+                lot.kind,
+                BuildingKind::Timber | BuildingKind::Townhouse | BuildingKind::TownHall
+            )
+        };
+        let north = oak
+            .lots
+            .iter()
+            .filter(|lot| {
+                facing(lot)
+                    && lot.rect.min_z <= market.min_z + 6
+                    && lot.rect.max_z >= market.min_z - 16
+                    && lot.rect.max_z <= market.min_z + 8
+                    && lot.rect.max_x >= market.min_x
+                    && lot.rect.min_x <= market.max_x
+            })
+            .count();
+        let south = oak
+            .lots
+            .iter()
+            .filter(|lot| {
+                facing(lot)
+                    && lot.rect.max_z >= market.max_z - 6
+                    && lot.rect.min_z <= market.max_z + 16
+                    && lot.rect.min_z >= market.max_z - 8
+                    && lot.rect.max_x >= market.min_x
+                    && lot.rect.min_x <= market.max_x
+            })
+            .count();
+        let west = oak
+            .lots
+            .iter()
+            .filter(|lot| {
+                facing(lot)
+                    && lot.rect.min_x <= market.min_x + 6
+                    && lot.rect.max_x >= market.min_x - 16
+                    && lot.rect.max_x <= market.min_x + 8
+                    && lot.rect.max_z >= market.min_z
+                    && lot.rect.min_z <= market.max_z
+            })
+            .count();
+        let east = oak
+            .lots
+            .iter()
+            .filter(|lot| {
+                facing(lot)
+                    && lot.rect.max_x >= market.max_x - 6
+                    && lot.rect.min_x <= market.max_x + 16
+                    && lot.rect.min_x >= market.max_x - 8
+                    && lot.rect.max_z >= market.min_z
+                    && lot.rect.min_z <= market.max_z
+            })
+            .count();
+        assert!(north >= 1, "market north frontage {north}");
+        assert!(south >= 1, "market south frontage {south}");
+        assert!(west >= 1, "market west frontage {west}");
+        assert!(east >= 1, "market east frontage {east}");
+        if let Some(front) = oak.scenes.iter().find(|s| s.kind == SceneKind::Frontier) {
+            let mut burnt = 0;
+            let mut treb = 0;
+            let mut wall = 0;
+            for z in front.rect.min_z..=front.rect.max_z {
+                for x in front.rect.min_x..=front.rect.max_x {
+                    match oak.occ.kind(x, z) {
+                        CellKind::Burnt => burnt += 1,
+                        CellKind::SiegeTreb => treb += 1,
+                        CellKind::Palisade | CellKind::Ruin => wall += 1,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(burnt >= 20, "burned houses {burnt}");
+            assert!(treb >= 8, "trebuchet pits {treb}");
+            assert!(wall >= 20, "damaged walls {wall}");
+        }
+        let coast = HeightGrid::synthetic_coast(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            58,
+            origin.x - 40,
+        );
+        let harbour_plan = build_plan(7, origin, coast, PaletteKind::Oak);
+        let mut ships = 0;
+        let mut boats = 0;
+        let mut quay = 0;
+        let mut crane = 0;
+        let mut hull: Option<Rect> = None;
+        for z in harbour_plan.occ.bounds.min_z..=harbour_plan.occ.bounds.max_z {
+            for x in harbour_plan.occ.bounds.min_x..=harbour_plan.occ.bounds.max_x {
+                match harbour_plan.occ.kind(x, z) {
+                    CellKind::Ship => {
+                        ships += 1;
+                        hull = Some(hull.map_or_else(
+                            || Rect::new(x, z, x, z),
+                            |rect| {
+                                Rect::new(
+                                    rect.min_x.min(x),
+                                    rect.min_z.min(z),
+                                    rect.max_x.max(x),
+                                    rect.max_z.max(z),
+                                )
+                            },
+                        ));
+                    }
+                    CellKind::Boat => boats += 1,
+                    CellKind::Quay => quay += 1,
+                    CellKind::Crane => crane += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            ships >= 40,
+            "cog hull should be 15 long, ships={ships} boats={boats}"
+        );
+        let hull = hull.expect("harbour cog");
+        assert!(
+            hull.width().max(hull.depth()) >= COG_LEN,
+            "cog keel {}x{}",
+            hull.width(),
+            hull.depth()
+        );
+        assert!(boats >= 9, "2–3 fishing boats {boats}");
+        assert!(quay >= 2, "stone quay {quay}");
+        assert!(crane >= 1, "harbour crane {crane}");
+        assert!(
+            harbour_plan
+                .scenes
+                .iter()
+                .any(|scene| scene.kind == SceneKind::Harbour),
+            "harbour scene missing"
+        );
     }
 
     #[test]
