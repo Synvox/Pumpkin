@@ -131,7 +131,8 @@ fn write_scene_renders(
             | SceneKind::Mine
             | SceneKind::Ruin
             | SceneKind::Tourney
-            | SceneKind::Frontier => 6,
+            | SceneKind::Frontier
+            | SceneKind::Manor => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -171,6 +172,20 @@ fn write_scene_renders(
                 2,
                 "Windmill · open-air sails",
             ),
+        )?;
+    }
+    if let Some(mill) = plan
+        .lots
+        .iter()
+        .find(|lot| lot.kind == BuildingKind::Watermill)
+    {
+        let mut rect = mill.rect.inflate(12);
+        if let Some(wheel) = largest_blob(plan, CellKind::WaterWheel) {
+            rect = union_rect(rect, wheel.inflate(6));
+        }
+        save(
+            &out_dir.join(format!("{stem}-scene-watermill.png")),
+            &render_exterior(volume, rect, 4, "Watermill · wheel, sluice and race"),
         )?;
     }
     save(
@@ -245,6 +260,9 @@ pub fn overview_bounds(plan: &TownPlan) -> Rect {
     for scene in &plan.scenes {
         if scene.kind == SceneKind::Harbour && (scene.rect.width() > 64 || scene.rect.depth() > 64)
         {
+            if let Some(hull) = largest_blob(plan, CellKind::Ship) {
+                bounds = union_rect(bounds, hull.inflate(20));
+            }
             continue;
         }
         bounds = union_rect(bounds, scene.rect.inflate(8));
@@ -464,12 +482,12 @@ fn write_cutaways(
                 &render_elevation_west(
                     volume,
                     nave.min_x,
-                    nave.min_z - 6,
-                    nave.max_z + 6,
-                    floor + 2,
-                    floor + 28,
-                    floor + 16,
-                    "Cathedral · west front",
+                    nave.min_z - 1,
+                    nave.max_z + 1,
+                    floor,
+                    floor + 24,
+                    floor + 21,
+                    "West front",
                 ),
             )?;
         }
@@ -529,26 +547,18 @@ fn render_elevation_west(
     let mut image = ImageBuffer::from_pixel(width, height, Rgb([168u8, 198, 230]));
     for z in min_z..=max_z {
         for y in min_y..=max_y {
-            let mut rgb = None;
-            for x in (wall_x - 2)..=(wall_x + 3) {
-                if let Some(state) = volume.get(x, y, z)
-                    && !state.is_air()
-                {
-                    let id = Block::from_state_id(state.id).id;
-                    if y <= rose_top
-                        && (id == Block::DEEPSLATE_TILES.id
-                            || id == Block::DEEPSLATE_TILE_STAIRS.id
-                            || id == Block::DEEPSLATE_TILE_SLAB.id)
-                    {
-                        continue;
-                    }
-                    rgb = Some(block_rgb(state));
-                    break;
-                }
-            }
-            let Some(rgb) = rgb else {
+            let Some(state) = volume.get(wall_x, y, z).filter(|s| !s.is_air()) else {
                 continue;
             };
+            let id = Block::from_state_id(state.id).id;
+            if y <= rose_top
+                && (id == Block::DEEPSLATE_TILES.id
+                    || id == Block::DEEPSLATE_TILE_STAIRS.id
+                    || id == Block::DEEPSLATE_TILE_SLAB.id)
+            {
+                continue;
+            }
+            let rgb = block_rgb(state);
             let px = ((z - min_z) as u32) * scale + 4;
             let py = ((max_y - y) as u32) * scale + 4 + label_h;
             for sy in 0..scale {

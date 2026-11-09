@@ -3644,10 +3644,20 @@ fn heal_repaired_towns(tick: u32) {
     if ids.is_empty() {
         return;
     }
+    let mut still = Vec::new();
     for id in ids {
-        crate::damage::set_damage_state(&id, crate::damage::DamageState::Intact);
+        if crate::damage::step_repair(&id).is_damaged() {
+            still.push(id);
+        }
     }
-    lock().mark_dirty();
+    let mut dir = lock();
+    let next = tick.saturating_add(REPAIR_WINDOW_TICKS);
+    for id in &still {
+        if let Some(war) = dir.towns.get_mut(id) {
+            war.repair_until = next;
+        }
+    }
+    dir.mark_dirty();
 }
 
 fn pick_clock_front(tick: u32, fronts: usize) -> Option<(String, RaidSide)> {
@@ -3940,7 +3950,7 @@ fn commit_capture(flip: PendingFlip) {
         let tick = dir.tick;
         dir.add_score(&owner_name, 1);
         dir.persist_owner(&flip.town_id, flip.occupier.clone());
-        crate::damage::set_damage_state(&flip.town_id, crate::damage::DamageState::Scarred);
+        crate::damage::note_capture(&flip.town_id);
         dir.push_event(CombatEvent {
             tick,
             kind: CombatKind::Capture,
@@ -4790,6 +4800,31 @@ mod tests {
         assert!(front.towns.is_empty());
         assert!(front.clock_period > 0);
         assert!(front.fronts >= 1);
+    }
+
+    #[test]
+    fn capture_scars_then_ruins_and_builders_step_back() {
+        let id = "director-capture-damage:0:0";
+        crate::damage::set_damage_state(id, crate::damage::DamageState::Intact);
+        crate::damage::note_capture(id);
+        assert_eq!(
+            crate::damage::damage_state(id),
+            crate::damage::DamageState::Scarred
+        );
+        crate::damage::note_capture(id);
+        assert_eq!(
+            crate::damage::damage_state(id),
+            crate::damage::DamageState::Ruined
+        );
+        assert_eq!(
+            crate::damage::step_repair(id),
+            crate::damage::DamageState::Scarred
+        );
+        assert_eq!(
+            crate::damage::step_repair(id),
+            crate::damage::DamageState::Intact
+        );
+        crate::damage::set_damage_state(id, crate::damage::DamageState::Intact);
     }
 
     #[test]

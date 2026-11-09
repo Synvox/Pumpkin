@@ -200,12 +200,14 @@ fn render_one(
 }
 
 fn find_variant_seeds() -> Vec<(u64, i32, i32, String)> {
-    // Same four towns as the first renders, so before/after is comparable.
+    // Four towns from the first renders, plus a cell that actually has
+    // coast/lake water so the harbour cog, quay, crane and breakwater show.
     vec![
         (20_261_025u64, 0, 0, "plains".to_string()),
         (7, 0, 0, "taiga-hill".to_string()),
         (42, 0, 0, "hillside".to_string()),
         (314_159, 0, 0, "desert".to_string()),
+        (1, -4, 5, "harbour".to_string()),
     ]
 }
 

@@ -130,6 +130,14 @@ pub enum CellKind {
     Breakwater,
     /// Siege trench / ditch outside a damaged curtain.
     SiegeTrench,
+    /// Vertical mill wheel in river water.
+    WaterWheel,
+    /// Mill race / leat feeding a watermill.
+    MillRace,
+    /// Sluice gate on a mill race.
+    Sluice,
+    /// Cobble retaining wall beside a switchback.
+    Retaining,
 }
 
 impl CellKind {

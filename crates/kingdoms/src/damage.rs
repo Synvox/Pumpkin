@@ -66,6 +66,25 @@ pub fn damage_state(town_id: &str) -> DamageState {
         .unwrap_or(DamageState::Intact)
 }
 
+/// Intact → Scarred on the first capture; Scarred → Ruined if taken again.
+pub fn note_capture(town_id: &str) {
+    let next = match damage_state(town_id) {
+        DamageState::Intact => DamageState::Scarred,
+        DamageState::Scarred | DamageState::Ruined => DamageState::Ruined,
+    };
+    set_damage_state(town_id, next);
+}
+
+/// One step toward intact: Ruined → Scarred, Scarred → Intact.
+pub fn step_repair(town_id: &str) -> DamageState {
+    let next = match damage_state(town_id) {
+        DamageState::Ruined => DamageState::Scarred,
+        DamageState::Scarred | DamageState::Intact => DamageState::Intact,
+    };
+    set_damage_state(town_id, next);
+    next
+}
+
 /// Director / repair hook. `planned_block` reads this on the next stamp.
 pub fn set_damage_state(town_id: impl Into<String>, state: DamageState) {
     let id = town_id.into();
@@ -133,5 +152,20 @@ mod tests {
         assert_eq!(damage_state(id), DamageState::Ruined);
         set_damage_state(id, DamageState::Intact);
         assert_eq!(damage_state(id), DamageState::Intact);
+    }
+
+    #[test]
+    fn capture_scars_then_ruins_and_repair_steps_back() {
+        let id = "test-damage-capture:1:0";
+        set_damage_state(id, DamageState::Intact);
+        note_capture(id);
+        assert_eq!(damage_state(id), DamageState::Scarred);
+        note_capture(id);
+        assert_eq!(damage_state(id), DamageState::Ruined);
+        note_capture(id);
+        assert_eq!(damage_state(id), DamageState::Ruined);
+        assert_eq!(step_repair(id), DamageState::Scarred);
+        assert_eq!(step_repair(id), DamageState::Intact);
+        assert_eq!(step_repair(id), DamageState::Intact);
     }
 }

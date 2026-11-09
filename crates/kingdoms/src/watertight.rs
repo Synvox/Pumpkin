@@ -207,6 +207,8 @@ fn planned_timber(kind: CellKind) -> bool {
             | CellKind::SiegeLadder
             | CellKind::Burnt
             | CellKind::Eave
+            | CellKind::WaterWheel
+            | CellKind::Sluice
     )
 }
 
@@ -346,7 +348,7 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
         plan,
     );
     for lot in &plan.lots {
-        if matches!(lot.kind, BuildingKind::Stall) {
+        if matches!(lot.kind, BuildingKind::Stall | BuildingKind::Watermill) {
             continue;
         }
         let mut cols = collect_lot(plan, lot.id, lot.rect);
@@ -1278,6 +1280,8 @@ mod tests {
             let mut purple = 0;
             let mut yellow = 0;
             let mut petals = 0;
+            let mut oculus = 0;
+            let mut oculus_ring = 0;
             for z in min_z..=max_z {
                 for y in cy - 6..=cy + 6 {
                     if let Some(state) = volume.get(nave_west, y, z) {
@@ -1298,6 +1302,9 @@ mod tests {
                         }
                         if is_glass {
                             glass += 1;
+                            if d2 <= 3 {
+                                oculus += 1;
+                            }
                         }
                         if id == Block::PURPLE_STAINED_GLASS.id
                             || id == Block::PURPLE_STAINED_GLASS_PANE.id
@@ -1311,6 +1318,9 @@ mod tests {
                         }
                         if id == Block::CALCITE.id {
                             stone += 1;
+                            if (4..=8).contains(&d2) {
+                                oculus_ring += 1;
+                            }
                             if dy.abs() * 2 == dz.abs() || dz.abs() * 2 == dy.abs() {
                                 petals += 1;
                             }
@@ -1323,6 +1333,8 @@ mod tests {
             assert!(purple >= 4, "rose purple glass {purple}");
             assert!(yellow >= 4, "rose yellow glass {yellow}");
             assert!(petals >= 8, "rose 12-petal spokes {petals}");
+            assert!(oculus >= 1, "rose central oculus {oculus}");
+            assert!(oculus_ring >= 4, "rose oculus ring {oculus_ring}");
             assert!(
                 rose_hi - rose_lo >= 12,
                 "rose should be at least 13 wide, span={}",
