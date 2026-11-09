@@ -14,6 +14,7 @@ use pumpkin_core::plugin::api::events::server::ServerTickStartEvent;
 use pumpkin_core::plugin::{EventHandler, EventPriority, Payload, PluginFuture, TypedEventHandler};
 use pumpkin_core::server::Server;
 use pumpkin_data::Block;
+use pumpkin_data::item::Item;
 
 use crate::director;
 use crate::faction::{is_allied, is_kingdoms_tagged};
@@ -230,6 +231,18 @@ impl EventHandler<PlayerInteractEvent> for InteractHandler {
         event: &'a mut PlayerInteractEvent,
     ) -> PluginFuture<'a, ()> {
         Box::pin(async move {
+            if event.action.is_right_click() {
+                let held = event.player.inventory.held_item();
+                if held.item.id == Item::GOAT_HORN.id
+                    && let Ok(msg) = director::try_horn(&event.player)
+                {
+                    event.player.send_system_message(
+                        &pumpkin_util::text::TextComponent::text(msg)
+                            .color_named(pumpkin_util::text::color::NamedColor::Gold),
+                    );
+                    return;
+                }
+            }
             if event.action != InteractAction::RightClickBlock {
                 return;
             }

@@ -168,7 +168,7 @@ pub fn tick_shot(world: &Arc<World>, shot: &mut TrebShot, keep: Rect) -> Option<
     if !shot_done(shot.age, shot.y, shot.target_y, TREB_FLIGHT) {
         return None;
     }
-    let hits = punch_wall(world, shot.x.floor() as i32, shot.z.floor() as i32, keep);
+    let hits = collect_punch_hits(world, shot.x.floor() as i32, shot.z.floor() as i32, keep);
     despawn_shot(world, shot);
     tracing::info!(
         x = shot.x,
@@ -187,56 +187,49 @@ fn despawn_shot(world: &World, shot: &TrebShot) {
     }
 }
 
-/// Clear a small solid column so repair can put the plan back.
-pub fn punch_wall(world: &Arc<World>, x: i32, z: i32, keep: Rect) -> Vec<PunchHit> {
+/// Blocks the cobble would clear. Writes happen later, a few per tick.
+#[must_use]
+pub fn collect_punch_hits(world: &World, x: i32, z: i32, keep: Rect) -> Vec<PunchHit> {
     let mut hits = Vec::new();
     for dz in -IMPACT_RADIUS..=IMPACT_RADIUS {
         for dx in -IMPACT_RADIUS..=IMPACT_RADIUS {
             let cx = x + dx;
             let cz = z + dz;
             if !punch_column_allowed(cx, cz, keep) {
-                tracing::info!(x = cx, z = cz, "kingdoms trebuchet skipped keep");
                 continue;
             }
             let top = solid_surface_y(world, cx, cz);
             for dy in -IMPACT_DEPTH..=0 {
                 let pos = BlockPos::new(cx, top + dy, cz);
                 let (block, state) = world.get_block_and_state(&pos);
-                if is_protected_block(block) {
-                    tracing::info!(
-                        x = cx,
-                        y = pos.0.y,
-                        z = cz,
-                        block = block.name,
-                        "kingdoms trebuchet skipped protected"
-                    );
+                if is_protected_block(block) || !state.is_solid() {
                     continue;
                 }
-                if !state.is_solid() {
-                    continue;
-                }
-                let was = state.id.as_u16();
-                world.set_block_state(
-                    &pos,
-                    Block::AIR.default_state.id,
-                    BlockFlags::NOTIFY_LISTENERS | BlockFlags::SKIP_DROPS,
-                );
-                tracing::info!(
-                    "kingdoms trebuchet hole x={} y={} z={} was={was}",
-                    cx,
-                    pos.0.y,
-                    cz
-                );
                 hits.push(PunchHit {
                     x: cx,
                     y: pos.0.y,
                     z: cz,
-                    was,
+                    was: state.id.as_u16(),
                 });
             }
         }
     }
     hits
+}
+
+/// Replace one punched block with air. Returns whether the world changed.
+pub fn apply_punch_hit(world: &Arc<World>, hit: PunchHit) -> bool {
+    let pos = BlockPos::new(hit.x, hit.y, hit.z);
+    let state = world.get_block_state(&pos);
+    if !state.is_solid() {
+        return false;
+    }
+    world.set_block_state(
+        &pos,
+        Block::AIR.default_state.id,
+        BlockFlags::NOTIFY_LISTENERS | BlockFlags::SKIP_DROPS,
+    );
+    true
 }
 
 fn shot_floor_y(world: &World, x: i32, z: i32) -> i32 {
@@ -276,6 +269,9 @@ pub fn place_assault_ladders(
     let lz = wall.z + fz;
     let mut placed = 0u32;
     for dy in 1..=LADDER_HEIGHT {
+        if placed >= 2 {
+            break;
+        }
         let pos = BlockPos::new(lx, floor_y + dy, lz);
         let (block, _) = world.get_block_and_state(&pos);
         if block.id != Block::AIR.id && block.id != Block::LADDER.id {

@@ -613,7 +613,8 @@ fn strip_vanilla_combat(mob: &dyn Mob) {
     goals.remove_goal::<WanderAroundGoal>(mob);
 }
 
-fn equip(mob: &dyn Mob, slot: EquipmentSlot, item: &'static Item) {
+/// Put `item` in `slot` and sync equipment to watchers.
+pub fn equip(mob: &dyn Mob, slot: EquipmentSlot, item: &'static Item) {
     mob.get_mob_entity()
         .set_item_slot(&slot, ItemStack::new(1, item));
 }

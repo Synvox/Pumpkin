@@ -630,6 +630,24 @@ pub fn sign_body(secret: &str, body: &[u8]) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// Header value for outbound webhooks (`sha256=<hex>`).
+#[must_use]
+pub fn signature_header(secret: &str, body: &[u8]) -> String {
+    format!("sha256={}", sign_body(secret, body))
+}
+
+/// Constant-time check of `X-Kingdoms-Signature` against `body`.
+#[must_use]
+pub fn verify_signature(secret: &str, body: &[u8], header: &str) -> bool {
+    let got = header
+        .strip_prefix("sha256=")
+        .or_else(|| header.strip_prefix("SHA256="))
+        .unwrap_or(header)
+        .trim();
+    let want = sign_body(secret, body);
+    token_matches(got, &want)
+}
+
 fn webhook_name(kind: CombatKind) -> Option<&'static str> {
     match kind {
         CombatKind::RaidStart => Some("raid_started"),
@@ -690,14 +708,14 @@ fn emit(name: &str, payload: Value) {
             return;
         }
     };
-    let sig = sign_body(&cfg.webhook_secret, &body);
+    let sig = signature_header(&cfg.webhook_secret, &body);
     let name = name.to_owned();
     tokio::spawn(async move {
         let client = reqwest::Client::new();
         let req = client
             .post(&url)
             .header("content-type", "application/json")
-            .header(SIG_HEADER, format!("sha256={sig}"))
+            .header(SIG_HEADER, sig)
             .body(body);
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {}
@@ -817,5 +835,81 @@ mod tests {
         };
         let err = gate(&HeaderMap::new(), &state, 0).unwrap();
         assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn webhook_hmac_round_trip_matches_sails_header() {
+        let body = br#"{"event":"raid_started","tick":12}"#;
+        let header = signature_header("webhook-secret", body);
+        assert!(header.starts_with("sha256="));
+        assert!(verify_signature("webhook-secret", body, &header));
+        assert!(verify_signature(
+            "webhook-secret",
+            body,
+            &header.replace("sha256=", "SHA256=")
+        ));
+        assert!(!verify_signature("webhook-secret", body, "sha256=deadbeef"));
+        assert!(!verify_signature("other", body, &header));
+        assert!(!verify_signature(
+            "webhook-secret",
+            br#"{"event":"town_captured"}"#,
+            &header
+        ));
+    }
+
+    async fn response_json(resp: Response) -> (StatusCode, Value) {
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), MAX_BODY)
+            .await
+            .unwrap_or_default();
+        let value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
+        (status, value)
+    }
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn sails_http_contract_war_raid_and_hmac() {
+        let token = "a".repeat(MIN_TOKEN_LEN);
+        let state = AppState {
+            token: token.clone(),
+            limiter: Arc::new(RateLimit::new(100)),
+        };
+        let denied = get_war(State(state.clone()), HeaderMap::new()).await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let (status, war_json) =
+            response_json(get_war(State(state.clone()), bearer_headers(&token)).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(war_json.get("tick").is_some());
+        assert!(war_json.get("towns").is_some());
+        assert!(war_json.get("clock").is_some());
+        assert!(war_json.get("heroes").is_some());
+
+        let raid = post_raid(
+            State(state),
+            bearer_headers(&token),
+            Bytes::from_static(br#"{"town":"0,0","size":24,"defenders":8}"#),
+        )
+        .await;
+        assert!(
+            raid.status() == StatusCode::SERVICE_UNAVAILABLE
+                || raid.status() == StatusCode::BAD_REQUEST,
+            "POST /raids should fail closed without a live town, got {}",
+            raid.status()
+        );
+
+        let body = br#"{"event":"raid_started","town":"0,0"}"#;
+        let header = signature_header(&token, body);
+        assert!(header.starts_with("sha256="));
+        assert!(verify_signature(&token, body, &header));
+        assert!(!verify_signature(&token, body, "sha256=00"));
     }
 }

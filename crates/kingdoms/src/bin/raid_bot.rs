@@ -90,7 +90,7 @@ struct Args {
     y: f64,
     z: f64,
     seconds: u64,
-    command: Option<String>,
+    commands: Vec<String>,
     fight: bool,
     prove: bool,
     kingdom: String,
@@ -103,7 +103,7 @@ fn parse_args() -> Result<Args, String> {
     let mut y = 80.0;
     let mut z = 0.0;
     let mut seconds = 180u64;
-    let mut command = None;
+    let mut commands = Vec::new();
     let mut fight = false;
     let mut prove = false;
     let mut kingdom = "alder".to_owned();
@@ -121,13 +121,13 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--seconds: {e}"))?;
             }
-            "--command" => command = Some(next("--command")?),
+            "--command" => commands.push(next("--command")?),
             "--fight" => fight = true,
             "--prove" => prove = true,
             "--kingdom" => kingdom = next("--kingdom")?,
             "-h" | "--help" => {
                 println!(
-                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command \"kingdom join alder\"] [--fight|--prove --kingdom alder]"
+                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command CMD]... [--fight|--prove --kingdom alder]"
                 );
                 std::process::exit(0);
             }
@@ -142,7 +142,7 @@ fn parse_args() -> Result<Args, String> {
         y,
         z,
         seconds,
-        command,
+        commands,
         fight,
         prove,
         kingdom,
@@ -1131,11 +1131,12 @@ async fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     println!("standing; holding for {}s", args.seconds);
-    if let Some(cmd) = args.command.as_deref()
-        && let Err(err) = bot.chat_command(cmd).await
-    {
-        eprintln!("command failed: {err}");
-        return ExitCode::from(1);
+    for cmd in &args.commands {
+        if let Err(err) = bot.chat_command(cmd).await {
+            eprintln!("command failed: {err}");
+            return ExitCode::from(1);
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
     }
     if args.fight {
         if let Err(err) = fight_loop(&mut bot, &args.kingdom, args.seconds, stand).await {

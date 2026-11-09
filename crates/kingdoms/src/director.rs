@@ -39,12 +39,14 @@ use crate::abstract_combat::{
 use crate::chat::{self, ShoutKind};
 use crate::engines;
 use crate::faction::{
-    Faction, KingdomId, TAG_CAPTAIN, TAG_RAIDER, TAG_ROUTED, TAG_TEMP, faction_of_entity, has_tag,
-    is_allied, is_hostile, is_kingdoms_tagged, kingdom_color_rgb, kingdom_tag, role_from_tags,
+    Faction, KingdomId, TAG_ARMED, TAG_CAPTAIN, TAG_MILITIA, TAG_NPC_BLACKSMITH, TAG_NPC_PRIEST,
+    TAG_RAIDER, TAG_ROUTED, TAG_TEMP, faction_of_entity, has_tag, is_allied, is_hostile,
+    is_kingdoms_tagged, kingdom_color_rgb, kingdom_tag, role_from_tags,
 };
-use crate::flow::{DIRECT_RANGE, FlowField};
+use crate::flow::{DIRECT_RANGE, FlowField, is_squad_leader, should_refresh_path};
 use crate::goals::{
-    PostTarget, already_wired, bind_citizen, bind_golem, bind_raider, drive_live, shoot_arrow,
+    PostTarget, already_wired, bind_citizen, bind_golem, bind_raider, drive_live, equip,
+    shoot_arrow,
 };
 use crate::info::TownInfo;
 use crate::lod::{
@@ -105,7 +107,7 @@ const CAPTURES_PER_TICK: usize = 1;
 /// Soldiers (raiders, extras, garrison) spawned per town per director tick.
 const SPAWNS_PER_TICK: usize = 3;
 /// Cap across every town so three live fronts cannot spawn 9 bodies at once.
-const SPAWNS_PER_WORLD_TICK: u32 = 4;
+const SPAWNS_PER_WORLD_TICK: u32 = 12;
 /// Scoreboard rout/rally tag writes per town per tick.
 const ROUT_TAGS_PER_TICK: usize = 8;
 /// Leftover raid bodies despawned per town per tick.
@@ -116,6 +118,17 @@ const CREDIT_RANGE: f64 = 64.0;
 const GLOBAL_CHAT_GAP: u32 = 40;
 /// After a flip, skip the opposite hold so leftover garrison cannot retake instantly.
 const HOLD_LOCKOUT_TICKS: u32 = 400;
+/// Trebuchet-hole blocks restored per director tick (the 45-block dump was a 629 ms hitch).
+const PUNCH_REPAIR_PER_TICK: usize = 2;
+const PUNCH_BREAK_PER_TICK: usize = 2;
+/// Civilians kitted from the armoury per tick when the bell rings.
+const ARM_PER_TICK: usize = 4;
+/// Log a director phase that ran longer than this.
+const PHASE_WARN_MS: f64 = 20.0;
+/// Ranked-player squad order range.
+const SQUAD_RANGE: f64 = 48.0;
+/// Goat-horn command cooldown.
+const HORN_COOLDOWN_TICKS: u32 = 40;
 
 static WORST_MSPT_CENTS: AtomicU32 = AtomicU32::new(0);
 static WORST_DIRECTOR_CENTS: AtomicU32 = AtomicU32::new(0);
@@ -235,6 +248,70 @@ pub enum CombatKind {
     Portcullis,
 }
 
+/// Order a ranked player can give nearby kingdom soldiers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SquadOrder {
+    Follow,
+    Hold,
+    Charge,
+}
+
+impl SquadOrder {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Follow => "follow",
+            Self::Hold => "hold",
+            Self::Charge => "charge",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "follow" | "rally" => Some(Self::Follow),
+            "hold" | "halt" => Some(Self::Hold),
+            "charge" | "advance" => Some(Self::Charge),
+            _ => None,
+        }
+    }
+
+    const fn shout(self) -> ShoutKind {
+        match self {
+            Self::Follow => ShoutKind::Rally,
+            Self::Hold => ShoutKind::Hold,
+            Self::Charge => ShoutKind::Charge,
+        }
+    }
+
+    const fn line(self) -> &'static str {
+        match self {
+            Self::Follow => "On me. Form up.",
+            Self::Hold => "Hold this ground.",
+            Self::Charge => "With me. Charge!",
+        }
+    }
+
+    const fn next(self) -> Self {
+        match self {
+            Self::Follow => Self::Hold,
+            Self::Hold => Self::Charge,
+            Self::Charge => Self::Follow,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SquadCommand {
+    order: SquadOrder,
+    kingdom: KingdomId,
+    hold: PostTarget,
+    x: f64,
+    y: f64,
+    z: f64,
+    at_tick: u32,
+}
+
 /// Named commander the Sails director can drive per kingdom.
 #[derive(Clone, Debug)]
 pub struct Hero {
@@ -265,6 +342,7 @@ pub struct Director {
     clock_filling: bool,
     pending_flips: VecDeque<PendingFlip>,
     pending_keep_tp: HashSet<String>,
+    squad_orders: HashMap<String, SquadCommand>,
 }
 
 struct PendingFlip {
@@ -307,6 +385,7 @@ struct TownWar {
     last_treb_tick: u32,
     punch_repair: Vec<RepairJob>,
     punch_repair_at: u32,
+    punch_break: Vec<engines::PunchHit>,
     crossed_curtain: bool,
     logged_archer: bool,
     logged_sally: bool,
@@ -319,6 +398,7 @@ struct TownWar {
     pending_despawn: Vec<i32>,
     pending_unticket: Vec<Vector2<i32>>,
     repair_scan_cursor: usize,
+    named_npcs: bool,
 }
 
 struct Wired {
@@ -372,6 +452,7 @@ impl Director {
             clock_filling: false,
             pending_flips: VecDeque::new(),
             pending_keep_tp: HashSet::new(),
+            squad_orders: HashMap::new(),
         }
     }
 
@@ -599,6 +680,7 @@ impl Director {
             war.last_treb_tick = 0;
             war.punch_repair.clear();
             war.punch_repair_at = 0;
+            war.punch_break.clear();
             war.crossed_curtain = false;
             war.logged_archer = false;
             war.logged_sally = false;
@@ -1041,6 +1123,7 @@ impl TownWar {
             last_treb_tick: 0,
             punch_repair: Vec::new(),
             punch_repair_at: 0,
+            punch_break: Vec::new(),
             crossed_curtain: false,
             logged_archer: false,
             logged_sally: false,
@@ -1053,6 +1136,7 @@ impl TownWar {
             pending_despawn: Vec::new(),
             pending_unticket: Vec::new(),
             repair_scan_cursor: 0,
+            named_npcs: false,
         }
     }
 
@@ -1374,6 +1458,10 @@ fn kit_player(player: &Player, kingdom: &KingdomId, rank: siege::Rank, give_rewa
         let mut stack = ItemStack::new(1, kit_weapon(rank));
         let _ = player.inventory.insert_stack_anywhere(&mut stack);
     }
+    if rank >= siege::Rank::Freeman {
+        let mut horn = ItemStack::new(1, &Item::GOAT_HORN);
+        let _ = player.inventory.insert_stack_anywhere(&mut horn);
+    }
     player.sync_inventory_to_client();
     tracing::info!(
         player = %player.gameprofile.name,
@@ -1689,6 +1777,7 @@ pub fn tick_world(world: &Arc<World>) {
 
     // Spawn cell is pre-warmed in the plan cache. Do not register every
     // neighbour or the director ticks nine idle capitals each tick.
+    let ensure_started = Instant::now();
     let spawn = world.level_info.load();
     let home = town_containing(seed, spawn.spawn_x, spawn.spawn_z);
     if let Some(info) = crate::info::town_info(seed, home.cell_x, home.cell_z) {
@@ -1701,15 +1790,21 @@ pub fn tick_world(world: &Arc<World>) {
 
     let town_ids: Vec<String> = dir.towns.keys().cloned().collect();
     drop(dir);
+    log_slow_phase(tick, "ensure", ensure_started);
     retry_keep_teleports(world);
     drain_one_capture();
 
     let towns_started = Instant::now();
     for town_id in town_ids {
+        let town_started = Instant::now();
         tick_one_town(world, &town_id, tick);
+        log_slow_phase(tick, &format!("town:{town_id}"), town_started);
     }
     let towns_us = towns_started.elapsed().as_micros();
+    log_slow_phase(tick, "towns", towns_started);
+    let clock_started = Instant::now();
     maybe_war_clock(world, tick);
+    log_slow_phase(tick, "clock", clock_started);
 
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
     let dir = lock();
@@ -1717,9 +1812,12 @@ pub fn tick_world(world: &Arc<World>) {
     let persist_now = dir.persist_dirty || tick.is_multiple_of(200);
     drop(dir);
     if persist_now {
+        let persist_started = Instant::now();
         let mut dir = lock();
         dir.persist();
         dir.persist_dirty = false;
+        drop(dir);
+        log_slow_phase(tick, "persist", persist_started);
     }
     let (tps, mspt) = world
         .server
@@ -1805,6 +1903,13 @@ fn process_rss_kb() -> u64 {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
     resident.saturating_mul(4)
+}
+
+fn log_slow_phase(tick: u32, phase: &str, started: Instant) {
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    if ms >= PHASE_WARN_MS {
+        tracing::warn!("kingdoms phase tick={tick} phase={phase} ms={ms:.2}");
+    }
 }
 
 fn note_hitch(tick: u32, mspt: f64, director_ms: f64) {
@@ -2108,7 +2213,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                         || !raid.pending_members.is_empty()
                         || raid.pending_retake > 0
                         || raid.extra_left > 0);
-                if raid.wave >= raid.spec.waves
+                if raid.materialized
+                    && raid.wave >= raid.spec.waves
                     && raid.living.is_empty()
                     && raid.spawned_this_wave > 0
                     && raid.pending_members.is_empty()
@@ -2128,6 +2234,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                         captain: has_tag(base, TAG_CAPTAIN),
                     },
                 );
+            }
+            if !war.named_npcs {
+                assign_named_npcs(&snapshots);
+                war.named_npcs = true;
             }
             let gate = war.threatened.unwrap_or_else(|| war.scene.keep());
             war.raider_gate_dist = snapshots
@@ -2235,6 +2345,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         home_posts,
         wall_posts,
         ladders_placed,
+        inner_gate_dest,
+        well_dest,
     ) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
@@ -2268,6 +2380,13 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             .map(|p| ScenePost::new(p[0], p[1]))
             .collect();
         wall_posts.extend(war.scene.archer_posts().iter().copied());
+        let inner = war
+            .scene
+            .gates()
+            .iter()
+            .min_by_key(|g| (g.x - keep.x).abs() + (g.z - keep.z).abs())
+            .map_or(keep, |g| ScenePost::new(g.x, g.z));
+        let well = war.scene.capture_point();
         (
             war.alarm,
             PostTarget::from_post(dest, y),
@@ -2289,6 +2408,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             war.scene.civilian_homes().to_vec(),
             wall_posts,
             war.ladders_placed,
+            PostTarget::from_post(inner, standing_y(world, inner)),
+            PostTarget::from_post(well, standing_y(world, well)),
         )
     };
     maybe_refill_repair(world, town_id, tick, alarm);
@@ -2304,6 +2425,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             (pos.x, pos.z)
         })
         .collect();
+    arm_militia_tick(&snapshots, alarm);
+    shout_named_npcs(world, town_id, tick, alarm, inner_gate_dest);
+    let squads = collect_squads(world);
 
     let mut n_ticking = 0u32;
     let mut n_loaded = 0u32;
@@ -2372,8 +2496,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
         let hostile = buckets.nearest_hostile(pos.x, pos.z, faction, ACQUIRE_RANGE);
         let in_combat = hostile.is_some();
-        let melee_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, LIVE_MELEE_RANGE);
-        let ranged_hostile = buckets.nearest_hostile(pos.x, pos.z, faction, LIVE_RANGED_RANGE);
+        let melee_hostile = hostile.filter(|h| h.within(pos.x, pos.z, LIVE_MELEE_RANGE));
+        let ranged_hostile = hostile.filter(|h| h.within(pos.x, pos.z, LIVE_RANGED_RANGE));
         let tier = if in_combat {
             LodTier::Combat
         } else if alarm {
@@ -2396,7 +2520,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             continue;
         }
         if !alarm {
-            if let Some(h) = buckets.nearest_hostile(pos.x, pos.z, faction, SET_TARGET_RANGE)
+            if let Some(h) = hostile.filter(|h| h.within(pos.x, pos.z, SET_TARGET_RANGE))
                 && let Some(target) = world.get_entity_by_id(h.entity_id)
             {
                 mob.set_mob_target(Some(target));
@@ -2472,6 +2596,16 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 world_time,
             )
         };
+        let dest = overlay_civilian_posts(
+            dest,
+            role,
+            alarm,
+            inner_gate_dest,
+            well_dest,
+            keep_dest,
+            civilian_duty(base, id),
+        );
+        let dest = overlay_squad_order(dest, faction, pos.x, pos.z, &squads, march_dest);
         if matches!(faction, Faction::Pillager) && ladders_placed {
             let near_ladders =
                 (pos.x - f64::from(ladder_dest.x)).hypot(pos.z - f64::from(ladder_dest.z)) < 10.0;
@@ -2502,16 +2636,21 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         let dest_v = dest.vec();
         let dist = (pos.x - dest_v.x).hypot(pos.z - dest_v.z);
         let period = slide_period(dist, in_combat);
-        if alarm && tick.is_multiple_of(period) {
-            slide_along_field(base, town_id, dest);
-            n_slid += 1;
-        } else if !alarm {
-            let far = dist > DIRECT_RANGE;
-            let unticked = base.tick_count.load(Ordering::Relaxed) == 0;
-            if unticked || far {
+        let follower = !in_combat && !is_squad_leader(id);
+        let due = if follower {
+            should_refresh_path(id, tick as i32, dist < DIRECT_RANGE)
+        } else if alarm {
+            tick.is_multiple_of(period)
+        } else {
+            dist > DIRECT_RANGE || base.tick_count.load(Ordering::Relaxed) == 0
+        };
+        if due {
+            if follower {
+                slide_direct(base, dest);
+            } else {
                 slide_along_field(base, town_id, dest);
-                n_slid += 1;
             }
+            n_slid += 1;
         }
         if tick.is_multiple_of(LIVE_MELEE_PERIOD)
             && let Some(h) = melee_hostile
@@ -2556,6 +2695,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
     }
     let loop_us = loop_started.elapsed().as_micros();
+    log_slow_phase(tick, "entities", loop_started);
     if curtain_cross.is_some() || archer_walk.is_some() || ram_sally.is_some() {
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
@@ -2582,7 +2722,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
     }
     tick_moving_ram(world, town_id, tick, &snapshots, breached, &mut ram_at_gate);
+    let engines_started = Instant::now();
     tick_siege_engines(world, town_id, tick, alarm);
+    log_slow_phase(tick, "engines", engines_started);
     if ram_at_gate && !breached {
         let gate = {
             let dir = lock();
@@ -3190,6 +3332,27 @@ fn raid_chunk_list(town_id: &str) -> Option<(Vec<Vector2<i32>>, ScenePost, Scene
     let mut chunks: Vec<Vector2<i32>> = set.into_iter().map(|(x, z)| Vector2::new(x, z)).collect();
     chunks.truncate(FORCELOAD_CAP);
     Some((chunks, camp, keep))
+}
+
+fn slide_direct(entity: &Entity, dest: PostTarget) {
+    let pos = entity.pos.load();
+    let dx = f64::from(dest.x) + 0.5 - pos.x;
+    let dz = f64::from(dest.z) + 0.5 - pos.z;
+    let len = dx.hypot(dz);
+    let climb = (f64::from(dest.y) - pos.y).clamp(-0.45, 0.45);
+    if len < 0.05 {
+        if climb.abs() < 0.02 {
+            return;
+        }
+        entity.set_pos(Vector3::new(pos.x, pos.y + climb, pos.z));
+        return;
+    }
+    let step = SLIDE_STEP.min(len);
+    entity.set_pos(Vector3::new(
+        pos.x + dx / len * step,
+        pos.y + climb,
+        pos.z + dz / len * step,
+    ));
 }
 
 fn slide_along_field(entity: &Entity, town_id: &str, dest: PostTarget) {
@@ -3818,7 +3981,7 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
                 war.treb_shot = None;
             }
             drop(dir);
-            enqueue_punch_repair(town_id, &hits, tick);
+            enqueue_punch_break(town_id, hits, tick);
         } else {
             let mut dir = lock();
             if let Some(war) = dir.towns.get_mut(town_id) {
@@ -3863,6 +4026,7 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
             }
         }
     }
+    apply_punch_break(world, town_id);
     apply_punch_repair(world, town_id, tick);
 }
 
@@ -3930,6 +4094,40 @@ fn note_ladders_raised(dir: &mut Director, town_id: &str, tick: u32, wall: Scene
     });
 }
 
+fn enqueue_punch_break(town_id: &str, hits: Vec<engines::PunchHit>, tick: u32) {
+    if hits.is_empty() {
+        return;
+    }
+    enqueue_punch_repair(town_id, &hits, tick);
+    let mut dir = lock();
+    if let Some(war) = dir.towns.get_mut(town_id) {
+        war.punch_break.extend(hits);
+    }
+}
+
+fn apply_punch_break(world: &Arc<World>, town_id: &str) {
+    let hits = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        if war.punch_break.is_empty() {
+            return;
+        }
+        let n = war.punch_break.len().min(PUNCH_BREAK_PER_TICK);
+        war.punch_break.drain(..n).collect::<Vec<_>>()
+    };
+    let mut placed = 0u32;
+    for hit in hits {
+        if engines::apply_punch_hit(world, hit) {
+            placed += 1;
+        }
+    }
+    if placed > 0 {
+        tracing::info!("kingdoms trebuchet punched wall holes={placed} town={town_id}");
+    }
+}
+
 fn enqueue_punch_repair(town_id: &str, hits: &[engines::PunchHit], tick: u32) {
     if hits.is_empty() {
         return;
@@ -3972,19 +4170,13 @@ fn apply_punch_repair(world: &Arc<World>, town_id: &str, tick: u32) {
         if tick < war.punch_repair_at || war.punch_repair.is_empty() {
             return;
         }
-        std::mem::take(&mut war.punch_repair)
+        let n = war.punch_repair.len().min(PUNCH_REPAIR_PER_TICK);
+        war.punch_repair.drain(..n).collect::<Vec<_>>()
     };
     let mut placed = 0u32;
     for job in jobs {
         if repair::place_one(world, job) {
             placed += 1;
-            tracing::info!(
-                "kingdoms repair-by-diff placed x={} y={} z={} state={}",
-                job.x,
-                job.y,
-                job.z,
-                job.state
-            );
         }
     }
     if placed > 0 {
@@ -4064,6 +4256,295 @@ pub fn try_fire_trebuchet(player: &Player) -> Result<String, String> {
         "kingdoms trebuchet loosed"
     );
     Ok(format!("loosed the trebuchet at {town_id}"))
+}
+
+/// Freeman or above: nearby kingdom soldiers follow, hold, or charge.
+pub fn try_rally(player: &Player, order: SquadOrder) -> Result<String, String> {
+    let uuid = player.gameprofile.id.to_string();
+    let world = Arc::clone(&player.get_entity().world.load());
+    let pos = player.get_entity().pos.load();
+    let mut dir = lock();
+    let Some(kingdom) = dir.player_kingdom(&uuid).cloned() else {
+        return Err("join a kingdom first".to_owned());
+    };
+    let rank = dir
+        .player_stats
+        .get(&uuid)
+        .map_or(siege::Rank::Levy, siege::PlayerStats::rank);
+    if rank < siege::Rank::Freeman {
+        return Err("freeman rank or higher to command a squad".to_owned());
+    }
+    if let Some(prev) = dir.squad_orders.get(&uuid)
+        && order != prev.order
+        && tick_since(dir.tick, prev.at_tick) < HORN_COOLDOWN_TICKS
+    {
+        return Err("squad order is on cooldown".to_owned());
+    }
+    let hold = PostTarget {
+        x: pos.x.floor() as i32,
+        y: pos.y.floor() as i32,
+        z: pos.z.floor() as i32,
+    };
+    let tick = dir.tick;
+    dir.squad_orders.insert(
+        uuid,
+        SquadCommand {
+            order,
+            kingdom: kingdom.clone(),
+            hold,
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            at_tick: tick,
+        },
+    );
+    let town_id = nearest_town_id(&world, pos.x.floor() as i32, pos.z.floor() as i32);
+    let _ = chat::try_shout_as(
+        &world,
+        tick,
+        &town_id,
+        order.shout(),
+        pos.x,
+        pos.z,
+        &mut dir.last_shout,
+        &player.gameprofile.name,
+        Some(order.line()),
+    );
+    tracing::info!(
+        player = %player.gameprofile.name,
+        order = order.as_str(),
+        kingdom = kingdom.as_str(),
+        "kingdoms squad order"
+    );
+    Ok(format!(
+        "squad {}: nearby {} soldiers {}",
+        order.as_str(),
+        kingdom.as_str(),
+        order.line()
+    ))
+}
+
+/// Goat horn: cycle follow → hold → charge for a ranked player.
+pub fn try_horn(player: &Player) -> Result<String, String> {
+    let uuid = player.gameprofile.id.to_string();
+    let next = {
+        let dir = lock();
+        dir.squad_orders
+            .get(&uuid)
+            .map_or(SquadOrder::Follow, |c| c.order.next())
+    };
+    try_rally(player, next)
+}
+
+fn tick_since(now: u32, then: u32) -> u32 {
+    now.saturating_sub(then)
+}
+
+fn nearest_town_id(world: &World, x: i32, z: i32) -> String {
+    let seed = world.level.seed.0;
+    let town = crate::town::nearest_town(seed, x, z);
+    crate::info::town_id(seed, town.cell_x, town.cell_z)
+}
+
+const fn is_militia_id(id: i32) -> bool {
+    id.unsigned_abs().is_multiple_of(2)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CivilianDuty {
+    Townsfolk,
+    Militia,
+    Priest,
+    Blacksmith,
+}
+
+fn civilian_duty(entity: &Entity, id: i32) -> CivilianDuty {
+    if has_tag(entity, TAG_NPC_PRIEST) {
+        CivilianDuty::Priest
+    } else if has_tag(entity, TAG_NPC_BLACKSMITH) {
+        CivilianDuty::Blacksmith
+    } else if has_tag(entity, TAG_MILITIA) || is_militia_id(id) {
+        CivilianDuty::Militia
+    } else {
+        CivilianDuty::Townsfolk
+    }
+}
+
+fn overlay_civilian_posts(
+    dest: PostTarget,
+    role: Option<VillagerRole>,
+    alarm: bool,
+    inner_gate: PostTarget,
+    well: PostTarget,
+    keep: PostTarget,
+    duty: CivilianDuty,
+) -> PostTarget {
+    match duty {
+        CivilianDuty::Priest => keep,
+        CivilianDuty::Blacksmith => dest,
+        CivilianDuty::Militia if role == Some(VillagerRole::Civilian) && alarm => inner_gate,
+        CivilianDuty::Militia if role == Some(VillagerRole::Civilian) => well,
+        CivilianDuty::Townsfolk if role == Some(VillagerRole::Civilian) && alarm => well,
+        _ => dest,
+    }
+}
+
+fn overlay_squad_order(
+    dest: PostTarget,
+    faction: &Faction,
+    x: f64,
+    z: f64,
+    squads: &[SquadCommand],
+    charge_dest: PostTarget,
+) -> PostTarget {
+    let Faction::Kingdom(kingdom) = faction else {
+        return dest;
+    };
+    let Some(cmd) = squads
+        .iter()
+        .filter(|s| s.kingdom == *kingdom)
+        .filter(|s| (s.x - x).hypot(s.z - z) <= SQUAD_RANGE)
+        .min_by(|a, b| {
+            let da = (a.x - x).hypot(a.z - z);
+            let db = (b.x - x).hypot(b.z - z);
+            da.total_cmp(&db)
+        })
+    else {
+        return dest;
+    };
+    match cmd.order {
+        SquadOrder::Follow => PostTarget {
+            x: cmd.x.floor() as i32,
+            y: cmd.y.floor() as i32,
+            z: cmd.z.floor() as i32,
+        },
+        SquadOrder::Hold => cmd.hold,
+        SquadOrder::Charge => charge_dest,
+    }
+}
+
+fn collect_squads(world: &World) -> Vec<SquadCommand> {
+    let players = world.players.load();
+    let mut dir = lock();
+    let mut out = Vec::new();
+    for player in players.iter() {
+        let uuid = player.gameprofile.id.to_string();
+        let Some(cmd) = dir.squad_orders.get_mut(&uuid) else {
+            continue;
+        };
+        let pos = player.living_entity.entity.pos.load();
+        cmd.x = pos.x;
+        cmd.y = pos.y;
+        cmd.z = pos.z;
+        if cmd.order == SquadOrder::Follow {
+            cmd.hold = PostTarget {
+                x: pos.x.floor() as i32,
+                y: pos.y.floor() as i32,
+                z: pos.z.floor() as i32,
+            };
+        }
+        out.push(cmd.clone());
+    }
+    out
+}
+
+fn assign_named_npcs(snapshots: &[(Arc<dyn EntityBase>, Faction)]) {
+    let mut smith = snapshots
+        .iter()
+        .any(|(e, _)| has_tag(e.get_entity(), TAG_NPC_BLACKSMITH));
+    let mut priest = snapshots
+        .iter()
+        .any(|(e, _)| has_tag(e.get_entity(), TAG_NPC_PRIEST));
+    let mut captain = snapshots
+        .iter()
+        .any(|(e, _)| has_tag(e.get_entity(), TAG_CAPTAIN));
+    for (entity, _) in snapshots {
+        let base = entity.get_entity();
+        let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
+        if !smith && role == Some(VillagerRole::Builder) {
+            let _ = base.add_scoreboard_tag(TAG_NPC_BLACKSMITH);
+            smith = true;
+        } else if !priest && role == Some(VillagerRole::Civilian) {
+            let _ = base.add_scoreboard_tag(TAG_NPC_PRIEST);
+            priest = true;
+        } else if !captain && role == Some(VillagerRole::Guard) {
+            let _ = base.add_scoreboard_tag(TAG_CAPTAIN);
+            captain = true;
+        }
+    }
+}
+
+fn arm_militia_tick(snapshots: &[(Arc<dyn EntityBase>, Faction)], alarm: bool) {
+    if !alarm {
+        return;
+    }
+    let mut n = 0usize;
+    for (entity, faction) in snapshots {
+        if n >= ARM_PER_TICK {
+            break;
+        }
+        if !matches!(faction, Faction::Kingdom(_)) {
+            continue;
+        }
+        let Some(mob) = entity.get_mob() else {
+            continue;
+        };
+        let base = entity.get_entity();
+        let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
+        if role != Some(VillagerRole::Civilian) || has_tag(base, TAG_ARMED) {
+            continue;
+        }
+        let _ = base.add_scoreboard_tag(TAG_ARMED);
+        if is_militia_id(base.entity_id) {
+            let _ = base.add_scoreboard_tag(TAG_MILITIA);
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::WOODEN_SWORD);
+        } else {
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::BUCKET);
+        }
+        n += 1;
+    }
+}
+
+fn shout_named_npcs(world: &World, town_id: &str, tick: u32, alarm: bool, dest: PostTarget) {
+    if !alarm {
+        return;
+    }
+    let mut dir = lock();
+    let x = f64::from(dest.x);
+    let z = f64::from(dest.z);
+    let _ = chat::try_shout_as(
+        world,
+        tick,
+        town_id,
+        ShoutKind::Rally,
+        x,
+        z,
+        &mut dir.last_shout,
+        "captain",
+        Some("Militia to the inner gate. Form a line."),
+    );
+    let _ = chat::try_shout_as(
+        world,
+        tick,
+        town_id,
+        ShoutKind::Hold,
+        x,
+        z,
+        &mut dir.last_shout,
+        "blacksmith",
+        Some("Hammers out. Take a weapon from the armoury."),
+    );
+    let _ = chat::try_shout_as(
+        world,
+        tick,
+        town_id,
+        ShoutKind::Fallen,
+        x,
+        z,
+        &mut dir.last_shout,
+        "priest",
+        Some("The bell is rung. God keep the gate."),
+    );
 }
 
 fn apply_morale(
@@ -5659,7 +6140,7 @@ mod tests {
     #[test]
     fn spawn_and_rout_caps_are_spread() {
         assert_eq!(SPAWNS_PER_TICK, 3);
-        assert_eq!(SPAWNS_PER_WORLD_TICK, 4);
+        assert_eq!(SPAWNS_PER_WORLD_TICK, 12);
         assert_eq!(ROUT_TAGS_PER_TICK, 8);
         assert_eq!(DESPAWNS_PER_TICK, 12);
         assert_eq!(REPAIR_SCAN_COLUMNS, 1);
@@ -5821,5 +6302,85 @@ mod tests {
         assert_eq!(state.owner, "pillager");
         assert!(state.gate_breached);
         assert_eq!(state.occupy_need, 8);
+    }
+
+    #[test]
+    fn militia_lines_the_inner_gate_and_carries_water() {
+        let keep = PostTarget { x: 1, y: 64, z: 1 };
+        let inner = PostTarget {
+            x: 10,
+            y: 64,
+            z: 10,
+        };
+        let well = PostTarget { x: 4, y: 64, z: 4 };
+        let home = PostTarget { x: 8, y: 64, z: 8 };
+        let alarm_line = overlay_civilian_posts(
+            home,
+            Some(VillagerRole::Civilian),
+            true,
+            inner,
+            well,
+            keep,
+            CivilianDuty::Militia,
+        );
+        assert_eq!((alarm_line.x, alarm_line.z), (inner.x, inner.z));
+        let water = overlay_civilian_posts(
+            home,
+            Some(VillagerRole::Civilian),
+            false,
+            inner,
+            well,
+            keep,
+            CivilianDuty::Militia,
+        );
+        assert_eq!((water.x, water.z), (well.x, well.z));
+        let priest = overlay_civilian_posts(
+            home,
+            Some(VillagerRole::Civilian),
+            true,
+            inner,
+            well,
+            keep,
+            CivilianDuty::Priest,
+        );
+        assert_eq!((priest.x, priest.z), (keep.x, keep.z));
+    }
+
+    #[test]
+    fn squad_orders_follow_hold_and_charge() {
+        let dest = PostTarget { x: 0, y: 64, z: 0 };
+        let charge = PostTarget {
+            x: 20,
+            y: 64,
+            z: 20,
+        };
+        let alder = KingdomId::new("alder");
+        let cmd = SquadCommand {
+            order: SquadOrder::Charge,
+            kingdom: alder.clone(),
+            hold: PostTarget { x: 5, y: 64, z: 5 },
+            x: 1.0,
+            y: 64.0,
+            z: 1.0,
+            at_tick: 1,
+        };
+        let out = overlay_squad_order(
+            dest,
+            &Faction::Kingdom(alder.clone()),
+            1.0,
+            1.0,
+            std::slice::from_ref(&cmd),
+            charge,
+        );
+        assert_eq!((out.x, out.z), (charge.x, charge.z));
+        let mut hold = cmd;
+        hold.order = SquadOrder::Hold;
+        let out = overlay_squad_order(dest, &Faction::Kingdom(alder), 1.0, 1.0, &[hold], charge);
+        assert_eq!((out.x, out.z), (5, 5));
+        assert_eq!(SquadOrder::parse("rally"), Some(SquadOrder::Follow));
+        assert_eq!(SquadOrder::Follow.next(), SquadOrder::Hold);
+        assert_eq!(PUNCH_REPAIR_PER_TICK, 2);
+        assert_eq!(PUNCH_BREAK_PER_TICK, 2);
+        assert!((PHASE_WARN_MS - 20.0).abs() < f64::EPSILON);
     }
 }
