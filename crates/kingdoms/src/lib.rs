@@ -43,6 +43,7 @@ pub mod chat;
 pub mod chunk_fill;
 pub mod command;
 pub mod director;
+pub mod engines;
 pub mod events;
 pub mod faction;
 pub mod flow;

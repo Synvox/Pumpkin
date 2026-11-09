@@ -32,11 +32,13 @@ use std::time::Duration;
 use bytes::Bytes;
 use pumpkin_data::entity::EntityType;
 use pumpkin_data::packet::CURRENT_MC_VERSION;
+use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
 use pumpkin_protocol::java::client::config::{CFinishConfig, CKnownPacks};
 use pumpkin_protocol::java::client::login::{CLoginSuccess, CSetCompression};
 use pumpkin_protocol::java::client::play::{
     CDamageEvent, CEntityPositionSync, CKeepAlive, CLogin, CPlayerPosition, CRemoveEntities,
-    CSetHealth, CSpawnEntity, CSystemChatMessage,
+    CSetContainerContent, CSetEquipment, CSetHealth, CSetPlayerInventory, CSpawnEntity,
+    CSystemChatMessage,
 };
 use pumpkin_protocol::java::packet_decoder::TCPNetworkDecoder;
 use pumpkin_protocol::java::packet_encoder::TCPNetworkEncoder;
@@ -163,6 +165,8 @@ struct Bot {
     last_stats: String,
     dead: bool,
     needs_deploy: bool,
+    last_tp: Instant,
+    last_respawn_cmd: Instant,
     self_id: i32,
     spawn_log: u32,
     pkt_log: u32,
@@ -220,6 +224,8 @@ impl Bot {
             last_stats: String::new(),
             dead: false,
             needs_deploy: false,
+            last_tp: Instant::now() - Duration::from_secs(10),
+            last_respawn_cmd: Instant::now() - Duration::from_secs(10),
             self_id: -1,
             spawn_log: 0,
             pkt_log: 0,
@@ -359,6 +365,9 @@ impl Bot {
         }
         println!("CHAT {text}");
         self.chat.push(text.to_owned());
+        if text.contains("death.attack") || text.contains("died") {
+            self.dead = true;
+        }
         if text.contains("rank=") {
             text.clone_into(&mut self.last_stats);
             if let Some(rank) = text.split("rank=").nth(1).and_then(|s| s.split(' ').next())
@@ -480,6 +489,9 @@ impl Bot {
         let remove_id = CRemoveEntities::to_id(CURRENT_MC_VERSION);
         let sync_id = CEntityPositionSync::to_id(CURRENT_MC_VERSION);
         let health_id = CSetHealth::to_id(CURRENT_MC_VERSION);
+        let inv_id = CSetPlayerInventory::to_id(CURRENT_MC_VERSION);
+        let eq_id = CSetEquipment::to_id(CURRENT_MC_VERSION);
+        let content_id = CSetContainerContent::to_id(CURRENT_MC_VERSION);
         if pkt.id == keep_id {
             let mut slice = &pkt.payload[..];
             let keep = CKeepAlive::read(&mut slice, &CURRENT_MC_VERSION)
@@ -502,6 +514,7 @@ impl Bot {
                 pitch: pos_pkt.pitch,
             })
             .await?;
+            self.last_tp = Instant::now();
             println!(
                 "TELEPORT {}, {}, {}",
                 self.position.x, self.position.y, self.position.z
@@ -535,24 +548,9 @@ impl Bot {
                 && cause.0 > 0
             {
                 let attacker = cause.0 - 1;
-                if attacker != self.self_id && attacker > 0 {
-                    if self.spawn_log < 80 {
-                        println!("ATTACKER id={attacker}");
-                        self.spawn_log += 1;
-                    }
-                    if !self.hostiles.contains_key(&attacker) {
-                        self.hostiles.insert(
-                            attacker,
-                            SeenMob {
-                                kind: -2,
-                                pos: Vector3::new(
-                                    self.position.x + 1.5,
-                                    self.position.y,
-                                    self.position.z,
-                                ),
-                            },
-                        );
-                    }
+                if attacker != self.self_id && attacker > 0 && self.spawn_log < 80 {
+                    println!("ATTACKER id={attacker}");
+                    self.spawn_log += 1;
                 }
             }
         } else if pkt.id == health_id {
@@ -579,6 +577,39 @@ impl Bot {
                 }
                 Err(err) => eprintln!("health decode: {err}"),
             }
+        } else if pkt.id == eq_id {
+            let mut slice = &pkt.payload[..];
+            match CSetEquipment::read(&mut slice, &CURRENT_MC_VERSION) {
+                Ok(eq) if eq.entity_id.0 == self.self_id || self.self_id < 0 => {
+                    for (slot, stack) in eq.equipment {
+                        dump_kit("eq", i32::from(slot), &stack);
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => eprintln!("eq decode: {err}"),
+            }
+        } else if pkt.id == inv_id {
+            let mut slice = &pkt.payload[..];
+            if let Ok(slot) = slice.get_var_int()
+                && let Ok(stack) =
+                    ItemStackSerializer::read_with_version(&mut slice, &CURRENT_MC_VERSION)
+            {
+                dump_kit("inv", slot.0, &stack);
+            }
+        } else if pkt.id == content_id {
+            let mut slice = &pkt.payload[..];
+            let _ = slice.get_var_int();
+            let _ = slice.get_var_int();
+            if let Ok(count) = slice.get_var_int() {
+                for slot in 0..count.0.min(128) {
+                    let Ok(stack) =
+                        ItemStackSerializer::read_with_version(&mut slice, &CURRENT_MC_VERSION)
+                    else {
+                        break;
+                    };
+                    dump_kit("bag", slot, &stack);
+                }
+            }
         }
         Ok(())
     }
@@ -601,6 +632,21 @@ impl Bot {
                 Err(_) => {}
             }
         }
+    }
+}
+
+fn kit_interesting(key: &str) -> bool {
+    key.contains("sword")
+        || key.contains("shield")
+        || key.contains("leather")
+        || key.contains("chainmail")
+        || key.contains("iron_")
+}
+
+fn dump_kit(tag: &str, slot: i32, stack: &ItemStackSerializer<'_>) {
+    let key = stack.0.item.registry_key;
+    if kit_interesting(key) {
+        println!("KIT {tag} slot={slot} {key} x{}", stack.0.item_count);
     }
 }
 
@@ -735,7 +781,9 @@ async fn fight_loop(
     bot.chat_command("kingdom deploy").await?;
     bot.pump(Duration::from_secs(1)).await?;
     bot.chat_command("war stats").await?;
-    bot.pump(Duration::from_millis(500)).await?;
+    bot.pump(Duration::from_millis(400)).await?;
+    bot.chat_command("kingdom fire").await?;
+    bot.pump(Duration::from_millis(400)).await?;
 
     let mut last_attack = Instant::now() - Duration::from_secs(1);
     let mut last_stats = Instant::now();
@@ -745,7 +793,19 @@ async fn fight_loop(
     while Instant::now() < deadline {
         bot.pump(Duration::from_millis(50)).await?;
         if bot.dead {
+            if bot.last_respawn_cmd.elapsed() >= Duration::from_secs(2) {
+                let _ = bot
+                    .send_packet(&SClientCommand {
+                        action_id: VarInt(SClientCommand::PERFORM_RESPAWN),
+                    })
+                    .await;
+                bot.last_respawn_cmd = Instant::now();
+            }
             bot.pump(Duration::from_millis(200)).await?;
+            continue;
+        }
+        if bot.last_tp.elapsed() < Duration::from_millis(500) {
+            bot.pump(Duration::from_millis(50)).await?;
             continue;
         }
         if bot.needs_deploy && last_deploy.elapsed() >= Duration::from_secs(2) {
@@ -772,18 +832,19 @@ async fn fight_loop(
                 bot.look_and_move(next, yaw, 0.0).await?;
             } else {
                 bot.look_and_move(bot.position, yaw, 20.0).await?;
+                let kind = bot
+                    .hostiles
+                    .get(&id)
+                    .or_else(|| bot.soldiers.get(&id))
+                    .or_else(|| bot.unknown.get(&id))
+                    .map_or(-1, |m| m.kind);
                 if last_attack.elapsed() >= Duration::from_millis(550)
                     && id != bot.self_id
                     && dist >= 0.2
+                    && kind >= 0
                 {
                     bot.attack(id).await?;
                     last_attack = Instant::now();
-                    let kind = bot
-                        .hostiles
-                        .get(&id)
-                        .or_else(|| bot.soldiers.get(&id))
-                        .or_else(|| bot.unknown.get(&id))
-                        .map_or(0, |m| m.kind);
                     println!(
                         "ATTACK id={id} kind={kind} dist={dist:.1} hostiles={} soldiers={} unknown={}",
                         bot.hostiles.len(),

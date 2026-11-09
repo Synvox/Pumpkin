@@ -57,7 +57,7 @@ let beds: Vec<_> = info.spawns.iter().filter(|s| s.role == SpawnRole::VillagerBe
 let camp: Vec<_> = info.spawns.iter().filter(|s| s.role == SpawnRole::PillagerSpawn).collect();
 ```
 
-Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `Gate`, `PillagerSpawn`, `PillagerRally`, `SiegeRam`, `SiegeLadder`.
+Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `Gate`, `PillagerSpawn`, `PillagerRally`, `SiegeRam`, `SiegeLadder`, `SiegeTreb`.
 
 `TownInfo` stays geometry only. Capture, siege jobs, and AI live in the director (`siege.rs`). Town ownership is `kingdoms-ownership.json` in the world folder and shows up on `battle_state.owner`.
 
@@ -193,7 +193,7 @@ For an external AI director (e.g. on Sails). Enable with env; bind is localhost 
 
 Bodies over 16 KiB return 413. More than 20 requests/second return 429. A successful bearer auth pauses the war clock for 30 s.
 
-Webhook body is JSON. Header `X-Kingdoms-Signature: sha256=<hex>` is HMAC-SHA256 of the raw body. Events: `raid_started`, `gate_breached`, `town_captured`, `player_joined_a_kingdom`.
+Webhook body is JSON. Header `X-Kingdoms-Signature: sha256=<hex>` is HMAC-SHA256 of the raw body. The full request/response contract is below so a Sails war-map can be built against it.
 
 ```bash
 export TOKEN=dev-token-must-be-32-chars-min
@@ -214,7 +214,127 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"text":"Alder to the wall."}' http://127.0.0.1:8742/heroes/alder/shout
 ```
 
-`GET /state` returns towns (owners, battles, troop counts) and logged-in player positions. `GET /war` is a front-line summary for the Sails war map (scores, clock, keep/gate, occupy hold, raid side, repair_until, heroes). It is authenticated but does **not** pause the war clock. `POST /raids` also accepts `"side":"kingdom"|"alder"|"raven"` for a counter-raid or kingdom-vs-kingdom march and an optional `"camp"` (currently unused; kingdom armies spawn from the road approach). `GET|POST /lines` lets the director read or override captain shout text (`gate_breached`, `rally`, `retreat`, `victory`, `charge`, `hold`, `fallen`) without pausing the clock. `GET|POST /heroes` names a commander per kingdom; `POST /heroes/{kingdom}/shout` broadcasts as that hero (this one does pause the clock, same as `POST /chat`).
+Observational GETs (`/war`, `/lines`, `/heroes`) authenticate but **do not** pause the war clock. Everything else that succeeds with a bearer token does.
+
+### HTTP and webhook contract (Sails war-map)
+
+Auth: `Authorization: Bearer <KINGDOMS_HTTP_TOKEN>`. 401 if missing/wrong. 413 if body > 16 KiB. 429 if more than 20 requests/second.
+
+Clock: a successful auth on a non-observational route pauses the war clock for 30 s (`clock.overridden` on `GET /war`). Observational: `GET /war`, `GET|POST /lines`, `GET|POST /heroes`.
+
+#### `GET /war`
+
+Front-line snapshot. Does not pause the clock.
+
+```json
+{
+  "tick": 4800,
+  "scores": { "alder": 2, "raven": 1, "pillager": 3 },
+  "clock": { "enabled": true, "period": 2400, "overridden": false, "last_tick": 2400 },
+  "next_raid_id": 8,
+  "fronts": 3,
+  "heroes": [{ "kingdom": "alder", "name": "Sir Aldric", "title": "marshal", "line": "Hold the gate." }],
+  "towns": [{
+    "id": "20261025:0:0",
+    "kingdom": "alder",
+    "owner": "alder",
+    "alarm": true,
+    "raid_active": true,
+    "gate_breached": false,
+    "keep": { "x": 1268, "z": 665 },
+    "gate": { "x": 1504, "z": 597 },
+    "occupy_hold": 40,
+    "occupy_need": 8,
+    "defenders": 20,
+    "raiders": 40,
+    "raid_side": "pillager",
+    "repair_until": 0,
+    "live": true
+  }]
+}
+```
+
+#### `GET /state`
+
+Pauses the clock. Towns use the battle schema (`id`, `kingdom`, `owner`, `alarm`, `raid_active`, `wave`, `waves`, `defenders_alive`, `raiders_alive`, `defenders_killed`, `raiders_killed`, `threatened_gate`, `gate_breached`, `occupy_hold`, `occupy_need`, `ram_hp`) plus logged-in players and troop totals.
+
+```json
+{
+  "tick": 4800,
+  "towns": [{ "id": "20261025:0:0", "kingdom": "alder", "owner": "alder", "alarm": true, "raid_active": true, "wave": 0, "waves": 1, "defenders_alive": 20, "raiders_alive": 40, "defenders_killed": 0, "raiders_killed": 0, "threatened_gate": [1504, 597], "gate_breached": false, "occupy_hold": 0, "occupy_need": 8, "ram_hp": 80.0 }],
+  "players": [{ "name": "alder1", "uuid": "937abb5d-9fc8-61f3-9ebc-41f786b9d29c", "kingdom": "alder", "x": 1504.5, "y": 80.0, "z": 597.5 }],
+  "troops": { "defenders": 20, "raiders": 40 },
+  "war_clock": true
+}
+```
+
+#### `GET /towns/{id}`
+
+Pauses the clock. One battle object as in `/state`. 404 if unknown.
+
+#### `POST /raids`
+
+Pauses the clock. Body: `{ "town": "0,0"|"here"|"20261025:0:0", "size": 40, "defenders": 20, "side": "pillager"|"kingdom"|"alder"|"raven", "camp": null }`. `camp` is reserved. 200 `{ "id": 1, "town": "20261025:0:0", "size": 40, "side": "pillager" }`. 409 if a raid is already running.
+
+#### `POST /raids/{id}/stop`
+
+Pauses the clock. `{ "stopped": 1, "id": 1 }`.
+
+#### `GET|POST /lines`
+
+Does not pause the clock. GET `{ "lines": { "gate_breached": "...", "rally": "...", "retreat": "...", "victory": "...", "charge": "...", "hold": "...", "fallen": "..." } }`. POST `{ "event": "rally", "text": "Alder to the gate." }` → `{ "ok": true, "event": "rally", "text": "Alder to the gate." }`.
+
+#### `GET|POST /heroes`
+
+Does not pause the clock. GET `{ "heroes": [{ "kingdom": "alder", "name": "Sir Aldric", "title": "marshal", "line": "Hold the gate." }] }`. POST `{ "kingdom": "alder", "name": "Sir Aldric", "title": "marshal", "line": "Hold the gate." }` (alias `text` for `line`).
+
+#### `POST /heroes/{kingdom}/shout`
+
+Pauses the clock. `{ "text": "Alder to the wall." }` (alias `message`). 200 `{ "ok": true, "hero": { ... } }`. 404 if that kingdom has no hero.
+
+#### `POST /chat`
+
+Pauses the clock. `{ "name": "Herald", "message": "The gate is down" }` → `{ "ok": true }`. Broadcasts `[Herald] The gate is down` to every player.
+
+#### Webhooks
+
+`POST` JSON to `KINGDOMS_HTTP_WEBHOOK`. Header `X-Kingdoms-Signature: sha256=<hmac-sha256 hex of the raw body>` using `KINGDOMS_HTTP_WEBHOOK_SECRET` (defaults to the bearer token). Shared envelope unless noted:
+
+```json
+{ "event": "raid_started", "tick": 1600, "actor": 1, "other": 40, "x": 1551.0, "z": 485.0, "note": "20261025:0:0 raid 1 size 40" }
+```
+
+| `event` | when | notes |
+| --- | --- | --- |
+| `raid_started` | a raid is armed | `actor` is the raid id, `other` is size |
+| `town_alarm` | a town first rings | |
+| `gate_breached` | ram clears the portcullis | `other` is bars cleared |
+| `portcullis_dropped` | gates close on alarm | `other` is gate count |
+| `trebuchet_fired` | director or player looses a shot | |
+| `ladders_raised` | assault ladders placed on the wall | `actor` is blocks placed |
+| `ram_destroyed` | defenders wreck the ram | |
+| `rout` | a side breaks | |
+| `town_captured` | occupy or retake hold completes | capture and retake share this name; `note` says who |
+| `war_clock` | the clock starts a front | |
+| `player_joined_a_kingdom` | `/kingdom join` | `{ "event", "player", "kingdom" }` only |
+
+Examples (same envelope, HMAC over the raw bytes):
+
+```json
+{ "event": "raid_started", "tick": 1600, "actor": 1, "other": 40, "x": 1551.0, "z": 485.0, "note": "20261025:0:0 raid 1 size 40" }
+{ "event": "town_alarm", "tick": 1601, "actor": 0, "other": null, "x": 1504.0, "z": 597.0, "note": "20261025:0:0 alarm" }
+{ "event": "portcullis_dropped", "tick": 1601, "actor": 0, "other": 2, "x": 1504.0, "z": 597.0, "note": "20261025:0:0 portcullis dropped" }
+{ "event": "trebuchet_fired", "tick": 1680, "actor": 0, "other": null, "x": 1551.0, "z": 485.0, "note": "20261025:0:0 trebuchet loosed" }
+{ "event": "ladders_raised", "tick": 1720, "actor": 6, "other": null, "x": 1498.0, "z": 590.0, "note": "20261025:0:0 assault ladders raised" }
+{ "event": "gate_breached", "tick": 1900, "actor": 12, "other": 8, "x": 1504.0, "z": 597.0, "note": "20261025:0:0 ram breached 8 bars" }
+{ "event": "ram_destroyed", "tick": 1880, "actor": 12, "other": null, "x": 1490.0, "z": 590.0, "note": "20261025:0:0 ram wrecked" }
+{ "event": "rout", "tick": 2000, "actor": 40, "other": 8, "x": 1504.0, "z": 597.0, "note": "20261025:0:0 pillagers rout" }
+{ "event": "town_captured", "tick": 2400, "actor": 12, "other": 8, "x": 1268.0, "z": 665.0, "note": "20261025:0:0 captured by pillager" }
+{ "event": "war_clock", "tick": 2400, "actor": 2, "other": 24, "x": 1551.0, "z": 485.0, "note": "war clock raid 2 on 20261025:1:0" }
+{ "event": "player_joined_a_kingdom", "player": "alder1", "kingdom": "alder" }
+```
+
+Kills, waves, and victory shouts stay in-game; they are not webhooked. Verify HMAC on the raw bytes, not a re-encoded object.
 
 `kingdoms-ownership.json` now also stores kingdom scores, `clock_tick`, `next_raid_id`, `last_clock_tick`, and per-player stats (kills, captures, defenses, banner) so a restart keeps the war. Town ownership and player membership were already there.
 
@@ -381,6 +501,27 @@ This branch is not slower than master on the same config. The r8→r9 p50 34.9�
 
 Plots: `/opt/cursor/artifacts/soak-r9b-branch.csv`, `soak-r8-master.csv`, `raid-bot-fight.log`, `raid-bot-fight-live.txt`.
 
+Round 10 (this PR) gives levy a wooden sword and alder/raven a shield on join and respawn, picks a standable keep courtyard (then the nearest friendly town) instead of a wall or world spawn, and dumps kit packets from the raid bot. Camps grow a player-usable trebuchet (director cadence or `/kingdom fire` / anvil) whose cobble arc punches wall holes repair can later fill; a walking siege tower and camp-side ladders let raiders scale the curtain. Archers stand on the wall walk and towers, a third of the guards sally at the ram, and the alarm drops the portcullis (iron bars, webhooked). `KINGDOMS.md` now has the full HTTP and webhook contract for a Sails war-map.
+
+Live `kingdoms-raid-bot --fight` (seed `20261025`, alder, HTTP raid 40/20 on `0,0`): join at world spawn then `/kingdom deploy` to the threatened gate `1504.5, 80, 597.5`; levy stats `rank=levy renown=0`; `/war` and `/lines` 200; gates closed (`kingdoms gate closed` ×2); ram moved 16 times; raid stayed live ~11k ticks, peak MSPT 12.21 / director 6.92. Kit inventory packets did not decode as ascii names (bot now reads `CSetEquipment` / inventory item ids). Rank-up did not fire this run (0 hostiles decoded, 0 kills). Early attempts that stuffed guessed attacker ids were kicked with `Wrong teleport id` and landed at world spawn `(10.5, 75)` before the keep-teleport path; the successful stay-alive run did not die so respawn-to-keep was not observed in-game. Trebuchet / tower / ladder log lines were 0 on this capital raid; ram and portcullis close were. `/kingdom fire` reached the server (`executed command /kingdom fire`) but the client brigadier tree still printed `command.unknown.argument`.
+
+r8 config side-by-side (1 bot, 3 fronts, 30 min, seed `20261025`) vs master `d231669a`. Sequential, same machine, not overlapped.
+
+| | branch (this PR) | master `d231669a` |
+| --- | ---: | ---: |
+| MSPT p50 / p95 / max | **34.43 / 46.93 / 634.67** | 36.35 / 43.75 / 345.67 |
+| director_ms p50 / p95 / max | **0.35 / 0.67 / 1.45** | 0.58 / 0.85 / 3.89 |
+| director ticks ≥ 50 ms | **0** | **3** (hitch max **575**) |
+| captures | 32 | 32 |
+| `Can't keep up` | **5** | 9 |
+| tickets max | 85 | 85 |
+| live bodies max | 247 | 247 |
+| soldier shouts | 142 | 207 |
+
+Branch director is not worse than master. Branch MSPT max 634.67 is tick 28360 with `director_ms=0.01` (vanilla hitch, not the director). Master hitch lines are director 575 / 66 / 501.
+
+Plots: `/opt/cursor/artifacts/soak-r10-branch.csv`, `soak-r10-master.csv`, `raid-bot-r10.log`, `raid-bot-r10-live.txt`, `raid-bot-r10-server.log`.
+
 ### Commands
 
 | Command | |
@@ -391,6 +532,7 @@ Plots: `/opt/cursor/artifacts/soak-r9b-branch.csv`, `soak-r8-master.csv`, `raid-
 | `/kingdom fronts` | active battles (side, owner, live, counts) |
 | `/kingdom deploy [town]` | teleport to the threatened gate (live surface Y, not the keep roof); abstract fronts materialise on a staggered warmup |
 | `/kingdom stats` | your rank, renown, kills, captures, defenses |
+| `/kingdom fire` | loose a camp trebuchet at the threatened wall (stand at the anvil) |
 | `/raid start <town> [size] [defenders]` | start a pillager raid. Optional `defenders` is how many kingdom combatants to field (extras spawn at the threatened gate). |
 | `/raid retake <town> [size]` | kingdom counter-raid to retake a pillager-owned town |
 | `/raid stop` | stop all kingdoms raids |

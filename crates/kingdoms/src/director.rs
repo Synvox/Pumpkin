@@ -36,6 +36,7 @@ use crate::abstract_combat::{
     body_budget, near_camp, step_abstract,
 };
 use crate::chat::{self, ShoutKind};
+use crate::engines;
 use crate::faction::{
     Faction, KingdomId, TAG_CAPTAIN, TAG_RAIDER, TAG_ROUTED, TAG_TEMP, faction_of_entity, has_tag,
     is_allied, is_hostile, is_kingdoms_tagged, kingdom_color_rgb, kingdom_tag, role_from_tags,
@@ -228,6 +229,9 @@ pub enum CombatKind {
     Rout,
     RamDestroyed,
     WarClock,
+    Trebuchet,
+    LaddersRaised,
+    Portcullis,
 }
 
 /// Named commander the Sails director can drive per kingdom.
@@ -295,6 +299,10 @@ struct TownWar {
     repair_assigned: HashMap<i32, RepairJob>,
     last_repair_tick: u32,
     ram: Option<crate::ram::SiegeRam>,
+    treb_shot: Option<crate::engines::TrebShot>,
+    siege_tower: Option<crate::engines::SiegeTower>,
+    ladders_placed: bool,
+    last_treb_tick: u32,
     capture_bar: Option<Uuid>,
     captain_down: bool,
     pending_tickets: Vec<Vector2<i32>>,
@@ -326,6 +334,7 @@ struct ActiveRaid {
     spawn_cursor: u16,
     extra_left: u16,
     ram_spawned: bool,
+    tower_spawned: bool,
     materialized: bool,
     virt_raiders: u16,
     virt_defenders: u16,
@@ -467,6 +476,11 @@ impl Director {
         kit_player(player, &kingdom, rank, true);
         maybe_give_banner(player, &kingdom, self.player_stats.get_mut(&uuid));
         self.mark_dirty();
+        let seed = world.level.seed.0;
+        let pos = entity.pos.load();
+        let near = crate::town::nearest_town(seed, pos.x.floor() as i32, pos.z.floor() as i32);
+        let tid = crate::info::town_id(seed, near.cell_x, near.cell_z);
+        let _ = self.ensure_town(&world, &tid);
         set_keep_respawn(player, &world, &kingdom, &self.towns);
         tracing::info!(
             player = %player.gameprofile.name,
@@ -559,6 +573,7 @@ impl Director {
                 spawn_cursor: 0,
                 extra_left: virt_defenders,
                 ram_spawned: false,
+                tower_spawned: false,
                 materialized,
                 virt_raiders,
                 virt_defenders,
@@ -567,6 +582,8 @@ impl Director {
             war.alarm = true;
             war.gates_closed = false;
             war.gate_breached = false;
+            war.ladders_placed = false;
+            war.last_treb_tick = 0;
             war.occupy_hold = 0;
             war.retake_hold = 0;
             war.ram = None;
@@ -620,6 +637,14 @@ impl Director {
                 despawn.extend(raid.temps);
                 if let Some(ram) = war.ram.take() {
                     despawn.extend(ram.parts);
+                }
+                if let Some(tower) = war.siege_tower.take() {
+                    despawn.extend(tower.parts);
+                }
+                if let Some(shot) = war.treb_shot.take()
+                    && shot.part >= 0
+                {
+                    despawn.push(shot.part);
                 }
                 war.alarm = false;
                 war.occupy_hold = 0;
@@ -992,6 +1017,10 @@ impl TownWar {
             repair_assigned: HashMap::new(),
             last_repair_tick: 0,
             ram: None,
+            treb_shot: None,
+            siege_tower: None,
+            ladders_placed: false,
+            last_treb_tick: 0,
             capture_bar: None,
             captain_down: false,
             pending_tickets: Vec::new(),
@@ -1254,13 +1283,18 @@ fn kit_armor(rank: siege::Rank) -> [(EquipmentSlot, &'static Item); 4] {
     }
 }
 
-fn kit_weapon(rank: siege::Rank) -> Option<&'static Item> {
+fn kit_weapon(rank: siege::Rank) -> &'static Item {
     match rank {
-        siege::Rank::Levy => None,
-        siege::Rank::Freeman => Some(&Item::STONE_SWORD),
-        siege::Rank::Sergeant | siege::Rank::Knight | siege::Rank::Banneret => {
-            Some(&Item::IRON_SWORD)
-        }
+        siege::Rank::Levy => &Item::WOODEN_SWORD,
+        siege::Rank::Freeman => &Item::STONE_SWORD,
+        siege::Rank::Sergeant | siege::Rank::Knight | siege::Rank::Banneret => &Item::IRON_SWORD,
+    }
+}
+
+fn kit_shield(kingdom: &KingdomId) -> Option<&'static Item> {
+    match kingdom.as_str() {
+        "alder" | "raven" => Some(&Item::SHIELD),
+        _ => None,
     }
 }
 
@@ -1274,7 +1308,7 @@ fn kingdom_banner(kingdom: &KingdomId) -> &'static Item {
 fn kit_player(player: &Player, kingdom: &KingdomId, rank: siege::Rank, give_rewards: bool) {
     let rgb = kingdom_dye(kingdom);
     let pieces = kit_armor(rank);
-    let mut changes = Vec::with_capacity(pieces.len());
+    let mut changes = Vec::with_capacity(pieces.len() + 2);
     {
         let mut eq = player
             .living_entity
@@ -1294,10 +1328,18 @@ fn kit_player(player: &Player, kingdom: &KingdomId, rank: siege::Rank, give_rewa
             eq.put(&slot, stack.clone());
             changes.push((slot, stack));
         }
+        let weapon = ItemStack::new(1, kit_weapon(rank));
+        eq.put(&EquipmentSlot::MAIN_HAND, weapon.clone());
+        changes.push((EquipmentSlot::MAIN_HAND, weapon));
+        if let Some(shield) = kit_shield(kingdom) {
+            let stack = ItemStack::new(1, shield);
+            eq.put(&EquipmentSlot::OFF_HAND, stack.clone());
+            changes.push((EquipmentSlot::OFF_HAND, stack));
+        }
     }
     player.living_entity.send_equipment_changes(&changes);
-    if give_rewards && let Some(weapon) = kit_weapon(rank) {
-        let mut stack = ItemStack::new(1, weapon);
+    if give_rewards {
+        let mut stack = ItemStack::new(1, kit_weapon(rank));
         let _ = player.inventory.insert_stack_anywhere(&mut stack);
     }
 }
@@ -1315,27 +1357,131 @@ fn maybe_give_banner(player: &Player, kingdom: &KingdomId, stats: Option<&mut si
     }
 }
 
+fn world_column_solid(world: &World, x: i32, y: i32, z: i32) -> bool {
+    world.get_block_state(&BlockPos::new(x, y, z)).is_solid()
+}
+
+fn world_stand_y(world: &World, x: i32, z: i32) -> i32 {
+    world.sample_surface_height(x, z).unwrap_or(world.sea_level) + 1
+}
+
+struct KeepStandPlan {
+    keep: siege::StandCandidate,
+    court: crate::geom::Rect,
+    fallbacks: Vec<siege::StandCandidate>,
+}
+
+fn keep_stand_plan(kingdom: &KingdomId, towns: &HashMap<String, TownWar>) -> Option<KeepStandPlan> {
+    let mut homes: Vec<&TownWar> = towns
+        .values()
+        .filter(|w| w.owner.as_str() == kingdom.as_str())
+        .collect();
+    if homes.is_empty() {
+        homes = towns.values().filter(|w| w.kingdom == *kingdom).collect();
+    }
+    let home = homes.first()?;
+    let keep = home.scene.keep();
+    let mut fallbacks = Vec::new();
+    for g in home.scene.gates() {
+        fallbacks.push(siege::StandCandidate { x: g.x, z: g.z });
+    }
+    for p in home.scene.rally_points() {
+        fallbacks.push(siege::StandCandidate { x: p.x, z: p.z });
+    }
+    for w in homes.iter().skip(1) {
+        let k = w.scene.keep();
+        fallbacks.push(siege::StandCandidate { x: k.x, z: k.z });
+    }
+    Some(KeepStandPlan {
+        keep: siege::StandCandidate {
+            x: keep.x,
+            z: keep.z,
+        },
+        court: home.scene.keep_rect(),
+        fallbacks,
+    })
+}
+
+fn pick_keep_stand(
+    world: &World,
+    kingdom: &KingdomId,
+    towns: &HashMap<String, TownWar>,
+) -> Option<(i32, i32, i32)> {
+    let plan = keep_stand_plan(kingdom, towns)?;
+    Some(siege::pick_safe_stand(
+        plan.keep,
+        plan.court,
+        &plan.fallbacks,
+        |x, z| world_stand_y(world, x, z),
+        |x, y, z| world_column_solid(world, x, y, z),
+    ))
+}
+
 fn set_keep_respawn(
     player: &Player,
     world: &World,
     kingdom: &KingdomId,
     towns: &HashMap<String, TownWar>,
 ) {
-    let Some(keep) = towns
-        .values()
-        .find(|w| w.kingdom == *kingdom)
-        .map(|w| w.scene.keep())
-    else {
+    let Some((x, y, z)) = pick_keep_stand(world, kingdom, towns) else {
         return;
     };
-    let y = standing_y(world, keep);
     let _ = player.set_respawn_point(
         world.dimension.clone(),
-        BlockPos::new(keep.x, y, keep.z),
+        BlockPos::new(x, y, z),
         0.0,
         0.0,
         true,
     );
+}
+
+/// Override vanilla spawn when a kingdom member would suffocate or land at world spawn.
+pub fn fix_spawn_location(player: &Player, spawn: &mut Vector3<f64>) {
+    let uuid = player.gameprofile.id.to_string();
+    let plan = {
+        let dir = lock();
+        let Some(kingdom) = dir.player_kingdom(&uuid).cloned() else {
+            return;
+        };
+        keep_stand_plan(&kingdom, &dir.towns)
+    };
+    let Some(plan) = plan else {
+        return;
+    };
+    let world = player.get_entity().world.load();
+    let (x, y, z) = siege::pick_safe_stand(
+        plan.keep,
+        plan.court,
+        &plan.fallbacks,
+        |x, z| world_stand_y(&world, x, z),
+        |x, y, z| world_column_solid(&world, x, y, z),
+    );
+    tracing::info!(
+        player = %player.gameprofile.name,
+        x,
+        y,
+        z,
+        "kingdoms keep spawn"
+    );
+    *spawn = Vector3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5);
+}
+
+/// Re-kit a player after death so levy sword and shield come back.
+pub fn respawn_kit(player: &Player) {
+    let uuid = player.gameprofile.id.to_string();
+    let (kingdom, rank) = {
+        let dir = lock();
+        let Some(kingdom) = dir.player_kingdom(&uuid).cloned() else {
+            return;
+        };
+        let rank = dir
+            .player_stats
+            .get(&uuid)
+            .map_or(siege::Rank::Levy, siege::PlayerStats::rank);
+        (kingdom, rank)
+    };
+    kit_player(player, &kingdom, rank, true);
+    teleport_to_keep(player);
 }
 
 /// Re-apply team colour, leather, and keep spawn after a reconnect.
@@ -1877,6 +2023,14 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 if let Some(ram) = war.ram.take() {
                     pending_despawn.extend(ram.parts);
                 }
+                if let Some(tower) = war.siege_tower.take() {
+                    pending_despawn.extend(tower.parts);
+                }
+                if let Some(shot) = war.treb_shot.take()
+                    && shot.part >= 0
+                {
+                    pending_despawn.push(shot.part);
+                }
                 war.alarm = hostiles_in_town;
                 pending_release.append(&mut war.ticketed);
                 pending_events.push(CombatEvent {
@@ -1922,6 +2076,19 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         siege::close_gates(world, &gates, |x, z| {
             standing_y(world, ScenePost::new(x, z))
         });
+        if let Some(gate) = gates.first() {
+            let mut dir = lock();
+            let tick = dir.tick;
+            dir.push_event(CombatEvent {
+                tick,
+                kind: CombatKind::Portcullis,
+                actor: 0,
+                other: Some(gates.len() as i32),
+                x: f64::from(gate.x),
+                z: f64::from(gate.z),
+                note: format!("{town_id} portcullis dropped"),
+            });
+        }
     }
 
     // Director-owned combat: NoAI + flow-field slide. Vanilla melee/bow/path
@@ -1970,12 +2137,13 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     .map(|p| ScenePost::new(p[0], p[1]))
             })
             .unwrap_or(dest);
-        let wall_posts: Vec<ScenePost> = war
+        let mut wall_posts: Vec<ScenePost> = war
             .scene
             .wall()
             .iter()
             .map(|p| ScenePost::new(p[0], p[1]))
             .collect();
+        wall_posts.extend(war.scene.archer_posts().iter().copied());
         (
             war.alarm,
             PostTarget::from_post(dest, y),
@@ -2134,9 +2302,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 Faction::Pillager => camp_dest,
                 _ => keep_dest,
             }
-        } else if job == MarchJob::Ram
-            && live_ram.as_ref().is_some_and(|r| !r.destroyed)
+        } else if live_ram.as_ref().is_some_and(|r| !r.destroyed)
             && !breached
+            && (job == MarchJob::Ram
+                || (role == Some(VillagerRole::Guard) && id % 3 == 0 && (alarm || in_combat)))
         {
             ram_dest
         } else {
@@ -2166,8 +2335,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     march_dest
                 },
                 keep_dest,
-                ram_dest,
                 ladder_dest,
+                pick_ready_dest(id, &wall_dests, ladder_dest),
                 work_d,
                 home_d,
                 patrol_d,
@@ -2232,6 +2401,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     }
     let loop_us = loop_started.elapsed().as_micros();
     tick_moving_ram(world, town_id, tick, &snapshots, breached, &mut ram_at_gate);
+    tick_siege_engines(world, town_id, tick, alarm);
     if ram_at_gate && !breached {
         let gate = {
             let dir = lock();
@@ -2425,6 +2595,33 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
             war.ram = Some(ram);
             if let Some(raid) = &mut war.raid {
                 raid.ram_spawned = true;
+            }
+        }
+        return;
+    }
+    let spawn_tower = {
+        let dir = lock();
+        dir.towns
+            .get(town_id)
+            .and_then(|w| w.raid.as_ref())
+            .is_some_and(|r| wave == 0 && !r.tower_spawned)
+            && !ladders.is_empty()
+    };
+    if spawn_tower {
+        if take_spawn_slots(1) == 0 {
+            return;
+        }
+        let origin = ladders[0];
+        let y = f64::from(standing_y(world, origin));
+        let tower = engines::spawn_tower(
+            world,
+            Vector3::new(f64::from(origin.x) + 0.5, y, f64::from(origin.z) + 0.5),
+        );
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.siege_tower = Some(tower);
+            if let Some(raid) = &mut war.raid {
+                raid.tower_spawned = true;
             }
         }
         return;
@@ -3334,6 +3531,189 @@ fn tick_moving_ram(
     }
 }
 
+fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool) {
+    let (camp, wall, trebs, should_fire, mut shot, tower, ladders_done) =
+        {
+            let mut dir = lock();
+            let Some(war) = dir.towns.get_mut(town_id) else {
+                return;
+            };
+            let camp = war
+                .raid
+                .as_ref()
+                .map_or_else(|| war.scene.keep(), |r| r.camp);
+            let wall =
+                war.threatened
+                    .or_else(|| {
+                        war.scene.ladder_posts().first().copied().or_else(|| {
+                            war.scene.wall().first().map(|p| ScenePost::new(p[0], p[1]))
+                        })
+                    })
+                    .unwrap_or_else(|| war.scene.keep());
+            let trebs = war.scene.trebuchet_posts().to_vec();
+            let should_fire = alarm
+                && war.treb_shot.is_none()
+                && tick.saturating_sub(war.last_treb_tick) >= engines::TREB_PERIOD
+                && !trebs.is_empty();
+            (
+                camp,
+                wall,
+                trebs,
+                should_fire,
+                war.treb_shot.take(),
+                war.siege_tower.take(),
+                war.ladders_placed,
+            )
+        };
+    let floor = standing_y(world, wall);
+
+    if should_fire && let Some(origin) = trebs.first() {
+        let oy = f64::from(standing_y(world, *origin) + 8);
+        let ty = f64::from(floor + WALL_WALK_LIFT);
+        let fired = engines::fire_trebuchet(
+            world,
+            Vector3::new(f64::from(origin.x) + 0.5, oy, f64::from(origin.z) + 0.5),
+            Vector3::new(f64::from(wall.x) + 0.5, ty, f64::from(wall.z) + 0.5),
+        );
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.last_treb_tick = tick;
+            war.treb_shot = Some(fired);
+        }
+        dir.push_event(CombatEvent {
+            tick,
+            kind: CombatKind::Trebuchet,
+            actor: 0,
+            other: None,
+            x: f64::from(origin.x),
+            z: f64::from(origin.z),
+            note: format!("{town_id} trebuchet loosed"),
+        });
+        shot = None;
+    }
+
+    if let Some(mut flying) = shot {
+        let done = engines::tick_shot(world, &mut flying);
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.treb_shot = if done { None } else { Some(flying) };
+        }
+    }
+
+    if let Some(mut moving) = tower {
+        let arrived = engines::tick_tower(world, &mut moving, wall);
+        if arrived && !ladders_done {
+            let n = engines::place_assault_ladders(world, wall, camp, floor);
+            let mut dir = lock();
+            if let Some(war) = dir.towns.get_mut(town_id) {
+                war.ladders_placed = true;
+                war.siege_tower = Some(moving);
+            }
+            if n > 0 {
+                dir.push_event(CombatEvent {
+                    tick,
+                    kind: CombatKind::LaddersRaised,
+                    actor: n as i32,
+                    other: None,
+                    x: f64::from(wall.x),
+                    z: f64::from(wall.z),
+                    note: format!("{town_id} assault ladders raised"),
+                });
+            }
+        } else {
+            let mut dir = lock();
+            if let Some(war) = dir.towns.get_mut(town_id) {
+                war.siege_tower = Some(moving);
+            }
+        }
+    }
+
+    if alarm && !ladders_done {
+        let crew_at_wall = {
+            let dir = lock();
+            dir.towns
+                .get(town_id)
+                .is_some_and(|w| w.wired.len() > 4 && w.raider_gate_dist < 8.0)
+        };
+        if crew_at_wall {
+            let n = engines::place_assault_ladders(world, wall, camp, floor);
+            if n > 0 {
+                let mut dir = lock();
+                if let Some(war) = dir.towns.get_mut(town_id) {
+                    war.ladders_placed = true;
+                }
+                dir.push_event(CombatEvent {
+                    tick,
+                    kind: CombatKind::LaddersRaised,
+                    actor: n as i32,
+                    other: None,
+                    x: f64::from(wall.x),
+                    z: f64::from(wall.z),
+                    note: format!("{town_id} assault ladders raised"),
+                });
+            }
+        }
+    }
+}
+
+/// Player at a camp trebuchet looses a shot at the threatened wall.
+pub fn try_fire_trebuchet(player: &Player) -> Result<String, String> {
+    let world = Arc::clone(&player.get_entity().world.load());
+    let pos = player.get_entity().pos.load();
+    let uuid = player.gameprofile.id.to_string();
+    let (town_id, origin, wall) = {
+        let dir = lock();
+        if dir.player_kingdom(&uuid).is_none() {
+            return Err("join a kingdom first".to_owned());
+        }
+        let mut found = None;
+        for (id, war) in &dir.towns {
+            if war.raid.is_none() {
+                continue;
+            }
+            if !engines::near_controls(pos, war.scene.trebuchet_posts(), 8.0) {
+                continue;
+            }
+            if war.treb_shot.is_some() {
+                return Err("the arm is still swinging".to_owned());
+            }
+            let origin = war
+                .scene
+                .trebuchet_posts()
+                .first()
+                .copied()
+                .ok_or_else(|| "no trebuchet at this camp".to_owned())?;
+            let wall = war.threatened.unwrap_or_else(|| war.scene.keep());
+            found = Some((id.clone(), origin, wall));
+            break;
+        }
+        found.ok_or_else(|| "stand at a camp trebuchet (the anvil on the arm)".to_owned())?
+    };
+    let oy = f64::from(standing_y(&world, origin) + 8);
+    let ty = f64::from(standing_y(&world, wall) + WALL_WALK_LIFT);
+    let fired = engines::fire_trebuchet(
+        &world,
+        Vector3::new(f64::from(origin.x) + 0.5, oy, f64::from(origin.z) + 0.5),
+        Vector3::new(f64::from(wall.x) + 0.5, ty, f64::from(wall.z) + 0.5),
+    );
+    let mut dir = lock();
+    let tick = dir.tick;
+    if let Some(war) = dir.towns.get_mut(&town_id) {
+        war.last_treb_tick = tick;
+        war.treb_shot = Some(fired);
+    }
+    dir.push_event(CombatEvent {
+        tick,
+        kind: CombatKind::Trebuchet,
+        actor: 0,
+        other: None,
+        x: pos.x,
+        z: pos.z,
+        note: format!("{town_id} player loosed the trebuchet"),
+    });
+    Ok(format!("loosed the trebuchet at {town_id}"))
+}
+
 fn apply_morale(
     town_id: &str,
     tick: u32,
@@ -3698,8 +4078,8 @@ fn dest_for(
     repair_dest: Option<PostTarget>,
     march_dest: PostTarget,
     keep_dest: PostTarget,
-    _ram_dest: PostTarget,
     ladder_dest: PostTarget,
+    archer_dest: PostTarget,
     work_dest: PostTarget,
     home_dest: PostTarget,
     patrol_dest: PostTarget,
@@ -3717,7 +4097,7 @@ fn dest_for(
     }
     match faction {
         Faction::Neutral => keep_dest,
-        Faction::Kingdom(_) if role == Some(VillagerRole::Archer) => ladder_dest,
+        Faction::Kingdom(_) if role == Some(VillagerRole::Archer) => archer_dest,
         Faction::Kingdom(_) if role == Some(VillagerRole::Guard) && !alarm && !in_combat => {
             patrol_dest
         }
@@ -3852,6 +4232,14 @@ fn apply_capture(
             }
             if let Some(ram) = war.ram.take() {
                 ids.extend(ram.parts);
+            }
+            if let Some(tower) = war.siege_tower.take() {
+                ids.extend(tower.parts);
+            }
+            if let Some(shot) = war.treb_shot.take()
+                && shot.part >= 0
+            {
+                ids.push(shot.part);
             }
             war.pending_despawn.extend(ids);
             war.pending_unticket.append(&mut war.ticketed);
@@ -4076,6 +4464,14 @@ fn dematerialize_raid(world: &Arc<World>, town_id: &str) {
         despawn.append(&mut raid.temps);
         if let Some(ram) = war.ram.take() {
             despawn.extend(ram.parts);
+        }
+        if let Some(tower) = war.siege_tower.take() {
+            despawn.extend(tower.parts);
+        }
+        if let Some(shot) = war.treb_shot.take()
+            && shot.part >= 0
+        {
+            despawn.push(shot.part);
         }
         let tickets = std::mem::take(&mut war.ticketed);
         war.pending_tickets.clear();
@@ -4709,7 +5105,51 @@ pub fn query_battle_state(town_id: &str) -> Option<BattleState> {
 }
 
 pub fn join_kingdom(player: &Player, name: &str) -> KingdomId {
-    lock().join_kingdom(player, KingdomId::new(name))
+    let id = lock().join_kingdom(player, KingdomId::new(name));
+    teleport_to_keep(player);
+    id
+}
+
+fn teleport_to_keep(player: &Player) {
+    let uuid = player.gameprofile.id.to_string();
+    let plan = {
+        let dir = lock();
+        let Some(kingdom) = dir.player_kingdom(&uuid).cloned() else {
+            return;
+        };
+        keep_stand_plan(&kingdom, &dir.towns)
+    };
+    let Some(plan) = plan else {
+        return;
+    };
+    let world = Arc::clone(&player.get_entity().world.load());
+    let (x, y, z) = siege::pick_safe_stand(
+        plan.keep,
+        plan.court,
+        &plan.fallbacks,
+        |col_x, col_z| world_stand_y(&world, col_x, col_z),
+        |col_x, col_y, col_z| world_column_solid(&world, col_x, col_y, col_z),
+    );
+    let _ = player.set_respawn_point(
+        world.dimension.clone(),
+        BlockPos::new(x, y, z),
+        0.0,
+        0.0,
+        true,
+    );
+    tracing::info!(
+        player = %player.gameprofile.name,
+        x,
+        y,
+        z,
+        "kingdoms keep spawn"
+    );
+    player.teleport(
+        Vector3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
+        None,
+        None,
+        world,
+    );
 }
 
 /// Resolve a town argument from a command (`here`, `cx,cz`, id, kingdom name).
@@ -4797,9 +5237,11 @@ mod tests {
 
     #[test]
     fn kit_tiers_follow_renown() {
-        assert_eq!(kit_weapon(siege::Rank::Levy), None);
-        assert_eq!(kit_weapon(siege::Rank::Freeman), Some(&Item::STONE_SWORD));
-        assert_eq!(kit_weapon(siege::Rank::Knight), Some(&Item::IRON_SWORD));
+        assert_eq!(kit_weapon(siege::Rank::Levy), &Item::WOODEN_SWORD);
+        assert_eq!(kit_shield(&KingdomId::new("alder")), Some(&Item::SHIELD));
+        assert_eq!(kit_shield(&KingdomId::new("raven")), Some(&Item::SHIELD));
+        assert_eq!(kit_weapon(siege::Rank::Freeman), &Item::STONE_SWORD);
+        assert_eq!(kit_weapon(siege::Rank::Knight), &Item::IRON_SWORD);
         let levy = kit_armor(siege::Rank::Levy);
         assert_eq!(levy[1].1.id, Item::LEATHER_CHESTPLATE.id);
         let sergeant = kit_armor(siege::Rank::Sergeant);
@@ -4842,7 +5284,7 @@ mod tests {
             march,
             keep,
             march,
-            march,
+            patrol,
             work,
             home,
             patrol,
@@ -4860,7 +5302,7 @@ mod tests {
             march,
             keep,
             march,
-            march,
+            patrol,
             work,
             home,
             patrol,
@@ -4878,7 +5320,43 @@ mod tests {
             march,
             keep,
             march,
+            patrol,
+            work,
+            home,
+            patrol,
+            6_000,
+        );
+        assert_eq!((dest.x, dest.z), (patrol.x, patrol.z));
+        let dest = dest_for(
+            &Faction::Kingdom(KingdomId::new("alder")),
+            MarchJob::Assault,
+            Some(VillagerRole::Guard),
+            true,
+            true,
+            false,
+            None,
             march,
+            keep,
+            march,
+            patrol,
+            work,
+            home,
+            patrol,
+            6_000,
+        );
+        assert_eq!((dest.x, dest.z), (march.x, march.z));
+        let dest = dest_for(
+            &Faction::Kingdom(KingdomId::new("alder")),
+            MarchJob::Assault,
+            Some(VillagerRole::Archer),
+            true,
+            false,
+            false,
+            None,
+            march,
+            keep,
+            march,
+            patrol,
             work,
             home,
             patrol,

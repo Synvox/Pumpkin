@@ -100,6 +100,8 @@ pub enum SpawnRole {
     SiegeRam,
     /// Stacked siege ladders in the camp siege yard.
     SiegeLadder,
+    /// Trebuchet in the camp siege yard.
+    SiegeTreb,
 }
 
 /// One spawn or rally column. `y` is planner surface + 1 (standing height).
@@ -282,6 +284,7 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
                 let mut tents = 0u32;
                 let mut rams = 0u32;
                 let mut ladders = 0u32;
+                let mut trebs = 0u32;
                 for z in scene.rect.min_z..=scene.rect.max_z {
                     for x in scene.rect.min_x..=scene.rect.max_x {
                         match plan.occ.kind(x, z) {
@@ -300,6 +303,10 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
                             {
                                 spawns.push(at(SpawnRole::SiegeLadder, x, z));
                                 ladders += 1;
+                            }
+                            crate::cells::CellKind::SiegeTreb if trebs < 4 && (x + z) % 4 == 0 => {
+                                spawns.push(at(SpawnRole::SiegeTreb, x, z));
+                                trebs += 1;
                             }
                             _ => {}
                         }
@@ -442,6 +449,10 @@ mod tests {
         assert!(
             info.spawns.iter().any(|s| s.role == SpawnRole::SiegeLadder),
             "siege ladders should be spawn posts"
+        );
+        assert!(
+            info.spawns.iter().any(|s| s.role == SpawnRole::SiegeTreb),
+            "trebuchet should be a spawn post"
         );
     }
 }

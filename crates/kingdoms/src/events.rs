@@ -4,10 +4,16 @@ use std::sync::Arc;
 
 use pumpkin_core::plugin::api::events::entity::entity_damage_by_entity::EntityDamageByEntityEvent;
 use pumpkin_core::plugin::api::events::entity::entity_death::EntityDeathEvent;
+use pumpkin_core::plugin::api::events::player::player_interact_event::{
+    InteractAction, PlayerInteractEvent,
+};
 use pumpkin_core::plugin::api::events::player::player_join::PlayerJoinEvent;
+use pumpkin_core::plugin::api::events::player::player_respawn::PlayerRespawnEvent;
+use pumpkin_core::plugin::api::events::player::player_spawn_location::PlayerSpawnLocationEvent;
 use pumpkin_core::plugin::api::events::server::ServerTickStartEvent;
 use pumpkin_core::plugin::{EventHandler, EventPriority, Payload, PluginFuture, TypedEventHandler};
 use pumpkin_core::server::Server;
+use pumpkin_data::Block;
 
 use crate::director;
 use crate::faction::{is_allied, is_kingdoms_tagged};
@@ -58,6 +64,36 @@ pub fn register(server: &Server) {
         server,
         Arc::new(TypedEventHandler {
             handler: Arc::new(JoinHandler),
+            priority: EventPriority::Normal,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(SpawnLocationHandler),
+            priority: EventPriority::High,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(RespawnHandler),
+            priority: EventPriority::Normal,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(InteractHandler),
             priority: EventPriority::Normal,
             blocking: true,
             source: Some("kingdoms".to_owned()),
@@ -152,6 +188,60 @@ impl EventHandler<PlayerJoinEvent> for JoinHandler {
         let player = Arc::clone(&event.player);
         Box::pin(async move {
             director::restore_player(&player);
+        })
+    }
+}
+
+struct SpawnLocationHandler;
+
+impl EventHandler<PlayerSpawnLocationEvent> for SpawnLocationHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        _server: &'a Arc<Server>,
+        event: &'a mut PlayerSpawnLocationEvent,
+    ) -> PluginFuture<'a, ()> {
+        Box::pin(async move {
+            director::fix_spawn_location(&event.player, &mut event.spawn_pos);
+        })
+    }
+}
+
+struct RespawnHandler;
+
+impl EventHandler<PlayerRespawnEvent> for RespawnHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        _server: &'a Arc<Server>,
+        event: &'a mut PlayerRespawnEvent,
+    ) -> PluginFuture<'a, ()> {
+        let player = Arc::clone(&event.player);
+        Box::pin(async move {
+            director::respawn_kit(&player);
+        })
+    }
+}
+
+struct InteractHandler;
+
+impl EventHandler<PlayerInteractEvent> for InteractHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        _server: &'a Arc<Server>,
+        event: &'a mut PlayerInteractEvent,
+    ) -> PluginFuture<'a, ()> {
+        Box::pin(async move {
+            if event.action != InteractAction::RightClickBlock {
+                return;
+            }
+            if event.block.id != Block::ANVIL.id && event.block.id != Block::DARK_OAK_LOG.id {
+                return;
+            }
+            if let Ok(msg) = director::try_fire_trebuchet(&event.player) {
+                event.player.send_system_message(
+                    &pumpkin_util::text::TextComponent::text(msg)
+                        .color_named(pumpkin_util::text::color::NamedColor::Gold),
+                );
+            }
         })
     }
 }
