@@ -83,7 +83,12 @@ pub fn stamp_column(
     let planned = plan.heights.height(x, z).max(ground);
     let floor = terrace_floor(ground, planned);
     if occupy_raises(kind) {
-        clear_above(sink, x, ground + 1, ground + 28, z);
+        let cap = if is_cathedral_mass(kind) || kind == CellKind::CathedralButtress {
+            ground + 42
+        } else {
+            ground + 28
+        };
+        clear_above(sink, x, ground + 1, cap, z);
     }
     match kind {
         CellKind::Empty => {}
@@ -110,6 +115,7 @@ pub fn stamp_column(
         CellKind::Pasture => place_pasture(sink, x, ground, z, &palette),
         CellKind::Grave => place_grave(sink, x, ground, z, &palette),
         CellKind::Palisade => place_palisade(sink, x, ground, z, &palette),
+        CellKind::PalisadeWalk => place_palisade_walk(sink, x, ground, z, &palette),
         CellKind::Tent => place_tent(sink, plan, x, ground, z, &palette),
         CellKind::CampCourt => place_camp_court(sink, x, ground, z, &palette),
         CellKind::Ruin => place_ruin(sink, plan, x, ground, z, &palette),
@@ -239,6 +245,15 @@ pub fn stamp_column(
             place_fortress_tower(sink, plan, x, floor, ground, z, &palette);
         }
         CellKind::FortressCourt => place_court(sink, x, ground, z, &palette),
+        CellKind::CathedralNave
+        | CellKind::CathedralTransept
+        | CellKind::CathedralChoir
+        | CellKind::CathedralTower => {
+            place_gothic_mass(sink, plan, x, floor, ground, z, &palette, kind);
+        }
+        CellKind::CathedralButtress => {
+            place_flying_buttress(sink, plan, x, floor, ground, z, &palette);
+        }
     }
 }
 
@@ -517,9 +532,21 @@ fn place_palisade(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palett
     }
     sink.put(x, ground + 6, z, Block::DARK_OAK_FENCE.default_state);
     sink.put(x, ground + 7, z, Block::DARK_OAK_FENCE.default_state);
-    if (x + z) % 4 == 0 {
+    if (x + z) % 8 == 0 {
         sink.put(x, ground + 8, z, Block::BLACK_BANNER.default_state);
     }
+}
+
+fn place_palisade_walk(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+    sink.put(x, ground, z, palette.path);
+    clear_above(sink, x, ground + 1, ground + 3, z);
+    sink.put(x, ground + 3, z, Block::DARK_OAK_FENCE.default_state);
+    sink.put(x, ground + 4, z, Block::DARK_OAK_SLAB.default_state);
+    if (x + z) % 3 == 0 {
+        sink.put(x, ground + 1, z, Block::DARK_OAK_FENCE.default_state);
+        sink.put(x, ground + 2, z, Block::DARK_OAK_FENCE.default_state);
+    }
+    let _ = palette;
 }
 
 fn place_tent(
@@ -537,9 +564,9 @@ fn place_camp_court(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, pale
     sink.put(x, ground, z, palette.path);
     clear_above(sink, x, ground + 1, ground + 6, z);
     let mix = (x.wrapping_mul(13) + z.wrapping_mul(7)).unsigned_abs();
-    if mix % 10 == 0 {
+    if mix % 28 == 0 {
         sink.put(x, ground + 1, z, Block::CAMPFIRE.default_state);
-    } else if mix % 8 == 0 {
+    } else if mix % 22 == 0 {
         sink.put(x, ground + 1, z, Block::DARK_OAK_FENCE.default_state);
         sink.put(x, ground + 2, z, Block::DARK_OAK_FENCE.default_state);
         sink.put(x, ground + 3, z, Block::BLACK_BANNER.default_state);
@@ -805,17 +832,15 @@ fn place_wind_sail(
             mill.rect.max_z,
         )
         .max(plan.heights.sea_level + 2);
-    let dist = (x - cx).abs() + (z - cz).abs();
+    let dist = (x - cx).abs().max((z - cz).abs());
     let hub_y = floor + 10;
-    let half = 2 + (dist - 3).clamp(0, 4) / 2;
     sink.put(x, hub_y, z, Block::DARK_OAK_FENCE.default_state);
-    for dy in -half..=half {
-        let wool = if (dy + dist) % 2 == 0 {
-            Block::WHITE_WOOL.default_state
-        } else {
-            Block::BROWN_WOOL.default_state
-        };
-        sink.put(x, hub_y + dy, z, wool);
+    let panel = if dist <= 4 { 2 } else { 1 };
+    for dy in -panel..=panel {
+        if dy == 0 {
+            continue;
+        }
+        sink.put(x, hub_y + dy, z, Block::WHITE_WOOL.default_state);
     }
 }
 
@@ -2245,8 +2270,9 @@ fn place_outpost(
     foundation(sink, x, floor, ground, z, palette);
     let r = lot.rect;
     let top = floor + lot.kind.wall_h();
+    let base = ground.min(floor);
     if r.on_edge(x, z) {
-        for y in floor..=top {
+        for y in base..=top {
             sink.put(
                 x,
                 y,
@@ -2263,15 +2289,12 @@ fn place_outpost(
         if interior::gable_door_at(r, x, z) {
             interior::place_door(sink, x, floor + 1, z, interior::outward(r, x, z), false);
         } else if !r.is_corner(x, z) && (x + z) % 2 == 0 {
-            sink.put(x, floor + 5, z, Block::DARK_OAK_FENCE.default_state);
-            sink.put(x, floor + 9, z, Block::DARK_OAK_FENCE.default_state);
+            sink.put(x, floor + 5, z, Block::GLASS_PANE.default_state);
+            sink.put(x, floor + 9, z, Block::GLASS_PANE.default_state);
         }
-        if ((x + z) & 1) == 0 {
-            sink.put(x, top + 1, z, Block::DARK_OAK_PLANKS.default_state);
-            sink.put(x, top + 2, z, Block::DARK_OAK_FENCE.default_state);
-        }
+        sink.put(x, top + 1, z, Block::DARK_OAK_PLANKS.default_state);
         if r.is_corner(x, z) {
-            sink.put(x, top + 3, z, Block::BLACK_BANNER.default_state);
+            sink.put(x, top + 2, z, Block::BLACK_BANNER.default_state);
         }
     } else {
         clear_above(sink, x, floor + 1, top - 1, z);
@@ -2279,14 +2302,286 @@ fn place_outpost(
         sink.put(x, floor + 4, z, Block::DARK_OAK_PLANKS.default_state);
         sink.put(x, floor + 8, z, Block::DARK_OAK_PLANKS.default_state);
         sink.put(x, top, z, Block::DARK_OAK_PLANKS.default_state);
+        sink.put(x, top + 1, z, Block::DARK_OAK_PLANKS.default_state);
         if x == r.center().0 && z == r.center().1 {
             sink.put(x, floor + 1, z, Block::LADDER.default_state);
             sink.put(x, floor + 5, z, Block::LADDER.default_state);
             sink.put(x, floor + 9, z, Block::LADDER.default_state);
-            sink.put(x, top + 1, z, Block::LANTERN.default_state);
+            sink.put(x, top - 1, z, Block::LANTERN.default_state);
         } else if (x + z) % 4 == 0 {
             sink.put(x, floor + 1, z, Block::CHEST.default_state);
         }
+    }
+    let _ = palette;
+}
+
+fn is_cathedral_mass(kind: CellKind) -> bool {
+    matches!(
+        kind,
+        CellKind::CathedralNave
+            | CellKind::CathedralTransept
+            | CellKind::CathedralChoir
+            | CellKind::CathedralTower
+    )
+}
+
+fn gothic_shell_edge(plan: &TownPlan, x: i32, z: i32) -> bool {
+    Dir::ALL
+        .iter()
+        .any(|dir| !is_cathedral_mass(plan.occ.kind(x + dir.dx(), z + dir.dz())))
+}
+
+fn gothic_stone(x: i32, y: i32, z: i32, floor: i32) -> &'static BlockState {
+    if y <= floor + 1 {
+        if (x + z) % 2 == 0 {
+            Block::ANDESITE.default_state
+        } else {
+            Block::STONE_BRICKS.default_state
+        }
+    } else if (x + z + y) % 6 == 0 {
+        Block::STONE_BRICKS.default_state
+    } else if (x + z) % 5 == 0 {
+        Block::SMOOTH_STONE.default_state
+    } else {
+        Block::CALCITE.default_state
+    }
+}
+
+fn gothic_roof_y(rect: Rect, x: i32, z: i32, eaves_y: i32) -> (i32, Dir) {
+    let along_x = rect.width() >= rect.depth();
+    let ridge = if along_x {
+        rect.min_z.midpoint(rect.max_z)
+    } else {
+        rect.min_x.midpoint(rect.max_x)
+    };
+    let dist = if along_x {
+        (z - ridge).abs()
+    } else {
+        (x - ridge).abs()
+    };
+    let span = if along_x { rect.depth() } else { rect.width() };
+    let half = span / 2;
+    let roof_y = eaves_y + 1 + (half - dist).max(0) * 2;
+    let roof_dir = if along_x {
+        if z < ridge { Dir::North } else { Dir::South }
+    } else if x < ridge {
+        Dir::West
+    } else {
+        Dir::East
+    };
+    (roof_y, roof_dir)
+}
+
+fn place_gothic_mass(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    _floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+    kind: CellKind,
+) {
+    let rect = blob_of(plan, x, z, kind);
+    let floor = ridge_floor(plan, rect);
+    foundation(sink, x, floor, ground, z, palette);
+    if kind == CellKind::CathedralTower {
+        place_gothic_tower(sink, plan, rect, x, floor, ground, z, palette);
+        return;
+    }
+    let eaves = floor + 16;
+    let (roof_y, roof_dir) = gothic_roof_y(rect, x, z, eaves);
+    let edge = gothic_shell_edge(plan, x, z);
+    let (cx, cz) = rect.center();
+    if edge {
+        let base = ground.min(floor);
+        for y in base..roof_y {
+            sink.put(x, y, z, gothic_stone(x, y, z, floor));
+        }
+        let west_front = kind == CellKind::CathedralNave && x == rect.min_x;
+        if west_front && z == cz {
+            interior::place_door(sink, x, floor + 1, z, Dir::West, true);
+        } else if west_front && (z - cz).abs() <= 2 {
+            for y in floor + 8..=floor + 12 {
+                sink.put(x, y, z, Block::PURPLE_STAINED_GLASS_PANE.default_state);
+            }
+            if z == cz {
+                sink.put(
+                    x,
+                    floor + 13,
+                    z,
+                    Block::PURPLE_STAINED_GLASS_PANE.default_state,
+                );
+            }
+        } else if !rect.is_corner(x, z) && (x + z) % 3 == 0 {
+            for y in floor + 4..=floor + 10 {
+                let pane = if y % 2 == 0 {
+                    Block::PURPLE_STAINED_GLASS_PANE.default_state
+                } else {
+                    Block::YELLOW_STAINED_GLASS_PANE.default_state
+                };
+                sink.put(x, y, z, pane);
+            }
+        }
+    } else {
+        clear_above(sink, x, floor + 1, roof_y - 2, z);
+        sink.put(x, floor, z, Block::SMOOTH_STONE.default_state);
+        sink.put(x, roof_y - 1, z, Block::CALCITE.default_state);
+        if (x - cx).abs() == 2 && (x - rect.min_x) % 5 == 2 && kind == CellKind::CathedralNave {
+            for y in floor + 1..=floor + 12 {
+                sink.put(x, y, z, Block::CALCITE.default_state);
+            }
+        }
+        interior::furnish_cathedral(sink, rect, kind, x, floor, z, roof_y, palette);
+    }
+    if dist_to_ridge(rect, x, z) == 0 {
+        sink.put(x, roof_y, z, Block::DEEPSLATE_TILES.default_state);
+    } else {
+        sink.put(
+            x,
+            roof_y,
+            z,
+            stair_state(&Block::DEEPSLATE_TILE_STAIRS, roof_dir),
+        );
+    }
+    clear_hill_above_roof(sink, x, roof_y, ground, z, false);
+}
+
+fn dist_to_ridge(rect: Rect, x: i32, z: i32) -> i32 {
+    let along_x = rect.width() >= rect.depth();
+    let ridge = if along_x {
+        rect.min_z.midpoint(rect.max_z)
+    } else {
+        rect.min_x.midpoint(rect.max_x)
+    };
+    if along_x {
+        (z - ridge).abs()
+    } else {
+        (x - ridge).abs()
+    }
+}
+
+fn place_gothic_tower(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    rect: Rect,
+    x: i32,
+    floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let top = floor + 26;
+    let (cx, cz) = rect.center();
+    let cheb = (x - cx).abs().max((z - cz).abs());
+    let edge = gothic_shell_edge(plan, x, z) || rect.on_edge(x, z);
+    let base = ground.min(floor);
+    if edge {
+        for y in base..=top {
+            sink.put(x, y, z, gothic_stone(x, y, z, floor));
+        }
+        if !rect.is_corner(x, z) && (x + z) % 2 == 0 {
+            sink.put(
+                x,
+                floor + 8,
+                z,
+                Block::PURPLE_STAINED_GLASS_PANE.default_state,
+            );
+            sink.put(
+                x,
+                floor + 9,
+                z,
+                Block::PURPLE_STAINED_GLASS_PANE.default_state,
+            );
+            sink.put(
+                x,
+                floor + 16,
+                z,
+                Block::PURPLE_STAINED_GLASS_PANE.default_state,
+            );
+        }
+    } else {
+        clear_above(sink, x, floor + 1, top - 1, z);
+        sink.put(x, floor, z, Block::SMOOTH_STONE.default_state);
+        sink.put(x, floor + 8, z, palette.planks);
+        sink.put(x, floor + 16, z, palette.planks);
+        sink.put(x, top, z, Block::STONE_BRICKS.default_state);
+        if x == cx && z == cz {
+            sink.put(x, floor + 1, z, Block::LADDER.default_state);
+            sink.put(x, floor + 9, z, Block::LADDER.default_state);
+            sink.put(x, floor + 17, z, Block::LADDER.default_state);
+            sink.put(x, top - 1, z, Block::LANTERN.default_state);
+        }
+    }
+    let spire_top = top + 1 + (2 - cheb).max(0) * 3;
+    for y in top + 1..=spire_top {
+        if y == spire_top {
+            sink.put(
+                x,
+                y,
+                z,
+                stair_state(&Block::DEEPSLATE_TILE_STAIRS, Dir::South),
+            );
+        } else {
+            sink.put(x, y, z, Block::STONE_BRICKS.default_state);
+        }
+    }
+    clear_hill_above_roof(sink, x, spire_top, ground, z, false);
+}
+
+fn place_flying_buttress(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let mut mass_floor = floor;
+    for dir in Dir::ALL {
+        let nx = x + dir.dx();
+        let nz = z + dir.dz();
+        let kind = plan.occ.kind(nx, nz);
+        if is_cathedral_mass(kind) {
+            mass_floor = ridge_floor(plan, blob_of(plan, nx, nz, kind));
+            break;
+        }
+    }
+    foundation(sink, x, mass_floor, ground, z, palette);
+    let against_mass = Dir::ALL
+        .iter()
+        .any(|dir| is_cathedral_mass(plan.occ.kind(x + dir.dx(), z + dir.dz())));
+    let base = ground.min(mass_floor);
+    if against_mass {
+        sink.put(x, mass_floor, z, Block::ANDESITE.default_state);
+        for y in [mass_floor + 8, mass_floor + 12, mass_floor + 16] {
+            sink.put(x, y, z, stair_state(&Block::STONE_BRICK_STAIRS, Dir::South));
+        }
+        sink.put(x, mass_floor + 10, z, Block::STONE_BRICK_SLAB.default_state);
+        clear_above(sink, x, mass_floor + 1, mass_floor + 7, z);
+    } else {
+        for y in base..=mass_floor + 18 {
+            sink.put(
+                x,
+                y,
+                z,
+                if y <= mass_floor + 2 {
+                    Block::ANDESITE.default_state
+                } else if (x + z + y) % 3 == 0 {
+                    Block::STONE_BRICKS.default_state
+                } else {
+                    Block::CALCITE.default_state
+                },
+            );
+        }
+        sink.put(x, mass_floor + 19, z, palette.brick_wall);
+        sink.put(
+            x,
+            mass_floor + 20,
+            z,
+            stair_state(&Block::DEEPSLATE_TILE_STAIRS, Dir::South),
+        );
     }
 }
 
@@ -2299,30 +2594,9 @@ fn place_cathedral(
     z: i32,
     palette: &Palette,
 ) {
-    place_gabled(sink, lot.rect, x, floor, ground, z, palette, 12, true);
-    let (roof_y, _) = gable_roof_y(lot.rect, x, z, floor + 12, 1);
+    place_gabled(sink, lot.rect, x, floor, ground, z, palette, 16, true);
+    let (roof_y, _) = gable_roof_y(lot.rect, x, z, floor + 16, 1);
     interior::furnish_chapel(sink, lot.rect, x, floor, z, roof_y, palette, true);
-    let west = (x - lot.rect.min_x) <= 2 && (z - lot.rect.min_z) <= 2;
-    if west {
-        for y in roof_y..=floor + 22 {
-            sink.put(x, y, z, palette.bricks);
-        }
-        if x == lot.rect.min_x + 1 && z == lot.rect.min_z + 1 {
-            sink.put(
-                x,
-                floor + 23,
-                z,
-                stair_state(palette.brick_stairs, Dir::South),
-            );
-            sink.put(x, floor + 24, z, Block::LANTERN.default_state);
-        } else if (x + z) % 2 == 0 {
-            sink.put(x, floor + 16, z, Block::GLASS_PANE.default_state);
-        }
-    }
-    if lot.rect.on_edge(x, z) && !lot.rect.is_corner(x, z) && (x + z) % 5 == 0 {
-        sink.put(x, floor + 6, z, Block::GLASS_PANE.default_state);
-        sink.put(x, floor + 7, z, Block::GLASS_PANE.default_state);
-    }
 }
 
 fn place_bell_tower(

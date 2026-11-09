@@ -8,7 +8,7 @@ One town per 2048×2048 cell, a pure function of `(seed, cell)`. Each chunk writ
 
 - **Castle** on high ground, at least 128×128 (8×8 chunks): contour-following polygonal curtain (not a rectangle), inner ward, mixed round / D / octagon / square towers with cone or crenellated tops, twin-round gatehouse, multi-mass keep, hall, chapel, stables, barracks, kitchen, courtyards, and a moat/ditch where the approach is low enough. Archetype (ridge, concentric, spur, coastal) is a function of seed and terrain. Walls step with the ridge. No flattening.
 - **Town** on the downhill side: market on the flattest patch, well and fountain ring, gate plazas, timber-frame and cottage lots (WFC facades), church, tavern, blacksmith with a forge yard, longhouse, barn, windmill, farms outside the walls.
-- **Hinterland** (same seed+cell plan, chunk-local writes): outlying hamlets, large farmsteads with crop rows / hay barns / windmills with a tower and four cardinal sails, orchards, fenced pastures, watchtowers on high ground, ruined forts, a monastery with cloister arcade, courtyard and bell tower, a dense graveyard (headstones, yews, lychgate), harbour/docks where the plot touches water, and a pillager palisade camp (striped tents, war tent, cages, banner poles, dark-oak outpost, trebuchet / covered ram / stacked ladders, gated spiked palisade). One hero scene per town: a cathedral district on gentle ground, or a mountain fortress on steep relief. Terrain is not flattened.
+- **Hinterland** (same seed+cell plan, chunk-local writes): outlying hamlets, large farmsteads with crop rows / hay barns / windmills with a tower and diagonal-X cloth sails, orchards, fenced pastures, watchtowers on high ground, ruined forts, a monastery with cloister arcade, courtyard and bell tower, a dense graveyard (headstones, yews, lychgate), harbour/docks where the plot touches water, and a pillager palisade camp (tents in rows on lanes, a war tent, cages, a dark-oak outpost with an enclosed loft, trebuchet / covered ram / stacked ladders in an open siege yard, and a staked palisade with gaps and a wall-walk). One hero scene per town: a Gothic cathedral (cruciform nave / transepts / choir, twin west spires, flying buttresses, rose and lancet glass, steep deepslate-tile roof, furnished interior, cathedral close) on gentle ground, or a mountain fortress on steep relief. Terrain is not flattened.
 - **Roads** by A* over sampled height with a ~1:4 slope cost, stairs when steeper, switchbacks when the path needs them. Neighbouring cells agree on a hashed crossing on the shared 2048-block edge and stitch outbound roads to that point from both sides. Overlay road columns outside hinterland occupancy keep the occupancy grid hinterland-sized. Bridges still form over water.
 - **Palettes** by vanilla biome: oak/plains, spruce/taiga, sandstone/desert. Castle walls mix stone bricks, cobble, mossy, cracked, andesite and tuff, with a darker cobble/andesite plinth.
 
@@ -250,7 +250,7 @@ locatetown
 stop
 ```
 
-Renders. `--all` writes planner PNGs (`*-planner-*`) then the same views from real Features chunks (terrain, trees, the kingdoms decorator):
+Renders. `--all` writes planner PNGs (`*-planner-*`) then the same views from real Features chunks cropped to the aerial overview (terrain, trees, the kingdoms decorator). Scene close-ups for camp, cathedral/fortress, mill, and all four aerials come from that Features fill:
 
 ```bash
 cargo run -p pumpkin-kingdoms --bin kingdoms-pregen -- --all --out-dir kingdoms-renders

@@ -125,7 +125,7 @@ fn write_scene_renders(
             | SceneKind::Hamlet
             | SceneKind::Cathedral
             | SceneKind::MountainFortress
-            | SceneKind::Monastery => 4,
+            | SceneKind::Monastery => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -152,7 +152,9 @@ fn write_scene_renders(
     Ok(())
 }
 
-fn overview_bounds(plan: &TownPlan) -> Rect {
+/// Crop used for aerials and Features-chunk rerenders.
+#[must_use]
+pub fn overview_bounds(plan: &TownPlan) -> Rect {
     let mut bounds = plan.castle.bounds.inflate(8);
     bounds = union_rect(bounds, plan.market.inflate(24));
     for scene in &plan.scenes {
@@ -161,6 +163,11 @@ fn overview_bounds(plan: &TownPlan) -> Rect {
             continue;
         }
         bounds = union_rect(bounds, scene.rect.inflate(8));
+    }
+    for lot in &plan.lots {
+        if lot.kind == BuildingKind::Windmill {
+            bounds = union_rect(bounds, lot.rect.inflate(10));
+        }
     }
     Rect::new(
         bounds.min_x.max(plan.bounds.min_x),
@@ -407,6 +414,19 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     }
     if id == Block::DEEPSLATE_BRICKS.id || id == Block::DEEPSLATE.id {
         return [70, 70, 74];
+    }
+    if id == Block::DEEPSLATE_TILES.id
+        || id == Block::DEEPSLATE_TILE_STAIRS.id
+        || id == Block::DEEPSLATE_TILE_SLAB.id
+        || id == Block::DEEPSLATE_TILE_WALL.id
+    {
+        return [48, 50, 54];
+    }
+    if id == Block::SMOOTH_STONE.id || id == Block::SMOOTH_STONE_SLAB.id {
+        return [176, 176, 172];
+    }
+    if id == Block::PURPLE_STAINED_GLASS_PANE.id {
+        return [118, 46, 156];
     }
     if id == Block::VINE.id {
         return [46, 110, 40];

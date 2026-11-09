@@ -131,17 +131,7 @@ pub fn place_scenes(
         rng,
         &mut scenes,
     );
-    place_hero(
-        occ,
-        grid,
-        castle,
-        town,
-        search,
-        lots,
-        seed,
-        rng,
-        &mut scenes,
-    );
+    place_hero(occ, grid, castle, town, search, rng, &mut scenes);
     paint_wind_sails(occ, lots);
     paint_forge_yards(occ, lots);
     scenes
@@ -582,66 +572,64 @@ fn place_pillager_camp(
     let Some(rect) = best else {
         return;
     };
-    occ.fill(rect, CellKind::Palisade, false);
+    paint_staked_palisade(occ, rect);
     occ.fill(rect.deflate(1), CellKind::CampCourt, true);
     let face = gate_face_toward(rect, town);
     paint_palisade_gate(occ, rect, face);
+    paint_palisade_walk(occ, rect);
 
-    let (cx, cz) = rect.center();
+    let (_, cz) = rect.center();
+    let tent_z0 = match face {
+        Dir::South => rect.min_z + 3,
+        Dir::North => rect.min_z + 11,
+        _ => rect.min_z + 4,
+    };
+    for row in 0..2 {
+        for col in 0..3 {
+            let tx = rect.min_x + 4 + col * 7;
+            let tz = tent_z0 + row * 7;
+            occ.fill(Rect::new(tx, tz, tx + 4, tz + 3), CellKind::Tent, true);
+        }
+    }
     occ.fill(
-        Rect::new(cx - 3, cz - 2, cx + 3, cz + 2),
+        Rect::new(rect.min_x + 24, tent_z0 + 11, rect.min_x + 30, tent_z0 + 15),
         CellKind::WarTent,
         true,
     );
-    let tents = [
-        Rect::new(
-            rect.min_x + 4,
-            rect.min_z + 4,
-            rect.min_x + 8,
-            rect.min_z + 7,
-        ),
-        Rect::new(
-            rect.max_x - 8,
-            rect.min_z + 4,
-            rect.max_x - 4,
-            rect.min_z + 7,
-        ),
-        Rect::new(
-            rect.min_x + 4,
-            rect.max_z - 8,
-            rect.min_x + 8,
-            rect.max_z - 5,
-        ),
-        Rect::new(
-            rect.max_x - 8,
-            rect.max_z - 8,
-            rect.max_x - 4,
-            rect.max_z - 5,
-        ),
-    ];
-    for tent in tents {
-        occ.fill(tent, CellKind::Tent, true);
-    }
     occ.fill(
-        Rect::new(cx - 5, cz + 4, cx - 3, cz + 6),
-        CellKind::Cage,
-        true,
-    );
-    occ.fill(
-        Rect::new(cx + 3, cz + 4, cx + 5, cz + 6),
+        Rect::new(rect.min_x + 4, cz - 1, rect.min_x + 6, cz + 1),
         CellKind::Cage,
         true,
     );
 
-    let outpost = Rect::new(
-        rect.min_x + 3,
-        rect.min_z + 10,
-        rect.min_x + 7,
-        rect.min_z + 14,
-    );
-    let _ = try_lot(occ, grid, lots, seed, BuildingKind::Outpost, outpost, face);
-
+    let outpost = match face {
+        Dir::South => Rect::new(
+            rect.max_x - 8,
+            rect.min_z + 4,
+            rect.max_x - 4,
+            rect.min_z + 8,
+        ),
+        Dir::North => Rect::new(
+            rect.max_x - 8,
+            rect.max_z - 9,
+            rect.max_x - 4,
+            rect.max_z - 5,
+        ),
+        Dir::East => Rect::new(
+            rect.min_x + 4,
+            rect.max_z - 8,
+            rect.min_x + 8,
+            rect.max_z - 4,
+        ),
+        Dir::West => Rect::new(
+            rect.max_x - 8,
+            rect.max_z - 8,
+            rect.max_x - 4,
+            rect.max_z - 4,
+        ),
+    };
     paint_siege_yard(occ, rect, face);
+    let _ = try_lot(occ, grid, lots, seed, BuildingKind::Outpost, outpost, face);
     scenes.push(Scene {
         kind: SceneKind::PillagerCamp,
         rect,
@@ -657,6 +645,35 @@ fn gate_face_toward(rect: Rect, town: Rect) -> Dir {
         Dir::South
     } else {
         Dir::North
+    }
+}
+
+fn paint_staked_palisade(occ: &mut Occupancy, rect: Rect) {
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            if !rect.on_edge(x, z) {
+                continue;
+            }
+            let along = if x == rect.min_x || x == rect.max_x {
+                z
+            } else {
+                x
+            };
+            if along % 2 == 0 {
+                occ.set(x, z, CellKind::Palisade, true);
+            }
+        }
+    }
+}
+
+fn paint_palisade_walk(occ: &mut Occupancy, rect: Rect) {
+    let inner = rect.deflate(1);
+    for z in inner.min_z..=inner.max_z {
+        for x in inner.min_x..=inner.max_x {
+            if inner.on_edge(x, z) && occ.kind(x, z) == CellKind::CampCourt {
+                occ.set(x, z, CellKind::PalisadeWalk, true);
+            }
+        }
     }
 }
 
@@ -688,113 +705,72 @@ fn paint_palisade_gate(occ: &mut Occupancy, rect: Rect, face: Dir) {
 
 fn paint_siege_yard(occ: &mut Occupancy, rect: Rect, face: Dir) {
     let inner = rect.deflate(2);
+    let yard = match face {
+        Dir::South => Rect::new(
+            inner.min_x + 1,
+            inner.max_z - 7,
+            inner.max_x - 1,
+            inner.max_z,
+        ),
+        Dir::North => Rect::new(
+            inner.min_x + 1,
+            inner.min_z,
+            inner.max_x - 1,
+            inner.min_z + 7,
+        ),
+        Dir::East => Rect::new(
+            inner.max_x - 7,
+            inner.min_z + 1,
+            inner.max_x,
+            inner.max_z - 1,
+        ),
+        Dir::West => Rect::new(
+            inner.min_x,
+            inner.min_z + 1,
+            inner.min_x + 7,
+            inner.max_z - 1,
+        ),
+    };
+    occ.fill(yard, CellKind::CampCourt, true);
     match face {
-        Dir::South => {
+        Dir::South | Dir::North => {
+            let z0 = if face == Dir::South {
+                yard.max_z - 3
+            } else {
+                yard.min_z + 1
+            };
             occ.fill(
-                Rect::new(
-                    inner.min_x + 2,
-                    inner.max_z - 3,
-                    inner.min_x + 9,
-                    inner.max_z - 1,
-                ),
+                Rect::new(yard.min_x + 2, z0, yard.min_x + 9, z0 + 2),
                 CellKind::SiegeTreb,
                 true,
             );
             occ.fill(
-                Rect::new(
-                    inner.max_x - 8,
-                    inner.max_z - 3,
-                    inner.max_x - 3,
-                    inner.max_z - 1,
-                ),
+                Rect::new(yard.min_x + 12, z0, yard.min_x + 17, z0 + 2),
                 CellKind::SiegeRam,
                 true,
             );
-            for x in inner.min_x..=inner.max_x {
-                if x % 3 == 0 {
-                    occ.set(x, inner.max_z, CellKind::SiegeLadder, true);
-                }
+            for x in (yard.min_x + 20..yard.max_x).step_by(3) {
+                occ.set(x, z0 + 1, CellKind::SiegeLadder, true);
             }
         }
-        Dir::North => {
+        Dir::East | Dir::West => {
+            let x0 = if face == Dir::East {
+                yard.max_x - 3
+            } else {
+                yard.min_x + 1
+            };
             occ.fill(
-                Rect::new(
-                    inner.min_x + 2,
-                    inner.min_z + 1,
-                    inner.min_x + 9,
-                    inner.min_z + 3,
-                ),
+                Rect::new(x0, yard.min_z + 2, x0 + 2, yard.min_z + 9),
                 CellKind::SiegeTreb,
                 true,
             );
             occ.fill(
-                Rect::new(
-                    inner.max_x - 8,
-                    inner.min_z + 1,
-                    inner.max_x - 3,
-                    inner.min_z + 3,
-                ),
+                Rect::new(x0, yard.min_z + 12, x0 + 2, yard.min_z + 17),
                 CellKind::SiegeRam,
                 true,
             );
-            for x in inner.min_x..=inner.max_x {
-                if x % 3 == 0 {
-                    occ.set(x, inner.min_z, CellKind::SiegeLadder, true);
-                }
-            }
-        }
-        Dir::East => {
-            occ.fill(
-                Rect::new(
-                    inner.max_x - 3,
-                    inner.min_z + 2,
-                    inner.max_x - 1,
-                    inner.min_z + 9,
-                ),
-                CellKind::SiegeTreb,
-                true,
-            );
-            occ.fill(
-                Rect::new(
-                    inner.max_x - 3,
-                    inner.max_z - 8,
-                    inner.max_x - 1,
-                    inner.max_z - 3,
-                ),
-                CellKind::SiegeRam,
-                true,
-            );
-            for z in inner.min_z..=inner.max_z {
-                if z % 3 == 0 {
-                    occ.set(inner.max_x, z, CellKind::SiegeLadder, true);
-                }
-            }
-        }
-        Dir::West => {
-            occ.fill(
-                Rect::new(
-                    inner.min_x + 1,
-                    inner.min_z + 2,
-                    inner.min_x + 3,
-                    inner.min_z + 9,
-                ),
-                CellKind::SiegeTreb,
-                true,
-            );
-            occ.fill(
-                Rect::new(
-                    inner.min_x + 1,
-                    inner.max_z - 8,
-                    inner.min_x + 3,
-                    inner.max_z - 3,
-                ),
-                CellKind::SiegeRam,
-                true,
-            );
-            for z in inner.min_z..=inner.max_z {
-                if z % 3 == 0 {
-                    occ.set(inner.min_x, z, CellKind::SiegeLadder, true);
-                }
+            for z in (yard.min_z + 20..yard.max_z).step_by(3) {
+                occ.set(x0 + 1, z, CellKind::SiegeLadder, true);
             }
         }
     }
@@ -807,9 +783,9 @@ fn paint_wind_sails(occ: &mut Occupancy, lots: &[Lot]) {
         }
         let (cx, cz) = lot.rect.center();
         for dist in 3..=7 {
-            for dir in Dir::ALL {
-                let x = cx + dir.dx() * dist;
-                let z = cz + dir.dz() * dist;
+            for (sx, sz) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
+                let x = cx + sx * dist;
+                let z = cz + sz * dist;
                 if matches!(
                     occ.kind(x, z),
                     CellKind::Empty | CellKind::Farm | CellKind::FarmEdge | CellKind::Green
@@ -827,8 +803,6 @@ fn place_hero(
     castle: Rect,
     town: Rect,
     search: Rect,
-    lots: &mut Vec<Lot>,
-    seed: u64,
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
@@ -844,7 +818,7 @@ fn place_hero(
         }
         return;
     }
-    place_cathedral_district(occ, grid, town, keep, search, lots, seed, rng, scenes);
+    place_cathedral_district(occ, grid, town, keep, search, rng, scenes);
     if !scenes
         .iter()
         .any(|scene| scene.kind == SceneKind::Cathedral)
@@ -860,45 +834,118 @@ fn place_cathedral_district(
     town: Rect,
     keep_out: Rect,
     search: Rect,
-    lots: &mut Vec<Lot>,
-    seed: u64,
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
-    let Some(yard) = find_site(occ, grid, search, town, keep_out, 32, 26, false, rng) else {
+    let yard = find_site(occ, grid, search, town, keep_out, 42, 34, false, rng)
+        .or_else(|| find_site(occ, grid, search, town, keep_out, 38, 30, false, rng));
+    let Some(yard) = yard else {
         return;
     };
-    occ.fill(yard, CellKind::Plaza, false);
-    let nave = Rect::new(
-        yard.min_x + 2,
-        yard.min_z + 2,
-        yard.min_x + 29,
-        yard.min_z + 17,
+    paint_gothic_cathedral(occ, yard);
+    scenes.push(Scene {
+        kind: SceneKind::Cathedral,
+        rect: yard,
+    });
+}
+
+fn paint_gothic_cathedral(occ: &mut Occupancy, yard: Rect) {
+    occ.fill(yard, CellKind::Green, false);
+    let (_, cz) = yard.center();
+    let nave_h = if yard.depth() >= 34 { 5 } else { 4 };
+    let nave = Rect::new(yard.min_x + 6, cz - nave_h, yard.max_x - 10, cz + nave_h);
+    let west = Rect::new(
+        yard.min_x + 1,
+        nave.min_z - 1,
+        nave.min_x - 1,
+        nave.max_z + 1,
     );
-    let plaza = Rect::new(
-        yard.min_x + 6,
-        yard.min_z + 19,
-        yard.min_x + 25,
+    occ.fill(west, CellKind::Plaza, true);
+    occ.set(west.center().0, west.center().1, CellKind::Fountain, true);
+    let south = Rect::new(
+        nave.min_x + 4,
+        yard.max_z - 4,
+        yard.max_x - 3,
         yard.max_z - 1,
     );
-    occ.fill(plaza, CellKind::Plaza, true);
-    occ.set(plaza.center().0, plaza.center().1, CellKind::Fountain, true);
-    if try_lot(
-        occ,
-        grid,
-        lots,
-        seed,
-        BuildingKind::Cathedral,
-        nave,
-        Dir::South,
-    )
-    .is_some()
-    {
-        scenes.push(Scene {
-            kind: SceneKind::Cathedral,
-            rect: yard,
-        });
+    occ.fill(south, CellKind::Plaza, true);
+    for x in west.min_x..=nave.min_x {
+        occ.set(x, cz, CellKind::Plaza, true);
     }
+
+    occ.fill(nave, CellKind::CathedralNave, true);
+    let tx = nave.min_x.midpoint(nave.max_x);
+    let transept = Rect::new(tx - 4, yard.min_z + 3, tx + 4, yard.max_z - 4);
+    occ.fill(transept, CellKind::CathedralTransept, true);
+
+    let choir = Rect::new(nave.max_x + 1, nave.min_z, nave.max_x + 5, nave.max_z);
+    occ.fill(choir, CellKind::CathedralChoir, true);
+    let apse_x0 = choir.max_x + 1;
+    for x in apse_x0..=yard.max_x - 2 {
+        let half = (4 - (x - apse_x0)).max(1);
+        for z in cz - half..=cz + half {
+            occ.set(x, z, CellKind::CathedralChoir, true);
+        }
+    }
+
+    let tw = 4;
+    occ.fill(
+        Rect::new(
+            nave.min_x,
+            nave.min_z - tw - 1,
+            nave.min_x + tw,
+            nave.min_z - 1,
+        ),
+        CellKind::CathedralTower,
+        true,
+    );
+    occ.fill(
+        Rect::new(
+            nave.min_x,
+            nave.max_z + 1,
+            nave.min_x + tw,
+            nave.max_z + tw + 1,
+        ),
+        CellKind::CathedralTower,
+        true,
+    );
+
+    for x in (nave.min_x + 3..=nave.max_x).step_by(3) {
+        if x <= nave.min_x + 4 {
+            continue;
+        }
+        if x >= transept.min_x - 1 && x <= transept.max_x + 1 {
+            continue;
+        }
+        occ.set(x, nave.min_z - 1, CellKind::CathedralButtress, true);
+        occ.set(x, nave.min_z - 2, CellKind::CathedralButtress, true);
+        occ.set(x, nave.max_z + 1, CellKind::CathedralButtress, true);
+        occ.set(x, nave.max_z + 2, CellKind::CathedralButtress, true);
+    }
+    occ.set(
+        choir.min_x + 2,
+        nave.min_z - 1,
+        CellKind::CathedralButtress,
+        true,
+    );
+    occ.set(
+        choir.min_x + 2,
+        nave.min_z - 2,
+        CellKind::CathedralButtress,
+        true,
+    );
+    occ.set(
+        choir.min_x + 2,
+        nave.max_z + 1,
+        CellKind::CathedralButtress,
+        true,
+    );
+    occ.set(
+        choir.min_x + 2,
+        nave.max_z + 2,
+        CellKind::CathedralButtress,
+        true,
+    );
 }
 
 fn paint_mountain_fortress(occ: &mut Occupancy, yard: Rect, scenes: &mut Vec<Scene>) {
@@ -1080,7 +1127,7 @@ fn find_site(
             if town.inflate(8).intersects(rect) || keep_out.intersects(rect) {
                 continue;
             }
-            if !site_ok(occ, grid, rect, if prefer_high { 10 } else { 6 }) {
+            if !site_ok(occ, grid, rect, 10) {
                 continue;
             }
             let mean = grid.mean(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
@@ -1236,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn round7_camps_mills_and_hero_are_detailed() {
+    fn round8_cathedral_camp_and_sails() {
         let origin = town_in_cell(20_261_025, 0, 0);
         let grid = HeightGrid::synthetic_slope(
             origin.x - 360,
@@ -1259,13 +1306,21 @@ mod tests {
             let mut war = 0;
             let mut treb = 0;
             let mut ram = 0;
+            let mut palisade = 0;
+            let mut walk = 0;
+            let mut perimeter = 0;
             for z in camp.rect.min_z..=camp.rect.max_z {
                 for x in camp.rect.min_x..=camp.rect.max_x {
+                    if camp.rect.on_edge(x, z) {
+                        perimeter += 1;
+                    }
                     match plan.occ.kind(x, z) {
                         CellKind::Tent => tents += 1,
                         CellKind::WarTent => war += 1,
                         CellKind::SiegeTreb => treb += 1,
                         CellKind::SiegeRam => ram += 1,
+                        CellKind::Palisade => palisade += 1,
+                        CellKind::PalisadeWalk => walk += 1,
                         _ => {}
                     }
                 }
@@ -1274,26 +1329,69 @@ mod tests {
             assert!(war >= 8, "war tent {war}");
             assert!(treb >= 8, "trebuchet {treb}");
             assert!(ram >= 6, "ram {ram}");
+            assert!(walk >= 16, "palisade walk {walk}");
+            assert!(
+                palisade * 2 <= perimeter + 8,
+                "palisade should be staked, palisade={palisade} perimeter={perimeter}"
+            );
             assert!(
                 plan.lots
                     .iter()
                     .any(|lot| lot.kind == BuildingKind::Outpost)
             );
         }
-        if plan
+        let mills: Vec<_> = plan
             .lots
             .iter()
-            .any(|lot| lot.kind == BuildingKind::Windmill)
-        {
+            .filter(|lot| lot.kind == BuildingKind::Windmill)
+            .collect();
+        if !mills.is_empty() {
             let mut sail_n = 0;
+            let mut diagonal = 0;
             for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
                 for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
-                    if plan.occ.kind(x, z) == CellKind::WindSail {
-                        sail_n += 1;
+                    if plan.occ.kind(x, z) != CellKind::WindSail {
+                        continue;
+                    }
+                    sail_n += 1;
+                    if mills.iter().any(|lot| {
+                        let (cx, cz) = lot.rect.center();
+                        (x - cx).abs() == (z - cz).abs()
+                    }) {
+                        diagonal += 1;
                     }
                 }
             }
             assert!(sail_n >= 12, "windmill sails {sail_n}");
+            assert_eq!(diagonal, sail_n, "sails should be a diagonal X");
+        }
+        if let Some(cat) = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == SceneKind::Cathedral)
+        {
+            let mut nave = 0;
+            let mut transept = 0;
+            let mut choir = 0;
+            let mut towers = 0;
+            let mut buttress = 0;
+            for z in cat.rect.min_z..=cat.rect.max_z {
+                for x in cat.rect.min_x..=cat.rect.max_x {
+                    match plan.occ.kind(x, z) {
+                        CellKind::CathedralNave => nave += 1,
+                        CellKind::CathedralTransept => transept += 1,
+                        CellKind::CathedralChoir => choir += 1,
+                        CellKind::CathedralTower => towers += 1,
+                        CellKind::CathedralButtress => buttress += 1,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(nave >= 40, "nave {nave}");
+            assert!(transept >= 20, "transept {transept}");
+            assert!(choir >= 12, "choir {choir}");
+            assert!(towers >= 20, "towers {towers}");
+            assert!(buttress >= 8, "buttresses {buttress}");
         }
         if kinds.contains(&SceneKind::Monastery) {
             let mut arcade = 0;

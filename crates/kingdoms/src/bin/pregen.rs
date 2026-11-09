@@ -18,11 +18,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use pumpkin_data::dimension::Dimension;
-use pumpkin_kingdoms::chunk_fill::fill_volume_from_chunks;
+use pumpkin_kingdoms::chunk_fill::fill_volume_from_chunks_in;
 use pumpkin_kingdoms::height::register_world_gen;
 use pumpkin_kingdoms::marker;
 use pumpkin_kingdoms::plan::{plan_for, plan_from_cache};
-use pumpkin_kingdoms::render::{write_planner_renders, write_renders};
+use pumpkin_kingdoms::render::{overview_bounds, write_planner_renders, write_renders};
 use pumpkin_kingdoms::stamp::{MARKER_FLOOR, fill_volume};
 use pumpkin_kingdoms::town::{CELL_SIZE, nearest_town, town_in_cell};
 use pumpkin_kingdoms::watertight::check_town;
@@ -186,7 +186,7 @@ fn render_one(
     }
 
     println!("  generating real chunks through Features + decorator…");
-    let volume = fill_volume_from_chunks(&plan_a, &world_gen);
+    let volume = fill_volume_from_chunks_in(&plan_a, &world_gen, overview_bounds(&plan_a));
     if let Err(error) = write_renders(&plan_a, &volume, out_dir, stem) {
         eprintln!("chunk render failed: {error}");
         return false;
