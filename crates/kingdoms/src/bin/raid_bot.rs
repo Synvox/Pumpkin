@@ -295,6 +295,7 @@ impl Bot {
 
         let play_login_id = CLogin::to_id(CURRENT_MC_VERSION);
         let player_pos_id = CPlayerPosition::to_id(CURRENT_MC_VERSION);
+        let keep_id = CKeepAlive::to_id(CURRENT_MC_VERSION);
         let mut saw_play_login = false;
         let mut saw_initial_pos = false;
         while !(saw_play_login && saw_initial_pos) {
@@ -311,12 +312,15 @@ impl Bot {
                     println!("SELF id={}", bot.self_id);
                 }
             }
-            if saw_play_login {
+            // Keep-alives and the spawn teleport can arrive before CLogin.
+            // Dropping the teleport meant the bot never sent SPlayerLoaded,
+            // so a second client never finished joining.
+            if pkt.id == keep_id || pkt.id == player_pos_id || saw_play_login {
                 bot.handle_play_packet(&pkt).await?;
-                if pkt.id == player_pos_id {
-                    let _ = bot.send_packet(&SPlayerLoaded).await;
-                    saw_initial_pos = true;
-                }
+            }
+            if pkt.id == player_pos_id {
+                let _ = bot.send_packet(&SPlayerLoaded).await;
+                saw_initial_pos = true;
             }
         }
         Ok(bot)
