@@ -724,6 +724,7 @@ pub fn bind_citizen(
             );
         }
         VillagerRole::Builder => {
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_AXE);
             mob.get_mob_entity().add_goal(3, BuilderStubGoal::default());
             mob.get_mob_entity().add_goal(
                 4,

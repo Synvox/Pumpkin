@@ -4714,11 +4714,6 @@ mod ai_step_tests {
         let world = world(&folder);
         let mob = probe(world.clone(), Arc::new(AtomicUsize::new(0)));
         mob.mob.set_director_driven(true);
-        mob.mob
-            .living_entity
-            .entity
-            .no_physics
-            .store(true, Ordering::Relaxed);
         let skipped = (0..8)
             .map(|n| {
                 mob.mob

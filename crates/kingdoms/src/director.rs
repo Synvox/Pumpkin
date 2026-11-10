@@ -87,7 +87,11 @@ const PLAYER_ARROW_RANGE: f64 = 32.0;
 const CAPTURE_METER_RANGE: f64 = 64.0;
 const DEFAULT_WAR_CLOCK_TICKS: u32 = 2400;
 /// Quiet ticks after hold lockout so builders can repair for the new owner.
-const REPAIR_WINDOW_TICKS: u32 = 2400;
+const REPAIR_WINDOW_TICKS: u32 = 6000;
+/// Log blocks/min and restored percent after this many ticks of repair.
+const REPAIR_REPORT_TICKS: u32 = 6000;
+/// Builders spawned at the keep if none survived the flip.
+const REPAIR_BUILDERS: u8 = 3;
 const DEFAULT_WAR_CLOCK_FRONTS: usize = 1;
 const DEFAULT_WAR_CLOCK_SIZE: u16 = 24;
 const REPAIR_PERIOD: u32 = 40;
@@ -457,6 +461,12 @@ struct TownWar {
     repair_started: u32,
     repair_placed_tick: u32,
     repair_placed_this_tick: u32,
+    repair_logged_5min: bool,
+    repair_pass_planned: u32,
+    repair_pass_mismatch: u32,
+    repair_last_pct: u32,
+    repair_builders_ensured: bool,
+    tickets_are_repair: bool,
 }
 
 struct Wired {
@@ -1255,6 +1265,12 @@ impl TownWar {
             repair_started: 0,
             repair_placed_tick: 0,
             repair_placed_this_tick: 0,
+            repair_logged_5min: false,
+            repair_pass_planned: 0,
+            repair_pass_mismatch: 0,
+            repair_last_pct: 0,
+            repair_builders_ensured: false,
+            tickets_are_repair: false,
         }
     }
 
@@ -2042,8 +2058,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             .is_some_and(|w| w.raid.as_ref().is_some_and(|r| r.materialized))
     };
     let near = town_has_nearby_player(world, town_id);
+    tick_raid_warmup(world, town_id, tick);
+    let repairing = in_repair_window(town_id, tick);
+    tick_town_repair(world, town_id, tick, near);
     if materialized {
-        tick_raid_warmup(world, town_id, tick);
         if tickets_pending(town_id) || raid_still_warming(town_id, tick) {
             prewarm_town_fields(town_id);
             return;
@@ -2052,8 +2070,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         tick_abstract_raid(world, town_id, tick);
         // Tickets only for a scheduled raid. Warming idle towns on approach
         // was the 200–470 ms first-contact hitch (209 tickets at join).
-        tick_raid_warmup(world, town_id, tick);
-        if tickets_pending(town_id) {
+        if tickets_pending(town_id) && !repairing {
             prewarm_town_fields(town_id);
             return;
         }
@@ -2178,7 +2195,6 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
 
     let mut spawn_soldiers = false;
     let mut pending_events = Vec::new();
-    let mut pending_release: Vec<Vector2<i32>> = Vec::new();
     let mut pending_despawn: Vec<i32> = Vec::new();
     let mut dump_plots = false;
     let mut should_close_gates = false;
@@ -2353,7 +2369,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     pending_despawn.push(shot.part);
                 }
                 war.alarm = hostiles_in_town;
-                pending_release.append(&mut war.ticketed);
+                begin_repair(war, tick, false);
                 pending_events.push(CombatEvent {
                     tick,
                     kind: CombatKind::Victory,
@@ -2372,10 +2388,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             dir.push_event(event);
         }
     }
-    if !pending_release.is_empty() || !pending_despawn.is_empty() {
+    if !pending_despawn.is_empty() {
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
-            war.pending_unticket.append(&mut pending_release);
             war.pending_despawn.append(&mut pending_despawn);
         }
     }
@@ -2445,7 +2460,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         wall_posts,
         ladders_placed,
         inner_gate_dest,
-        well_dest,
+        _well_dest,
         siege_gates,
         capturing,
     ) = {
@@ -2517,13 +2532,22 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             war.occupy_hold > 0,
         )
     };
-    if !amortizing {
-        maybe_refill_repair(world, town_id, tick, alarm);
-        place_queued_repairs(world, town_id, tick);
-    }
     let work_dests = standing_dests(&work_posts, keep_dest.y, 0);
     let home_dests = standing_dests(&home_posts, keep_dest.y, 0);
     let wall_dests = standing_dests(&wall_posts, keep_dest.y, WALL_WALK_LIFT);
+    let gate_dests: Vec<PostTarget> = siege_gates
+        .iter()
+        .map(|g| PostTarget {
+            x: g.x,
+            y: keep_dest.y,
+            z: g.z,
+        })
+        .collect();
+    let bailey_dest = PostTarget {
+        x: (keep_dest.x + inner_gate_dest.x) / 2,
+        y: keep_dest.y,
+        z: (keep_dest.z + inner_gate_dest.z) / 2,
+    };
     let player_xz = world_player_xz(world);
     arm_militia_tick(&snapshots, alarm);
     shout_named_npcs(world, town_id, tick, alarm, inner_gate_dest);
@@ -2733,7 +2757,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     schedule_civilian_ready(id, world_time, &work_dests, &home_dests, keep_dest)
                 }
                 (Faction::Kingdom(_), Some(VillagerRole::Guard)) => {
-                    patrol_ready(id, tick, &wall_dests, keep_dest)
+                    peacetime_guard_dest(id, tick, &wall_dests, &gate_dests, keep_dest)
                 }
                 (Faction::Kingdom(_), _) => keep_dest,
                 (Faction::Neutral, _) => continue,
@@ -2766,7 +2790,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 (
                     schedule_civilian_ready(id, world_time, &work_dests, &home_dests, keep_dest),
                     pick_ready_dest(id, &home_dests, keep_dest),
-                    patrol_ready(id, tick, &wall_dests, keep_dest),
+                    peacetime_guard_dest(id, tick, &wall_dests, &gate_dests, keep_dest),
                 )
             } else {
                 (keep_dest, keep_dest, keep_dest)
@@ -2818,7 +2842,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             alarm,
             capturing,
             inner_gate_dest,
-            well_dest,
+            bailey_dest,
             keep_dest,
             civilian_duty(base, id),
         );
@@ -3620,8 +3644,12 @@ fn queue_raid_warmup(town_id: &str) {
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
             if !war.pending_tickets.is_empty() || !war.ticketed.is_empty() {
-                return;
+                if !war.tickets_are_repair {
+                    return;
+                }
+                war.pending_unticket.append(&mut war.ticketed);
             }
+            war.tickets_are_repair = false;
             war.pending_tickets = chunks;
             war.ticket_cursor = 0;
             war.ticketed.clear();
@@ -3644,6 +3672,151 @@ fn tickets_pending(town_id: &str) -> bool {
     dir.towns
         .get(town_id)
         .is_some_and(|w| w.ticket_cursor < w.pending_tickets.len())
+}
+
+fn in_repair_window(town_id: &str, tick: u32) -> bool {
+    let dir = lock();
+    dir.towns
+        .get(town_id)
+        .is_some_and(|w| w.repair_until > 0 && tick >= w.hold_lockout && tick < w.repair_until)
+}
+
+fn repair_chunk_tickets(scene: &dyn TownScene, threatened: Option<ScenePost>) -> Vec<Vector2<i32>> {
+    let cols = repair::repair_columns(scene, threatened.map(|p| (p.x, p.z)));
+    let mut set = HashSet::new();
+    for (x, z, _) in cols {
+        set.insert(Vector2::new(x >> 4, z >> 4));
+    }
+    let keep = scene.keep();
+    set.insert(Vector2::new(keep.x >> 4, keep.z >> 4));
+    let flag = scene.flag();
+    set.insert(Vector2::new(flag.x >> 4, flag.z >> 4));
+    set.into_iter().collect()
+}
+
+fn begin_repair(war: &mut TownWar, tick: u32, lockout: bool) {
+    war.hold_lockout = if lockout {
+        tick.saturating_add(HOLD_LOCKOUT_TICKS)
+    } else {
+        tick
+    };
+    war.repair_until = war.hold_lockout.saturating_add(REPAIR_WINDOW_TICKS);
+    war.repair_started = war.hold_lockout;
+    war.repair_logged_5min = false;
+    war.repair_scan_cursor = 0;
+    war.repair_pass_planned = 0;
+    war.repair_pass_mismatch = 0;
+    war.builders_scanned = false;
+    war.repair_builders_ensured = false;
+    for job in war.punch_repair.drain(..) {
+        if war.repair_jobs.len() < REPAIR_QUEUE_CAP {
+            war.repair_jobs.push_back(job);
+        }
+    }
+    let chunks = repair_chunk_tickets(&war.scene, war.threatened);
+    war.pending_unticket.append(&mut war.ticketed);
+    war.pending_tickets = chunks;
+    war.ticket_cursor = 0;
+    war.tickets_are_repair = true;
+    tracing::info!(
+        town = war.info_id.as_str(),
+        until = war.repair_until,
+        tickets = war.pending_tickets.len(),
+        queued = war.repair_jobs.len(),
+        "kingdoms repair window opened"
+    );
+}
+
+fn tick_town_repair(world: &Arc<World>, town_id: &str, tick: u32, near: bool) {
+    maybe_refill_repair(world, town_id, tick, false);
+    if !near {
+        place_queued_repairs(world, town_id, tick);
+    }
+    if near {
+        ensure_repair_builders(world, town_id);
+    }
+    log_repair_progress(town_id, tick);
+}
+
+fn ensure_repair_builders(world: &Arc<World>, town_id: &str) {
+    remember_builders(world, town_id);
+    let (keep, kingdom) = {
+        let mut dir = lock();
+        let tick = dir.tick;
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        if war.repair_until == 0 || tick < war.hold_lockout || tick >= war.repair_until {
+            return;
+        }
+        if war.repair_builders_ensured || !war.builders.is_empty() {
+            return;
+        }
+        war.repair_builders_ensured = true;
+        (war.scene.keep(), war.kingdom.clone())
+    };
+    let y = standing_y(world, keep);
+    for i in 0..REPAIR_BUILDERS {
+        let pos = Vector3::new(
+            f64::from(keep.x) + 0.5 + f64::from(i),
+            f64::from(y),
+            f64::from(keep.z) + 0.5,
+        );
+        let _ = spawn_citizen(world, town_id, &kingdom, VillagerRole::Builder, false, pos);
+    }
+}
+
+fn repair_match_pct(planned: u32, mismatched: u32) -> u32 {
+    100u32
+        .saturating_mul(planned.saturating_sub(mismatched))
+        .checked_div(planned)
+        .unwrap_or(100)
+}
+
+fn repair_pct(war: &TownWar) -> u32 {
+    if war.repair_pass_planned == 0 {
+        return war.repair_last_pct;
+    }
+    repair_match_pct(war.repair_pass_planned, war.repair_pass_mismatch)
+}
+
+fn log_repair_progress(town_id: &str, tick: u32) {
+    let mut dir = lock();
+    let Some(war) = dir.towns.get_mut(town_id) else {
+        return;
+    };
+    if war.repair_started == 0 || tick < war.repair_started {
+        return;
+    }
+    let elapsed = tick.saturating_sub(war.repair_started);
+    let pct = repair_pct(war);
+    let remaining = war.repair_jobs.len() + war.repair_assigned.len();
+    let per_min = if elapsed == 0 {
+        0.0
+    } else {
+        f64::from(war.repair_placed) * 1_200.0 / f64::from(elapsed)
+    };
+    if elapsed > 0 && elapsed.is_multiple_of(400) {
+        tracing::info!(
+            town = town_id,
+            placed = war.repair_placed,
+            remaining,
+            per_min,
+            pct,
+            "kingdoms repair rate"
+        );
+    }
+    if !war.repair_logged_5min && elapsed >= REPAIR_REPORT_TICKS {
+        war.repair_logged_5min = true;
+        tracing::info!(
+            town = town_id,
+            placed = war.repair_placed,
+            remaining,
+            per_min,
+            pct,
+            "kingdoms repair 5min"
+        );
+    }
 }
 
 fn raid_still_warming(town_id: &str, tick: u32) -> bool {
@@ -4108,6 +4281,9 @@ struct RepairScanOut {
     town_id: String,
     jobs: Vec<RepairJob>,
     next_cursor: usize,
+    planned: u32,
+    mismatched: u32,
+    pass_done: bool,
 }
 
 fn repair_scan_slot() -> &'static Mutex<Option<RepairScanOut>> {
@@ -4126,11 +4302,20 @@ fn apply_finished_repair_scan() {
     let mut dir = lock();
     if let Some(war) = dir.towns.get_mut(&out.town_id) {
         war.repair_scan_cursor = out.next_cursor;
+        war.repair_pass_planned = war.repair_pass_planned.saturating_add(out.planned);
+        war.repair_pass_mismatch = war.repair_pass_mismatch.saturating_add(out.mismatched);
+        if out.pass_done && war.repair_pass_planned > 0 {
+            war.repair_last_pct =
+                repair_match_pct(war.repair_pass_planned, war.repair_pass_mismatch);
+            war.repair_pass_planned = 0;
+            war.repair_pass_mismatch = 0;
+        }
         if !out.jobs.is_empty() {
             war.repair_jobs = out.jobs.into_iter().collect();
             tracing::info!(
                 town = out.town_id.as_str(),
                 queued = war.repair_jobs.len(),
+                pct = war.repair_last_pct,
                 "kingdoms builders queued repair jobs"
             );
         }
@@ -4182,9 +4367,9 @@ fn remember_builders(world: &World, town_id: &str) {
 fn place_queued_repairs(world: &Arc<World>, town_id: &str, tick: u32) {
     let in_window = {
         let dir = lock();
-        dir.towns.get(town_id).is_some_and(|w| {
-            tick >= w.hold_lockout && tick < w.repair_until.max(w.hold_lockout.saturating_add(1))
-        })
+        dir.towns
+            .get(town_id)
+            .is_some_and(|w| w.repair_until > 0 && tick >= w.hold_lockout && tick < w.repair_until)
     };
     if !in_window {
         return;
@@ -4226,9 +4411,9 @@ fn maybe_refill_repair(world: &Arc<World>, town_id: &str, tick: u32, _alarm: boo
     apply_finished_repair_scan();
     let in_window = {
         let dir = lock();
-        dir.towns.get(town_id).is_some_and(|w| {
-            tick >= w.hold_lockout && tick < w.repair_until.max(w.hold_lockout.saturating_add(1))
-        })
+        dir.towns
+            .get(town_id)
+            .is_some_and(|w| w.repair_until > 0 && tick >= w.hold_lockout && tick < w.repair_until)
     };
     // Only the post-flip window. Idle towns used to consume the one scan
     // slot per tick and starve the town that actually needed repair.
@@ -4284,16 +4469,21 @@ fn maybe_refill_repair(world: &Arc<World>, town_id: &str, tick: u32, _alarm: boo
     let town = town_id.to_owned();
     let world = Arc::clone(world);
     REPAIR_SCAN_BUSY.store(true, Ordering::Relaxed);
+    let pass_done = start.saturating_add(REPAIR_SCAN_COLUMNS) >= cols.len();
     let scan = move || {
-        let jobs = crate::plan::cached_plan(seed, cx, cz).map_or_else(Vec::new, |plan| {
-            repair::collect_jobs(&world, &plan, &slice, REPAIR_QUEUE_CAP)
-        });
+        let result = crate::plan::cached_plan(seed, cx, cz)
+            .map_or_else(repair::RepairScan::default, |plan| {
+                repair::collect_jobs(&world, &plan, &slice, REPAIR_QUEUE_CAP)
+            });
         *repair_scan_slot()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(RepairScanOut {
             town_id: town,
-            jobs,
+            jobs: result.jobs,
             next_cursor,
+            planned: result.planned,
+            mismatched: result.mismatched,
+            pass_done,
         });
         REPAIR_SCAN_BUSY.store(false, Ordering::Relaxed);
     };
@@ -5362,8 +5552,8 @@ fn overlay_civilian_posts(
     role: Option<VillagerRole>,
     alarm: bool,
     capturing: bool,
-    inner_gate: PostTarget,
-    well: PostTarget,
+    _inner_gate: PostTarget,
+    bailey: PostTarget,
     keep: PostTarget,
     duty: CivilianDuty,
 ) -> PostTarget {
@@ -5373,9 +5563,9 @@ fn overlay_civilian_posts(
     match duty {
         CivilianDuty::Priest => keep,
         CivilianDuty::Blacksmith => dest,
-        CivilianDuty::Militia if role == Some(VillagerRole::Civilian) && alarm => inner_gate,
-        CivilianDuty::Militia if role == Some(VillagerRole::Civilian) => well,
-        CivilianDuty::Townsfolk if role == Some(VillagerRole::Civilian) && alarm => well,
+        CivilianDuty::Militia if role == Some(VillagerRole::Civilian) && alarm => keep,
+        CivilianDuty::Militia if role == Some(VillagerRole::Civilian) => bailey,
+        CivilianDuty::Townsfolk if role == Some(VillagerRole::Civilian) && alarm => keep,
         _ => dest,
     }
 }
@@ -6444,6 +6634,20 @@ fn pick_ready_dest(entity_id: i32, dests: &[PostTarget], fallback: PostTarget) -
     dests[entity_id.unsigned_abs() as usize % dests.len()]
 }
 
+/// Station every third guard at a gate; the rest walk the wall.
+fn peacetime_guard_dest(
+    entity_id: i32,
+    tick: u32,
+    wall: &[PostTarget],
+    gates: &[PostTarget],
+    fallback: PostTarget,
+) -> PostTarget {
+    if !gates.is_empty() && entity_id.unsigned_abs().is_multiple_of(3) {
+        return pick_ready_dest(entity_id, gates, fallback);
+    }
+    patrol_ready(entity_id, tick, wall, fallback)
+}
+
 fn schedule_civilian_ready(
     entity_id: i32,
     world_time: i64,
@@ -6670,10 +6874,8 @@ fn tick_town_flag(
             ids.push(shot.part);
         }
         war.pending_despawn.extend(ids);
-        war.pending_unticket.append(&mut war.ticketed);
         war.alarm = false;
-        war.hold_lockout = tick.saturating_add(HOLD_LOCKOUT_TICKS);
-        war.repair_until = tick.saturating_add(HOLD_LOCKOUT_TICKS + REPAIR_WINDOW_TICKS);
+        begin_repair(war, tick, true);
     }
     (
         update.captured,
@@ -6884,6 +7086,7 @@ fn materialize_raid(_world: &Arc<World>, town_id: &str, tick: u32) {
 fn dematerialize_raid(world: &Arc<World>, town_id: &str) {
     let (despawn, tickets) = {
         let mut dir = lock();
+        let tick = dir.tick;
         let Some(war) = dir.towns.get_mut(town_id) else {
             return;
         };
@@ -6918,9 +7121,14 @@ fn dematerialize_raid(world: &Arc<World>, town_id: &str) {
         {
             despawn.push(shot.part);
         }
-        let tickets = std::mem::take(&mut war.ticketed);
-        war.pending_tickets.clear();
-        war.ticket_cursor = 0;
+        let keep_repair = tick < war.repair_until && war.repair_until > 0;
+        let tickets = if keep_repair {
+            Vec::new()
+        } else {
+            war.pending_tickets.clear();
+            war.ticket_cursor = 0;
+            std::mem::take(&mut war.ticketed)
+        };
         war.wired.clear();
         (despawn, tickets)
     };
@@ -6990,32 +7198,28 @@ fn tick_abstract_raid(world: &Arc<World>, town_id: &str, tick: u32) {
     );
 }
 
-fn finish_abstract_victory(world: &Arc<World>, town_id: &str, tick: u32) {
-    let tickets = {
-        let mut dir = lock();
-        let Some(war) = dir.towns.get_mut(town_id) else {
-            return;
-        };
-        let Some(raid) = war.raid.take() else {
-            return;
-        };
-        war.alarm = false;
-        let tickets = std::mem::take(&mut war.ticketed);
-        dir.push_event(CombatEvent {
-            tick,
-            kind: CombatKind::Victory,
-            actor: 0,
-            other: None,
-            x: 0.0,
-            z: 0.0,
-            note: format!(
-                "{town_id} abstract raid defeated raiders=0 defenders={}",
-                raid.virt_defenders
-            ),
-        });
-        tickets
+fn finish_abstract_victory(_world: &Arc<World>, town_id: &str, tick: u32) {
+    let mut dir = lock();
+    let Some(war) = dir.towns.get_mut(town_id) else {
+        return;
     };
-    flush_tickets_off_tick(world, tickets, false);
+    let Some(raid) = war.raid.take() else {
+        return;
+    };
+    war.alarm = false;
+    begin_repair(war, tick, false);
+    dir.push_event(CombatEvent {
+        tick,
+        kind: CombatKind::Victory,
+        actor: 0,
+        other: None,
+        x: 0.0,
+        z: 0.0,
+        note: format!(
+            "{town_id} abstract raid defeated raiders=0 defenders={}",
+            raid.virt_defenders
+        ),
+    });
     tracing::info!(town = town_id, "kingdoms abstract raid defeated");
 }
 
@@ -7730,8 +7934,9 @@ mod tests {
         assert_eq!(clock_side(&alder, 1), RaidSide::Raven);
         assert_eq!(clock_side(&alder, 2), RaidSide::Raven);
         assert_eq!(clock_side(&raven, 2), RaidSide::Alder);
-        assert_eq!(REPAIR_WINDOW_TICKS, 2400);
-        assert_eq!(HOLD_LOCKOUT_TICKS + REPAIR_WINDOW_TICKS, 2800);
+        assert_eq!(REPAIR_WINDOW_TICKS, 6000);
+        assert_eq!(HOLD_LOCKOUT_TICKS + REPAIR_WINDOW_TICKS, 6400);
+        assert_eq!(REPAIR_REPORT_TICKS, 6000);
     }
 
     #[test]
@@ -8497,14 +8702,14 @@ mod tests {
     }
 
     #[test]
-    fn militia_lines_the_inner_gate_and_carries_water() {
+    fn militia_drills_the_bailey_and_flees_to_the_keep() {
         let keep = PostTarget { x: 1, y: 64, z: 1 };
         let inner = PostTarget {
             x: 10,
             y: 64,
             z: 10,
         };
-        let well = PostTarget { x: 4, y: 64, z: 4 };
+        let bailey = PostTarget { x: 5, y: 64, z: 5 };
         let home = PostTarget { x: 8, y: 64, z: 8 };
         let alarm_line = overlay_civilian_posts(
             home,
@@ -8512,33 +8717,54 @@ mod tests {
             true,
             false,
             inner,
-            well,
+            bailey,
             keep,
             CivilianDuty::Militia,
         );
-        assert_eq!((alarm_line.x, alarm_line.z), (inner.x, inner.z));
-        let water = overlay_civilian_posts(
+        assert_eq!((alarm_line.x, alarm_line.z), (keep.x, keep.z));
+        let drill = overlay_civilian_posts(
             home,
             Some(VillagerRole::Civilian),
             false,
             false,
             inner,
-            well,
+            bailey,
             keep,
             CivilianDuty::Militia,
         );
-        assert_eq!((water.x, water.z), (well.x, well.z));
+        assert_eq!((drill.x, drill.z), (bailey.x, bailey.z));
+        let townsfolk = overlay_civilian_posts(
+            home,
+            Some(VillagerRole::Civilian),
+            true,
+            false,
+            inner,
+            bailey,
+            keep,
+            CivilianDuty::Townsfolk,
+        );
+        assert_eq!((townsfolk.x, townsfolk.z), (keep.x, keep.z));
         let priest = overlay_civilian_posts(
             home,
             Some(VillagerRole::Civilian),
             true,
             false,
             inner,
-            well,
+            bailey,
             keep,
             CivilianDuty::Priest,
         );
         assert_eq!((priest.x, priest.z), (keep.x, keep.z));
+        let wall = [PostTarget { x: 20, y: 70, z: 0 }];
+        let gates = [PostTarget {
+            x: 10,
+            y: 64,
+            z: 10,
+        }];
+        let gate_guard = peacetime_guard_dest(3, 0, &wall, &gates, keep);
+        assert_eq!((gate_guard.x, gate_guard.z), (gates[0].x, gates[0].z));
+        let wall_guard = peacetime_guard_dest(1, 0, &wall, &gates, keep);
+        assert_eq!((wall_guard.x, wall_guard.z), (wall[0].x, wall[0].z));
     }
 
     #[test]

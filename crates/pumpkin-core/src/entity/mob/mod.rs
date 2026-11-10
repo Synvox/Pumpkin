@@ -146,16 +146,14 @@ pub struct MobEntity {
 }
 
 impl MobEntity {
-    /// Far `director_driven` bodies skip vanilla ticks this often (2–4).
+    /// `director_driven` bodies skip vanilla ticks this often (3 of 4).
+    /// Near-player move packets stay at 20 Hz in the entity tracker.
     pub const SPARSE_TICK_PERIOD: u32 = 4;
 
     /// True when this kingdoms raid body should skip the rest of vanilla tick.
     #[must_use]
     pub fn skip_sparse_vanilla_tick(&self) -> bool {
         if !self.is_director_driven() {
-            return false;
-        }
-        if !self.living_entity.entity.no_physics.load(Relaxed) {
             return false;
         }
         let n = self
