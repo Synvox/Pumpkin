@@ -497,7 +497,8 @@ pub fn tick_flag_hold(
     let mut occupy = occupy_hold;
     let mut retake = retake_hold;
     let hold = hold_ticks();
-    let occupy_ok = presence.attackers_on_plate >= occupy_need
+    let occupy_ok = presence.attackers_on_plate >= 1
+        && presence.attackers_near >= occupy_need
         && presence.attackers_on_plate > presence.defenders_on_plate;
     let retake_ok = presence.defenders_on_plate >= retake_need
         && presence.defenders_on_plate > presence.attackers_on_plate;
@@ -1055,6 +1056,27 @@ mod tests {
         }
         assert!(update.captured);
         assert_eq!(update.occupy_hold, 0);
+    }
+
+    #[test]
+    fn one_holder_on_the_plate_with_enough_nearby_captures() {
+        let owner = TownOwner::Kingdom("alder".to_owned());
+        let update = tick_flag_hold(
+            &owner,
+            FlagPresence {
+                attackers_on_plate: 1,
+                defenders_on_plate: 0,
+                attackers_near: 6,
+                defenders_near: 6,
+            },
+            HOLD_TICKS - 1,
+            0,
+            6,
+            3,
+            1,
+        );
+        assert!(update.captured);
+        assert!(!update.paused);
     }
 
     #[test]

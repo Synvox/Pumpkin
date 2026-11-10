@@ -2657,22 +2657,30 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             };
             if far_tier.should_tick(base.entity_id, tick) {
                 let dest = match faction {
-                    Faction::Pillager => overlay_flag_dest(
-                        march_dest,
-                        faction,
-                        has_tag(base, TAG_BEARER),
-                        pos.x,
-                        pos.z,
-                        keep_rect,
-                        gatehouse_rect,
-                        &siege_gates,
-                        breached,
-                        capturing,
-                        keep_dest,
-                    ),
+                    Faction::Pillager => {
+                        let dest = overlay_flag_dest(
+                            march_dest,
+                            faction,
+                            has_tag(base, TAG_BEARER),
+                            pos.x,
+                            pos.z,
+                            keep_rect,
+                            gatehouse_rect,
+                            &siege_gates,
+                            breached,
+                            capturing,
+                            keep_dest,
+                        );
+                        if dest.x == keep_dest.x && dest.z == keep_dest.z {
+                            plate_slot(base.entity_id, dest)
+                        } else {
+                            dest
+                        }
+                    }
                     _ => march_dest,
                 };
-                if amortizing {
+                let dist = (pos.x - f64::from(dest.x)).hypot(pos.z - f64::from(dest.z));
+                if amortizing || dist <= STUCK_STORM_RANGE {
                     slide_direct(base, dest);
                 } else {
                     slide_along_field(base, town_id, dest);
@@ -2798,6 +2806,14 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             capturing,
             keep_dest,
         );
+        let dest = if matches!(faction, Faction::Pillager)
+            && dest.x == keep_dest.x
+            && dest.z == keep_dest.z
+        {
+            plate_slot(id, dest)
+        } else {
+            dest
+        };
         let dest = overlay_civilian_posts(
             dest,
             role,
@@ -2860,6 +2876,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         if due {
             if amortizing
                 || (follower && dist < DIRECT_RANGE)
+                || (matches!(faction, Faction::Pillager) && dist <= STUCK_STORM_RANGE)
                 || (is_builder && repair_dest.is_some())
             {
                 slide_direct(base, dest);
@@ -5944,6 +5961,15 @@ fn dest_for(
     }
 }
 
+fn plate_slot(entity_id: i32, flag: PostTarget) -> PostTarget {
+    let i = entity_id.unsigned_abs() % 9;
+    PostTarget {
+        x: flag.x + (i % 3) as i32 - 1,
+        y: flag.y,
+        z: flag.z + (i / 3) as i32 - 1,
+    }
+}
+
 fn overlay_flag_dest(
     dest: PostTarget,
     faction: &Faction,
@@ -6251,6 +6277,11 @@ fn tick_ghosts(
                     capturing,
                     keep_dest,
                 );
+                let dest = if dest.x == keep_dest.x && dest.z == keep_dest.z {
+                    plate_slot(i as i32, dest)
+                } else {
+                    dest
+                };
                 slide_ghost(&mut ghost, dest);
             }
             count_ghost_presence(
@@ -6602,9 +6633,10 @@ fn tick_town_flag(
         }
     } else if presence.attackers_on_plate > 0 && tick.is_multiple_of(20) {
         tracing::info!(
-            "kingdoms capture blocked town={town_id} plate_r={} plate_d={} need={occupy_need} paused={}",
+            "kingdoms capture blocked town={town_id} plate_r={} plate_d={} near_r={} need={occupy_need} paused={}",
             presence.attackers_on_plate,
             presence.defenders_on_plate,
+            presence.attackers_near,
             update.paused
         );
     }
