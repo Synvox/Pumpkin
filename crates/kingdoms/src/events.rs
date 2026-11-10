@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use pumpkin_core::entity::EntityBase;
+use pumpkin_core::plugin::api::events::Cancellable;
+use pumpkin_core::plugin::api::events::block::block_break::BlockBreakEvent;
 use pumpkin_core::plugin::api::events::entity::entity_damage_by_entity::EntityDamageByEntityEvent;
 use pumpkin_core::plugin::api::events::entity::entity_death::EntityDeathEvent;
 use pumpkin_core::plugin::api::events::player::player_interact_event::{
@@ -96,6 +99,16 @@ pub fn register(server: &Server) {
         Arc::new(TypedEventHandler {
             handler: Arc::new(InteractHandler),
             priority: EventPriority::Normal,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(BreakHandler),
+            priority: EventPriority::High,
             blocking: true,
             source: Some("kingdoms".to_owned()),
             _phantom: std::marker::PhantomData,
@@ -231,6 +244,15 @@ impl EventHandler<PlayerInteractEvent> for InteractHandler {
         event: &'a mut PlayerInteractEvent,
     ) -> PluginFuture<'a, ()> {
         Box::pin(async move {
+            if event.action.is_left_click()
+                && let Some(pos) = event.clicked_pos
+            {
+                let world = event.player.get_entity().world.load();
+                if director::is_protected_flag_column(&world, pos.0.x, pos.0.z) {
+                    event.set_cancelled(true);
+                    return;
+                }
+            }
             if event.action.is_right_click() {
                 let held = event.player.inventory.held_item();
                 if held.item.id == Item::GOAT_HORN.id
@@ -254,6 +276,27 @@ impl EventHandler<PlayerInteractEvent> for InteractHandler {
                     &pumpkin_util::text::TextComponent::text(msg)
                         .color_named(pumpkin_util::text::color::NamedColor::Gold),
                 );
+            }
+        })
+    }
+}
+
+struct BreakHandler;
+
+impl EventHandler<BlockBreakEvent> for BreakHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        _server: &'a Arc<Server>,
+        event: &'a mut BlockBreakEvent,
+    ) -> PluginFuture<'a, ()> {
+        Box::pin(async move {
+            let pos = event.block_position;
+            let world = event.player.as_ref().map(|p| p.get_entity().world.load());
+            let Some(world) = world else {
+                return;
+            };
+            if director::is_protected_flag_column(&world, pos.0.x, pos.0.z) {
+                event.set_cancelled(true);
             }
         })
     }

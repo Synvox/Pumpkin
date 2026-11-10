@@ -125,6 +125,8 @@ pub struct CastlePlan {
     pub capital: bool,
     /// Palace mass inside the inner bailey (capital only).
     pub palace: Rect,
+    /// Flag plinth in the inner bailey (never the gatehouse).
+    pub flag: (i32, i32),
 }
 
 impl CastlePlan {
@@ -325,6 +327,17 @@ pub fn paint_castle(
     paint_moat(occ, grid, &outer_ring.verts, gate_pt, gate_dir);
 
     let towers = tower_specs.iter().map(|t| t.bounds()).collect();
+    let flag = site_flag_plinth(
+        occ,
+        inner,
+        &inner_ring.verts,
+        keep,
+        hall,
+        chapel,
+        kitchen,
+        gatehouse,
+        palace,
+    );
 
     CastlePlan {
         bounds,
@@ -346,7 +359,123 @@ pub fn paint_castle(
         keep_masses,
         capital,
         palace,
+        flag,
     }
+}
+
+fn site_flag_plinth(
+    occ: &mut Occupancy,
+    inner: Rect,
+    inner_ring: &[(i32, i32)],
+    keep: Rect,
+    hall: Rect,
+    chapel: Rect,
+    kitchen: Rect,
+    gatehouse: Rect,
+    palace: Rect,
+) -> (i32, i32) {
+    let (cx, cz) = inner.center();
+    let blocked = |x: i32, z: i32| {
+        keep.contains(x, z)
+            || hall.contains(x, z)
+            || chapel.contains(x, z)
+            || kitchen.contains(x, z)
+            || gatehouse.contains(x, z)
+            || palace.contains(x, z)
+            || matches!(
+                occ.kind(x, z),
+                CellKind::CastleKeep
+                    | CellKind::CastleHall
+                    | CellKind::CastleChapel
+                    | CellKind::CastleKitchen
+                    | CellKind::CastleGate
+                    | CellKind::CastleBarbican
+                    | CellKind::CastleTower
+                    | CellKind::CastleWall
+                    | CellKind::CastleInnerWall
+            )
+    };
+    let in_ward = |x: i32, z: i32| point_in_poly(x, z, inner_ring) && !gatehouse.contains(x, z);
+    let open = |x: i32, z: i32| {
+        in_ward(x, z)
+            && !blocked(x, z)
+            && matches!(
+                occ.kind(x, z),
+                CellKind::CastleCourt | CellKind::Green | CellKind::Plaza | CellKind::Empty
+            )
+    };
+    let ring_open = |x: i32, z: i32| {
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if !open(x + dx, z + dz) {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+    let mut ring = None;
+    let mut ring_d = i32::MAX;
+    let mut single = None;
+    let mut single_d = i32::MAX;
+    for z in inner.min_z..=inner.max_z {
+        for x in inner.min_x..=inner.max_x {
+            if !open(x, z) {
+                continue;
+            }
+            let d = (x - cx).abs() + (z - cz).abs();
+            if d < single_d {
+                single_d = d;
+                single = Some((x, z));
+            }
+            if ring_open(x, z) && d < ring_d {
+                ring_d = d;
+                ring = Some((x, z));
+            }
+        }
+    }
+    let flag = ring.or(single).unwrap_or_else(|| {
+        let mut found = (cx, cz);
+        let mut found_d = i32::MAX;
+        for z in occ.bounds.min_z..=occ.bounds.max_z {
+            for x in occ.bounds.min_x..=occ.bounds.max_x {
+                if gatehouse.contains(x, z) {
+                    continue;
+                }
+                if !matches!(occ.kind(x, z), CellKind::CastleCourt | CellKind::Green) {
+                    continue;
+                }
+                let d = (x - cx).abs() + (z - cz).abs();
+                let inner_bonus = if inner.contains(x, z) { 0 } else { 1_000 };
+                let score = d + inner_bonus;
+                if score < found_d {
+                    found_d = score;
+                    found = (x, z);
+                }
+            }
+        }
+        found
+    });
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let x = flag.0 + dx;
+            let z = flag.1 + dz;
+            if !gatehouse.contains(x, z)
+                && matches!(
+                    occ.kind(x, z),
+                    CellKind::CastleCourt
+                        | CellKind::Green
+                        | CellKind::Plaza
+                        | CellKind::Empty
+                        | CellKind::FlagPlinth
+                )
+            {
+                occ.set(x, z, CellKind::FlagPlinth, true);
+            }
+        }
+    }
+    occ.set(flag.0, flag.1, CellKind::FlagPlinth, true);
+    flag
 }
 
 fn pick_archetype(grid: &HeightGrid, bounds: Rect, rng: &mut TownRng) -> CastleArchetype {

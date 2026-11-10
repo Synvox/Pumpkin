@@ -95,6 +95,9 @@ pub fn collect_jobs(
         if jobs.len() >= cap {
             break;
         }
+        if crate::siege::is_flag_column(plan.castle.flag, x, z) {
+            continue;
+        }
         let planned = crate::stamp::planned_column(plan, x, z);
         for block in planned {
             if jobs.len() >= cap {

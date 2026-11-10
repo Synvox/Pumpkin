@@ -1,9 +1,10 @@
 //! Siege jobs, gate close/breach, and town ownership.
 //!
-//! Capture is a keep-courtyard hold: raiders with no defenders inside the
-//! inner bailey for [`HOLD_TICKS`] flip the town to the pillager faction.
-//! Villagers can retake the same way. Ownership is a JSON file in the world
-//! folder so it survives restarts.
+//! Capture is a flag-plate hold: attackers standing on the keep plinth with
+//! no defenders within [`FLAG_PAUSE_RANGE`] for [`HOLD_TICKS`] flip the town.
+//! A defender on or near the plate pauses the clock; an empty plate decays
+//! progress. Villagers reclaim the same way. Ownership is a JSON file in the
+//! world folder so it survives restarts.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,8 +20,12 @@ use crate::geom::{Dir, Rect};
 use crate::info::GateInfo;
 use std::sync::Arc;
 
-/// Ticks raiders (or villagers) must hold the keep courtyard uncontested.
+/// Ticks raiders (or villagers) must hold the flag plate uncontested.
 pub const HOLD_TICKS: u32 = 200;
+/// Standing on the 3×3 plate ring (blocks from the mast).
+pub const FLAG_PLATE_RANGE: f64 = 2.25;
+/// Defenders this close pause the clock without occupying the plate.
+pub const FLAG_PAUSE_RANGE: f64 = 4.0;
 /// Extra Y so ladder crews and archers stand on the wall walk, not the dirt.
 pub const WALL_WALK_LIFT: i32 = 6;
 /// Cheap place/break: skip neighbour shape, added, and drop callbacks.
@@ -337,17 +342,82 @@ pub fn save_state_async(path: PathBuf, state: SavedState) {
     }
 }
 
-/// Attackers needed in the courtyard: at least 8, or 10% of the surviving force.
+/// Attackers needed on the plate: at least 3, or 5% of the surviving force.
 #[must_use]
 pub const fn capture_need(surviving: u32) -> u32 {
-    let tenth = surviving.div_ceil(10);
-    if tenth < 8 { 8 } else { tenth }
+    let pct = surviving.div_ceil(20);
+    if pct < 3 { 3 } else { pct }
+}
+
+/// Hold length. `KINGDOMS_HOLD_TICKS` overrides [`HOLD_TICKS`] when set and > 0.
+#[must_use]
+pub fn hold_ticks() -> u32 {
+    std::env::var("KINGDOMS_HOLD_TICKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(HOLD_TICKS)
+}
+
+/// Who is standing on the plate versus merely nearby.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlagPresence {
+    pub attackers_on_plate: u32,
+    pub defenders_on_plate: u32,
+    pub attackers_near: u32,
+    pub defenders_near: u32,
+}
+
+impl FlagPresence {
+    /// Treat both sides as on-plate counts (abstract fronts, simple tests).
+    #[must_use]
+    pub const fn stacked(attackers: u32, defenders: u32) -> Self {
+        Self {
+            attackers_on_plate: attackers,
+            defenders_on_plate: defenders,
+            attackers_near: attackers,
+            defenders_near: defenders,
+        }
+    }
+}
+
+/// Horizontal distance from the mast column centre.
+#[must_use]
+pub fn flag_dist(flag: (i32, i32), x: f64, z: f64) -> f64 {
+    (x - f64::from(flag.0) - 0.5).hypot(z - f64::from(flag.1) - 0.5)
+}
+
+/// Standing on the pressure-plate ring.
+#[must_use]
+pub fn on_flag_plate(flag: (i32, i32), x: f64, z: f64) -> bool {
+    flag_dist(flag, x, z) <= FLAG_PLATE_RANGE
+}
+
+/// Close enough to pause a capture (includes the plate).
+#[must_use]
+pub fn near_flag(flag: (i32, i32), x: f64, z: f64) -> bool {
+    flag_dist(flag, x, z) <= FLAG_PAUSE_RANGE
+}
+
+/// The 3×3 plinth, mast, and plate columns.
+#[must_use]
+pub fn is_flag_column(flag: (i32, i32), x: i32, z: i32) -> bool {
+    (x - flag.0).abs() <= 1 && (z - flag.1).abs() <= 1
+}
+
+/// Banner colour for the current owner.
+#[must_use]
+pub fn owner_banner(owner: &TownOwner) -> &'static Block {
+    match owner {
+        TownOwner::Kingdom(name) if name == "raven" => &Block::BLUE_BANNER,
+        TownOwner::Pillager => &Block::BLACK_BANNER,
+        TownOwner::Kingdom(_) => &Block::GREEN_BANNER,
+    }
 }
 
 /// Advance a courtyard hold. Returns the new hold counter and a flip, if any.
 ///
-/// Attackers must meet [`capture_need`] in the keep with defenders there wiped
-/// out or routed (`defenders_in_keep == 0`).
+/// Attackers must meet [`capture_need`] on the plate with no defenders nearby.
 #[must_use]
 pub fn tick_hold(
     current: &TownOwner,
@@ -382,51 +452,105 @@ pub fn tick_hold_n(
     retake_need: u32,
     delta: u32,
 ) -> HoldUpdate {
+    tick_flag_hold(
+        current,
+        FlagPresence::stacked(raiders_in_keep, defenders_in_keep),
+        occupy_hold,
+        retake_hold,
+        occupy_need,
+        retake_need,
+        delta,
+    )
+}
+
+/// Plate-aware hold: nearby defenders pause; an empty plate decays.
+#[must_use]
+pub fn tick_flag_hold(
+    current: &TownOwner,
+    presence: FlagPresence,
+    occupy_hold: u32,
+    retake_hold: u32,
+    occupy_need: u32,
+    retake_need: u32,
+    delta: u32,
+) -> HoldUpdate {
     let mut occupy = occupy_hold;
     let mut retake = retake_hold;
-    if raiders_in_keep >= occupy_need && defenders_in_keep == 0 {
+    let hold = hold_ticks();
+    let occupy_ok = presence.attackers_on_plate >= occupy_need && presence.defenders_near == 0;
+    let retake_ok = presence.defenders_on_plate >= retake_need && presence.attackers_near == 0;
+    let contested = (presence.attackers_on_plate > 0 && presence.defenders_near > 0)
+        || (presence.defenders_on_plate > 0 && presence.attackers_near > 0);
+    if occupy_ok {
         occupy = occupy.saturating_add(delta);
         retake = 0;
-        // Kingdom armies (and pillagers) both flip a town by holding the keep.
+        // Kingdom armies (and pillagers) both flip a town by holding the flag.
         // Skipping pillager-owned towns here left abstract KvK / retake fronts
         // stuck at occupy_hold >> HOLD_TICKS.
-        if occupy >= HOLD_TICKS {
+        if occupy >= hold {
             return HoldUpdate {
                 occupy_hold: 0,
                 retake_hold: 0,
                 captured: true,
                 retaken: false,
+                paused: false,
             };
         }
-    } else if defenders_in_keep >= retake_need && raiders_in_keep == 0 {
+        return HoldUpdate {
+            occupy_hold: occupy,
+            retake_hold: retake,
+            captured: false,
+            retaken: false,
+            paused: false,
+        };
+    }
+    if retake_ok {
         retake = retake.saturating_add(delta);
         occupy = 0;
-        if retake >= HOLD_TICKS && current.is_pillager() {
+        if retake >= hold && current.is_pillager() {
             return HoldUpdate {
                 occupy_hold: 0,
                 retake_hold: 0,
                 captured: false,
                 retaken: true,
+                paused: false,
             };
         }
-    } else {
-        occupy = occupy.saturating_sub(delta);
-        retake = retake.saturating_sub(delta);
+        return HoldUpdate {
+            occupy_hold: occupy,
+            retake_hold: retake,
+            captured: false,
+            retaken: false,
+            paused: false,
+        };
     }
+    if contested {
+        return HoldUpdate {
+            occupy_hold: occupy,
+            retake_hold: retake,
+            captured: false,
+            retaken: false,
+            paused: true,
+        };
+    }
+    occupy = occupy.saturating_sub(delta);
+    retake = retake.saturating_sub(delta);
     HoldUpdate {
         occupy_hold: occupy,
         retake_hold: retake,
         captured: false,
         retaken: false,
+        paused: false,
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HoldUpdate {
     pub occupy_hold: u32,
     pub retake_hold: u32,
     pub captured: bool,
     pub retaken: bool,
+    pub paused: bool,
 }
 
 /// Close the portcullis: fill air in each gate opening with iron bars.
@@ -849,11 +973,12 @@ mod tests {
     }
 
     #[test]
-    fn capture_need_is_max_of_eight_and_ten_percent() {
-        assert_eq!(capture_need(0), 8);
-        assert_eq!(capture_need(50), 8);
-        assert_eq!(capture_need(80), 8);
-        assert_eq!(capture_need(400), 40);
+    fn capture_need_is_max_of_three_and_five_percent() {
+        assert_eq!(capture_need(0), 3);
+        assert_eq!(capture_need(50), 3);
+        assert_eq!(capture_need(60), 3);
+        assert_eq!(capture_need(80), 4);
+        assert_eq!(capture_need(400), 20);
     }
 
     #[test]
@@ -861,12 +986,7 @@ mod tests {
         let owner = TownOwner::Kingdom("alder".to_owned());
         let need = capture_need(400);
         let mut hold = 0;
-        let mut update = HoldUpdate {
-            occupy_hold: 0,
-            retake_hold: 0,
-            captured: false,
-            retaken: false,
-        };
+        let mut update = HoldUpdate::default();
         for _ in 0..HOLD_TICKS {
             update = tick_hold(&owner, 4, 0, hold, 0, need, 8);
             hold = update.occupy_hold;
@@ -892,23 +1012,102 @@ mod tests {
     }
 
     #[test]
-    fn defenders_in_the_keep_block_capture() {
+    fn defenders_near_the_flag_pause_capture() {
         let owner = TownOwner::Kingdom("alder".to_owned());
-        let update = tick_hold(&owner, 40, 1, HOLD_TICKS - 1, 0, 8, 8);
+        let update = tick_flag_hold(
+            &owner,
+            FlagPresence {
+                attackers_on_plate: 40,
+                defenders_on_plate: 0,
+                attackers_near: 40,
+                defenders_near: 1,
+            },
+            HOLD_TICKS - 1,
+            0,
+            3,
+            3,
+            1,
+        );
         assert!(!update.captured);
-        assert_eq!(update.occupy_hold, HOLD_TICKS - 2);
+        assert!(update.paused);
+        assert_eq!(update.occupy_hold, HOLD_TICKS - 1);
+    }
+
+    #[test]
+    fn hidden_defender_outside_the_radius_does_not_block() {
+        let owner = TownOwner::Kingdom("alder".to_owned());
+        let mut hold = 0;
+        let mut update = HoldUpdate::default();
+        for _ in 0..HOLD_TICKS {
+            update = tick_flag_hold(
+                &owner,
+                FlagPresence {
+                    attackers_on_plate: 3,
+                    defenders_on_plate: 0,
+                    attackers_near: 3,
+                    defenders_near: 0,
+                },
+                hold,
+                0,
+                3,
+                3,
+                1,
+            );
+            hold = update.occupy_hold;
+        }
+        assert!(update.captured);
+        let flag = (10, 10);
+        assert!(on_flag_plate(flag, 10.5, 10.5));
+        assert!(on_flag_plate(flag, 11.5, 11.5));
+        assert!(!on_flag_plate(flag, 14.5, 10.5));
+        assert!(near_flag(flag, 13.5, 10.5));
+        assert!(!near_flag(flag, 16.5, 10.5));
+        assert!(is_flag_column(flag, 11, 11));
+        assert!(!is_flag_column(flag, 12, 10));
+    }
+
+    #[test]
+    fn empty_plate_decays_progress() {
+        let owner = TownOwner::Kingdom("alder".to_owned());
+        let update = tick_flag_hold(&owner, FlagPresence::default(), 40, 0, 3, 3, 1);
+        assert!(!update.captured);
+        assert!(!update.paused);
+        assert_eq!(update.occupy_hold, 39);
+    }
+
+    #[test]
+    fn completion_flips_ownership_counters() {
+        let owner = TownOwner::Kingdom("alder".to_owned());
+        let update = tick_flag_hold(
+            &owner,
+            FlagPresence::stacked(3, 0),
+            HOLD_TICKS - 1,
+            0,
+            3,
+            3,
+            1,
+        );
+        assert!(update.captured);
+        assert_eq!(update.occupy_hold, 0);
+        assert_eq!(owner_banner(&owner).id, Block::GREEN_BANNER.id);
+        assert_eq!(
+            owner_banner(&TownOwner::kingdom(&crate::faction::KingdomId::new(
+                "raven"
+            )))
+            .id,
+            Block::BLUE_BANNER.id
+        );
+        assert_eq!(
+            owner_banner(&TownOwner::Pillager).id,
+            Block::BLACK_BANNER.id
+        );
     }
 
     #[test]
     fn villagers_retake_a_pillager_town() {
         let owner = TownOwner::Pillager;
         let mut hold = 0;
-        let mut update = HoldUpdate {
-            occupy_hold: 0,
-            retake_hold: 0,
-            captured: false,
-            retaken: false,
-        };
+        let mut update = HoldUpdate::default();
         for _ in 0..HOLD_TICKS {
             update = tick_hold(&owner, 0, 8, 0, hold, 8, 8);
             hold = update.retake_hold;
@@ -921,12 +1120,7 @@ mod tests {
     fn kingdom_army_can_occupy_a_pillager_town() {
         let owner = TownOwner::Pillager;
         let mut hold = 0;
-        let mut update = HoldUpdate {
-            occupy_hold: 0,
-            retake_hold: 0,
-            captured: false,
-            retaken: false,
-        };
+        let mut update = HoldUpdate::default();
         for _ in 0..HOLD_TICKS {
             update = tick_hold(&owner, 8, 0, hold, 0, 8, 8);
             hold = update.occupy_hold;

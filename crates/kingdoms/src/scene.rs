@@ -74,6 +74,7 @@ pub trait TownScene {
     fn kingdom(&self) -> KingdomId;
     fn bounds(&self) -> Rect;
     fn keep(&self) -> ScenePost;
+    fn flag(&self) -> ScenePost;
     fn capture_point(&self) -> ScenePost;
     fn gates(&self) -> &[GateInfo];
     fn guard_posts(&self) -> &[ScenePost];
@@ -207,6 +208,11 @@ impl TownScene for TownInfoScene {
 
     fn keep(&self) -> ScenePost {
         self.keep
+    }
+
+    fn flag(&self) -> ScenePost {
+        first_role(&self.info, SpawnRole::Flag)
+            .unwrap_or_else(|| ScenePost::from_xz(self.info.castle.flag))
     }
 
     fn capture_point(&self) -> ScenePost {
@@ -375,6 +381,29 @@ mod tests {
         assert!(
             found,
             "inner bailey should have a capture cell outside the gatehouse"
+        );
+        let flag = scene.flag();
+        let castle = scene.info().castle.bounds;
+        assert!(
+            castle.contains(flag.x, flag.z),
+            "flag must sit on the castle footprint flag=({}, {}) castle=({},{}..{},{})",
+            flag.x,
+            flag.z,
+            castle.min_x,
+            castle.min_z,
+            castle.max_x,
+            castle.max_z
+        );
+        assert!(
+            !gatehouse.contains(flag.x, flag.z),
+            "flag must not sit in the gatehouse"
+        );
+        assert!(
+            scene
+                .info()
+                .spawns
+                .iter()
+                .any(|s| s.role == SpawnRole::Flag && s.x == flag.x && s.z == flag.z)
         );
     }
 }

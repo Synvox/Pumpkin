@@ -545,6 +545,11 @@ fn battle_json(b: &director::BattleState) -> Value {
         "occupy_hold": b.occupy_hold,
         "occupy_need": b.occupy_need,
         "ram_hp": b.ram_hp,
+        "flag": { "x": b.flag.0, "z": b.flag.1 },
+        "flag_status": b.flag_status,
+        "flag_paused": b.flag_paused,
+        "flag_attackers": b.flag_attackers,
+        "flag_defenders": b.flag_defenders,
     })
 }
 
@@ -576,6 +581,11 @@ fn war_json() -> Value {
             "raid_side": t.raid_side,
             "repair_until": t.repair_until,
             "live": t.live,
+            "flag": { "x": t.flag.0, "z": t.flag.1 },
+            "flag_status": t.flag_status,
+            "flag_paused": t.flag_paused,
+            "flag_attackers": t.flag_attackers,
+            "flag_defenders": t.flag_defenders,
         })).collect::<Vec<_>>(),
         "fronts": front.fronts,
         "heroes": director::all_heroes().iter().map(hero_json).collect::<Vec<_>>(),
@@ -661,6 +671,10 @@ fn webhook_name(kind: CombatKind) -> Option<&'static str> {
         CombatKind::Trebuchet => Some("trebuchet_fired"),
         CombatKind::LaddersRaised => Some("ladders_raised"),
         CombatKind::Portcullis => Some("portcullis_dropped"),
+        CombatKind::CaptureStarted => Some("capture_started"),
+        CombatKind::CaptureProgress => Some("capture_progress"),
+        CombatKind::CapturePaused => Some("capture_paused"),
+        CombatKind::FlagChanged => Some("flag_changed"),
         _ => None,
     }
 }
@@ -762,6 +776,19 @@ mod tests {
             webhook_name(CombatKind::Portcullis),
             Some("portcullis_dropped")
         );
+        assert_eq!(
+            webhook_name(CombatKind::CaptureStarted),
+            Some("capture_started")
+        );
+        assert_eq!(
+            webhook_name(CombatKind::CaptureProgress),
+            Some("capture_progress")
+        );
+        assert_eq!(
+            webhook_name(CombatKind::CapturePaused),
+            Some("capture_paused")
+        );
+        assert_eq!(webhook_name(CombatKind::FlagChanged), Some("flag_changed"));
         assert!(webhook_name(CombatKind::Kill).is_none());
     }
 

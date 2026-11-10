@@ -34,7 +34,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 12;
+pub const PLAN_CACHE_VERSION: u32 = 13;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -2845,7 +2845,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 12);
+        assert_eq!(PLAN_CACHE_VERSION, 13);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -2883,7 +2883,7 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 12;
+    const PLAN_LAYOUT_VERSION: u32 = 13;
     const PLAN_LAYOUT_HASH: u64 = 0x5ad9_6c7a_d122_81e8;
 
     #[test]
@@ -2900,6 +2900,18 @@ mod tests {
             6,
         );
         let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        assert_eq!(
+            plan.occ.kind(plan.castle.flag.0, plan.castle.flag.1),
+            crate::cells::CellKind::FlagPlinth,
+            "flag plinth must be stamped into occupancy"
+        );
+        assert!(
+            !plan
+                .castle
+                .gatehouse
+                .contains(plan.castle.flag.0, plan.castle.flag.1),
+            "flag must not sit in the gatehouse"
+        );
         let hash = plan.layout_fingerprint();
         assert_eq!(
             PLAN_CACHE_VERSION, PLAN_LAYOUT_VERSION,

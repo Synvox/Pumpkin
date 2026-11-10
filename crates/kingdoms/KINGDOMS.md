@@ -57,11 +57,11 @@ let beds: Vec<_> = info.spawns.iter().filter(|s| s.role == SpawnRole::VillagerBe
 let camp: Vec<_> = info.spawns.iter().filter(|s| s.role == SpawnRole::PillagerSpawn).collect();
 ```
 
-Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `Gate`, `PillagerSpawn`, `PillagerRally`, `SiegeRam`, `SiegeLadder`, `SiegeTreb`.
+Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `Flag`, `Gate`, `PillagerSpawn`, `PillagerRally`, `SiegeRam`, `SiegeLadder`, `SiegeTreb`.
 
 `TownInfo` stays geometry only. Capture, siege jobs, and AI live in the director (`siege.rs`). Town ownership is `kingdoms-ownership.json` in the world folder and shows up on `battle_state.owner`.
 
-A town flips only when attackers hold the inner bailey **excluding the gatehouse** (`in_capture_zone`: `castle.inner` minus `castle.gatehouse`) **and** defenders there are wiped out or routed. `castle.inner` includes the portcullis, so a wave standing at the gate does not count. The hold needs `max(8, 10% of the surviving raid)` attackers in that zone for 200 ticks (~10 s). Nearby players see a boss-bar and actionbar capture meter (`Capture 12/40 hold 80/200`). `/raid stop` and battle end (`Victory` / capture / retake) despawn leftover raid soldiers, extra defenders tagged `kingdoms:temp`, and ram display entities so a later fight does not stack bodies.
+Each castle keeps a flag plinth in the inner bailey (never the gatehouse): a 3×3 stone pedestal, oak-fence mast, owner banner, and a ring of stone pressure plates. A town flips when attackers (players of the attacking kingdom, or the raid's bot standard-bearer) stand on that plate with **no defenders within 4 blocks** for 200 ticks (~10 s, `KINGDOMS_HOLD_TICKS`). The hold needs `max(3, 5% of the surviving raid)` on the plate. A defender on the plate or within 4 blocks **pauses** the clock; an empty plate **decays** progress. Hiding in a wall or cellar does nothing. Defenders reclaim the same way. Nearby players see a boss-bar (`Flag 3/3 hold 80/200`); captains shout on start/pause/flip. `/raid stop` and battle end (`Victory` / capture / retake) despawn leftover raid soldiers, extra defenders tagged `kingdoms:temp`, and ram display entities so a later fight does not stack bodies. The plate, mast, and banner are indestructible to players, trebuchet punches, and repair.
 
 A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). It either breaches the iron-bar gate or is destroyed. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks) or their captain dies; a living captain rallies routed soldiers within 16 blocks.
 
@@ -321,24 +321,29 @@ Front-line snapshot. Does not pause the clock.
     "keep": { "x": 1268, "z": 665 },
     "gate": { "x": 1504, "z": 597 },
     "occupy_hold": 40,
-    "occupy_need": 8,
+    "occupy_need": 3,
     "defenders": 20,
     "raiders": 40,
     "raid_side": "pillager",
     "repair_until": 0,
-    "live": true
+    "live": true,
+    "flag": { "x": 1268, "z": 665 },
+    "flag_status": "capturing",
+    "flag_paused": false,
+    "flag_attackers": 4,
+    "flag_defenders": 0
   }]
 }
 ```
 
 #### `GET /state`
 
-Pauses the clock. Towns use the battle schema (`id`, `kingdom`, `owner`, `alarm`, `raid_active`, `wave`, `waves`, `defenders_alive`, `raiders_alive`, `defenders_killed`, `raiders_killed`, `threatened_gate`, `gate_breached`, `occupy_hold`, `occupy_need`, `ram_hp`) plus logged-in players and troop totals.
+Pauses the clock. Towns use the battle schema (`id`, `kingdom`, `owner`, `alarm`, `raid_active`, `wave`, `waves`, `defenders_alive`, `raiders_alive`, `defenders_killed`, `raiders_killed`, `threatened_gate`, `gate_breached`, `occupy_hold`, `occupy_need`, `ram_hp`, `flag`, `flag_status`, `flag_paused`, `flag_attackers`, `flag_defenders`) plus logged-in players and troop totals.
 
 ```json
 {
   "tick": 4800,
-  "towns": [{ "id": "20261025:0:0", "kingdom": "alder", "owner": "alder", "alarm": true, "raid_active": true, "wave": 0, "waves": 1, "defenders_alive": 20, "raiders_alive": 40, "defenders_killed": 0, "raiders_killed": 0, "threatened_gate": [1504, 597], "gate_breached": false, "occupy_hold": 0, "occupy_need": 8, "ram_hp": 80.0 }],
+  "towns": [{ "id": "20261025:0:0", "kingdom": "alder", "owner": "alder", "alarm": true, "raid_active": true, "wave": 0, "waves": 1, "defenders_alive": 20, "raiders_alive": 40, "defenders_killed": 0, "raiders_killed": 0, "threatened_gate": [1504, 597], "gate_breached": false, "occupy_hold": 0, "occupy_need": 3, "ram_hp": 80.0, "flag": { "x": 1268, "z": 665 }, "flag_status": "idle", "flag_paused": false, "flag_attackers": 0, "flag_defenders": 0 }],
   "players": [{ "name": "alder1", "uuid": "937abb5d-9fc8-61f3-9ebc-41f786b9d29c", "kingdom": "alder", "x": 1504.5, "y": 80.0, "z": 597.5 }],
   "troops": { "defenders": 20, "raiders": 40 },
   "war_clock": true
@@ -391,6 +396,10 @@ Pauses the clock. `{ "name": "Herald", "message": "The gate is down" }` → `{ "
 | `ladders_raised` | assault ladders placed on the wall | `actor` is blocks placed |
 | `ram_destroyed` | defenders wreck the ram | |
 | `rout` | a side breaks | |
+| `capture_started` | attackers on the plate begin the hold | `actor` is on-plate count |
+| `capture_progress` | hold advances (every 40 ticks) | `actor` is hold ticks, `other` is need |
+| `capture_paused` | a defender is on or near the plate | |
+| `flag_changed` | the pole banner swaps on flip | |
 | `town_captured` | occupy or retake hold completes | capture and retake share this name; `note` says who |
 | `war_clock` | the clock starts a front | |
 | `player_joined_a_kingdom` | `/kingdom join` | `{ "event", "player", "kingdom" }` only |
@@ -626,7 +635,7 @@ The 629 ms repair dump is gone from the CSV (director max 8 ms). Remaining hitch
 
 Plots: `/opt/cursor/artifacts/soak-r11-branch-summary.json`, `soak-r11-branch2-summary.json`, `soak-r11-master-summary.json`.
 
-Round 12 (this PR) captures in the inner bailey minus the gatehouse, so a wave at the portcullis does not flip a town. Distant combatants skip targeting outside 48 blocks of a player; materialized raids snapshot by entity id; item/XP orbs despawn 8/tick; engines run on one town per tick. The first 40 live ticks of a town skip engines and repair scan. `/kingdom rank set` is permission level 2+. `KINGDOMS.md` has a Sails quickstart (token, cloudflared, HMAC, director loop).
+Round 12 (this PR) captures at the keep flag plinth, not by clearing the whole inner bailey. Attackers stand on the plate; defenders within 4 blocks pause; hiders in walls do not. Distant combatants skip targeting outside 48 blocks of a player; materialized raids snapshot by entity id; item/XP orbs despawn 8/tick; engines run on one town per tick. The first 40 live ticks of a town skip engines and repair scan. `/kingdom rank set` is permission level 2+. `KINGDOMS.md` has a Sails quickstart (token, cloudflared, HMAC, director loop).
 
 10-min identical-load soak (seed `20261025`, 3 fronts, `/raid start` 120 40, `KINGDOMS_BODY_BUDGET=600`, plan cache v7) vs master `c5dbd267`:
 

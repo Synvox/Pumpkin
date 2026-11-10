@@ -19,6 +19,7 @@ pub const TAG_CITIZEN: &str = "kingdoms:citizen";
 pub const TAG_RAIDER: &str = "kingdoms:raider";
 pub const TAG_GOLEM: &str = "kingdoms:golem";
 pub const TAG_CAPTAIN: &str = "kingdoms:captain";
+pub const TAG_BEARER: &str = "kingdoms:bearer";
 pub const TAG_NPC_BLACKSMITH: &str = "kingdoms:npc:blacksmith";
 pub const TAG_NPC_PRIEST: &str = "kingdoms:npc:priest";
 pub const TAG_MILITIA: &str = "kingdoms:militia";

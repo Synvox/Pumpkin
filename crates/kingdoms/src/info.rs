@@ -75,6 +75,8 @@ pub struct CastleInfo {
     pub gatehouse: Rect,
     pub towers: Vec<Rect>,
     pub wall: Vec<[i32; 2]>,
+    /// Inner-bailey flag plinth (mast column).
+    pub flag: [i32; 2],
 }
 
 /// Why an AI layer would spawn or path to a column.
@@ -90,6 +92,8 @@ pub enum SpawnRole {
     RallyMarket,
     /// Keep courtyard rally.
     RallyKeep,
+    /// Flag plinth in the inner bailey.
+    Flag,
     /// Town or castle gate.
     Gate,
     /// Pillager tent / camp spawn.
@@ -192,6 +196,7 @@ impl TownInfo {
                 gatehouse: plan.castle.gatehouse,
                 towers: plan.castle.towers.clone(),
                 wall: castle_wall,
+                flag: [plan.castle.flag.0, plan.castle.flag.1],
             },
             roads: plan.roads.clone(),
             buildings: plan
@@ -273,6 +278,7 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
     spawns.push(at(SpawnRole::RallyMarket, plan.well.0, plan.well.1));
     let (kx, kz) = plan.castle.inner.center();
     spawns.push(at(SpawnRole::RallyKeep, kx, kz));
+    spawns.push(at(SpawnRole::Flag, plan.castle.flag.0, plan.castle.flag.1));
     for gate in &plan.gates {
         spawns.push(at(SpawnRole::Gate, gate.x, gate.z));
     }
