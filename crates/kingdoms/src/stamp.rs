@@ -390,7 +390,15 @@ pub fn stamp_column(
         CellKind::Tent => place_tent(sink, plan, x, ground, z, &palette),
         CellKind::CampCourt => place_camp_court(sink, x, ground, z, &palette),
         CellKind::Ruin => place_ruin(sink, plan, x, ground, z, &palette),
-        CellKind::WatchPost => place_watch_post(sink, x, floor, ground, z, &palette),
+        CellKind::WatchPost => {
+            if plan.scenes.iter().any(|scene| {
+                scene.kind == crate::scenes::SceneKind::HermitTower && scene.rect.contains(x, z)
+            }) {
+                place_hermit_tower(sink, plan, x, floor, ground, z, &palette);
+            } else {
+                place_watch_post(sink, x, floor, ground, z, &palette);
+            }
+        }
         CellKind::Well => place_well(sink, plan, x, ground, z, &palette),
         CellKind::TownWall => {
             if in_frontier(plan, x, z) {
@@ -557,7 +565,15 @@ pub fn stamp_column(
         CellKind::Breakwater => {
             place_breakwater(sink, x, ground, z, plan.heights.sea_level, &palette);
         }
-        CellKind::SiegeTrench => place_siege_trench(sink, x, ground, z, &palette),
+        CellKind::SiegeTrench => {
+            if plan.scenes.iter().any(|scene| {
+                scene.kind == crate::scenes::SceneKind::BanditHideout && scene.rect.contains(x, z)
+            }) {
+                place_bandit_ravine(sink, plan, x, ground, z, &palette);
+            } else {
+                place_siege_trench(sink, x, ground, z, &palette);
+            }
+        }
         CellKind::WaterWheel => place_water_wheel(sink, plan, x, ground, z, &palette),
         CellKind::MillRace => place_mill_race(sink, x, ground, z, plan.heights.sea_level, &palette),
         CellKind::Sluice => place_sluice(sink, x, ground, z, plan.heights.sea_level, &palette),
@@ -569,6 +585,8 @@ pub fn stamp_column(
         CellKind::FieldWall => place_field_wall(sink, x, ground, z, &palette),
         CellKind::FlagPlinth => place_flag_plinth(sink, plan, x, ground, z),
         CellKind::CityDitch => place_city_ditch(sink, plan, x, ground, z, &palette),
+        CellKind::StandingStone => place_standing_stone(sink, plan, x, ground, z, &palette),
+        CellKind::Gallows => place_gallows(sink, x, ground, z, &palette),
     }
     apply_column_damage(sink, plan, x, z, kind, floor, ground, &palette);
     // Harbour cranes used to punch mill walls. Restamp the mill envelope on
@@ -1687,6 +1705,90 @@ fn place_mine_spoil(
         );
     }
     clear_above(sink, x, ground + h + 1, ground + h + 2, z);
+}
+
+fn place_hermit_tower(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let rect = blob_of(plan, x, z, CellKind::WatchPost);
+    let (cx, cz) = rect.center();
+    let dx = x - cx;
+    let dz = z - cz;
+    let dist2 = dx * dx + dz * dz;
+    let top = floor + 14;
+    foundation(sink, x, floor, ground, z, palette);
+    if dist2 > 5 {
+        sink.put(x, floor, z, palette.cobble);
+        return;
+    }
+    let wall = dist2 >= 4;
+    if wall {
+        for y in ground.min(floor)..=top {
+            sink.put(x, y, z, palette.cobble);
+        }
+        if (x + z) % 2 == 0 {
+            sink.put(x, floor + 8, z, Block::GLASS_PANE.default_state);
+        }
+        sink.put(x, top + 1, z, palette.brick_wall);
+        sink.put(x, top + 2, z, Block::SPRUCE_SLAB.default_state);
+    } else {
+        clear_above(sink, x, floor + 1, top - 1, z);
+        sink.put(x, floor, z, palette.planks);
+        sink.put(x, floor + 6, z, palette.planks);
+        sink.put(x, top, z, palette.planks);
+        if x == cx && z == cz {
+            sink.put(x, floor + 1, z, Block::LADDER.default_state);
+            sink.put(x, floor + 7, z, Block::LADDER.default_state);
+            sink.put(x, top + 1, z, Block::LANTERN.default_state);
+        } else if dx == 1 && dz == 0 {
+            sink.put(x, floor + 2, z, Block::RED_BED.default_state);
+        } else if dx == -1 && dz == 0 {
+            sink.put(x, floor + 8, z, Block::BOOKSHELF.default_state);
+        }
+    }
+}
+
+fn place_standing_stone(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let h =
+        4 + ((x.wrapping_mul(5) + z.wrapping_mul(9) + plan.seed as i32).unsigned_abs() % 3) as i32;
+    for y in ground..=ground + h {
+        sink.put(
+            x,
+            y,
+            z,
+            if y == ground {
+                palette.cobble
+            } else if (x + z + y) % 2 == 0 {
+                palette.andesite
+            } else {
+                Block::STONE.default_state
+            },
+        );
+    }
+}
+
+fn place_gallows(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+    for y in ground..=ground + 4 {
+        sink.put(x, y, z, palette.log);
+    }
+    sink.put(x, ground + 5, z, palette.log);
+    sink.put(x + 1, ground + 5, z, palette.log);
+    sink.put(x + 1, ground + 4, z, Block::IRON_CHAIN.default_state);
+    sink.put(x + 1, ground + 3, z, Block::OAK_FENCE.default_state);
+    sink.put(x, ground + 1, z, palette.cobble);
 }
 
 fn place_watch_post(
@@ -3791,38 +3893,52 @@ fn place_gold_dome(
     ground: i32,
     z: i32,
     palette: &Palette,
-    edge: bool,
+    _edge: bool,
 ) {
     let (cx, cz) = rect.center();
-    let cheb = (x - cx).abs().max((z - cz).abs());
-    let r = (rect.width().min(rect.depth()) / 2).max(2);
-    let drum = floor + 12;
-    let dome_y = drum + (r - cheb).max(0);
-    // Choir sits inside the nave, so occupancy neighbors are still cathedral
-    // mass; use the geometric ring as the drum wall.
-    let shell = edge || rect.on_edge(x, z) || cheb >= r;
-    if shell {
-        let base = ground.min(floor);
-        for y in base..=dome_y.max(drum) {
+    let dx = x - cx;
+    let dz = z - cz;
+    let dist2 = dx * dx + dz * dz;
+    // 15-wide hemisphere (radius 7) over the crossing.
+    let r = (rect.width().min(rect.depth()) / 2).clamp(6, 7);
+    let r2 = r * r;
+    let drum = floor + 10;
+    let base = ground.min(floor);
+    if dist2 > r2 {
+        for y in base..=drum {
             sink.put(x, y, z, basilica_stone(x, y, z, floor, palette));
         }
-        if !rect.is_corner(x, z) && (x + z) % 2 == 0 {
+        sink.put(x, drum + 1, z, Block::ORANGE_TERRACOTTA.default_state);
+        clear_hill_above_roof(sink, x, drum + 1, ground, z, false);
+        return;
+    }
+    let wall = dist2 >= (r - 1) * (r - 1);
+    if wall {
+        for y in base..=drum {
+            sink.put(x, y, z, basilica_stone(x, y, z, floor, palette));
+        }
+        if (x + z) % 2 == 0 {
             sink.put(
                 x,
-                floor + 6,
+                floor + 5,
                 z,
                 Block::ORANGE_STAINED_GLASS_PANE.default_state,
             );
             sink.put(
                 x,
-                floor + 7,
+                floor + 6,
                 z,
                 Block::YELLOW_STAINED_GLASS_PANE.default_state,
             );
+            sink.put(
+                x,
+                floor + 7,
+                z,
+                Block::ORANGE_STAINED_GLASS_PANE.default_state,
+            );
         }
     } else {
-        let room_top = (drum - 1).max(floor + 2);
-        clear_above(sink, x, floor + 1, room_top, z);
+        clear_above(sink, x, floor + 1, drum - 1, z);
         sink.put(x, floor, z, palette.bricks);
         interior::furnish_cathedral(
             sink,
@@ -3835,17 +3951,22 @@ fn place_gold_dome(
             palette,
         );
     }
-    for y in drum..=dome_y {
-        let cap = if cheb == 0 {
-            Block::GOLD_BLOCK.default_state
-        } else if cheb <= 1 || y == dome_y {
-            Block::YELLOW_TERRACOTTA.default_state
-        } else {
-            palette.planks
-        };
-        sink.put(x, y, z, cap);
+    // Hemisphere shell: each column's height is sqrt(R^2 - d^2).
+    let h = (r2 - dist2).max(0).isqrt();
+    let dome_y = drum + h;
+    let gold = h >= r - 2 || dist2 <= 2;
+    let cap = if gold {
+        Block::GOLD_BLOCK.default_state
+    } else if h <= 1 {
+        Block::ORANGE_TERRACOTTA.default_state
+    } else {
+        Block::YELLOW_TERRACOTTA.default_state
+    };
+    sink.put(x, dome_y, z, cap);
+    if h > 0 {
+        sink.put(x, dome_y - 1, z, cap);
     }
-    if cheb == 0 {
+    if dx == 0 && dz == 0 {
         sink.put(x, dome_y + 1, z, Block::GOLD_BLOCK.default_state);
         sink.put(x, dome_y + 2, z, palette.brick_wall);
         sink.put(x, dome_y + 3, z, Block::LANTERN.default_state);
@@ -3869,10 +3990,27 @@ fn place_basilica_minaret(
     let lantern = gallery + 3;
     let cap = lantern + 2;
     let in_shaft = cheb <= 2 && manh <= 3;
-    let edge = cheb == 2 || (cheb == 1 && manh == 3);
+    let edge = cheb == 2 || cheb == 3 || (cheb == 1 && manh == 3);
+    let balcony = cheb == 4 && manh <= 7;
     let base = ground.min(floor);
-    if !in_shaft {
-        let base = ground.min(floor);
+    if balcony {
+        let post = manh == 4;
+        if post {
+            for y in base..=gallery {
+                sink.put(x, y, z, basilica_stone(x, y, z, floor, palette));
+            }
+        } else {
+            for y in base..=floor {
+                sink.put(x, y, z, palette.bricks);
+            }
+        }
+        sink.put(x, gallery, z, Block::CUT_SANDSTONE.default_state);
+        sink.put(x, gallery + 1, z, Block::SANDSTONE_SLAB.default_state);
+        sink.put(x, gallery + 2, z, palette.brick_wall);
+        clear_hill_above_roof(sink, x, gallery + 2, ground, z, false);
+        return;
+    }
+    if !in_shaft && !edge {
         for y in base..=floor {
             sink.put(x, y, z, palette.bricks);
         }
@@ -4653,6 +4791,16 @@ fn dredge_hull(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, sea: i32)
     }
 }
 
+fn hull_half_beam(along: i32, length: i32, mid: i32) -> i32 {
+    let span = (length - 1).max(1);
+    let from_end = along.min(span - along);
+    let taper = (span / 3).max(1);
+    if from_end >= taper {
+        return mid;
+    }
+    (mid * from_end * 2 / taper).clamp(0, mid)
+}
+
 fn place_ship(
     sink: &mut impl BlockSink,
     plan: &TownPlan,
@@ -4662,6 +4810,116 @@ fn place_ship(
     palette: &Palette,
 ) {
     let rect = blob_of(plan, x, z, CellKind::Ship);
+    let sea = plan.heights.sea_level;
+    dredge_hull(sink, x, ground, z, sea);
+    let y = sea.max(ground);
+    let along_x = rect.width() >= rect.depth();
+    let length = if along_x { rect.width() } else { rect.depth() };
+    let beam = if along_x { rect.depth() } else { rect.width() };
+    let along = if along_x {
+        x - rect.min_x
+    } else {
+        z - rect.min_z
+    };
+    let across = if along_x {
+        z - rect.min_z
+    } else {
+        x - rect.min_x
+    };
+    let mid = (beam - 1) / 2;
+    let from_keel = (across - mid).abs();
+    let half = hull_half_beam(along, length, mid);
+    if from_keel > half {
+        sink.put(x, y, z, Block::WATER.default_state);
+        return;
+    }
+    let bow = along <= 3;
+    let stern = along >= length - 4;
+    let rise = if along <= 1 {
+        2
+    } else {
+        i32::from(along == 2 || along >= length - 2)
+    };
+    let draft = if bow || stern { 1 } else { 2 };
+    for d in 1..=draft {
+        sink.put(
+            x,
+            y - d,
+            z,
+            if from_keel == 0 {
+                Block::DARK_OAK_LOG.default_state
+            } else {
+                Block::DARK_OAK_PLANKS.default_state
+            },
+        );
+    }
+    let gunwale = y + 1 + rise;
+    sink.put(x, y, z, Block::DARK_OAK_PLANKS.default_state);
+    sink.put(x, y + 1, z, Block::SPRUCE_PLANKS.default_state);
+    let on_rail = from_keel == half;
+    if on_rail {
+        sink.put(x, gunwale, z, Block::DARK_OAK_LOG.default_state);
+        sink.put(x, gunwale + 1, z, Block::DARK_OAK_FENCE.default_state);
+        if along % 3 == 0 {
+            sink.put(x, gunwale + 2, z, Block::IRON_CHAIN.default_state);
+        }
+    }
+    if bow && from_keel == 0 {
+        sink.put(x, gunwale + 1, z, Block::DARK_OAK_LOG.default_state);
+        sink.put(x, gunwale + 2, z, Block::DARK_OAK_FENCE.default_state);
+    }
+    if stern {
+        sink.put(x, y + 2, z, Block::DARK_OAK_PLANKS.default_state);
+        sink.put(x, y + 3, z, Block::DARK_OAK_PLANKS.default_state);
+        if on_rail {
+            sink.put(x, y + 4, z, Block::DARK_OAK_FENCE.default_state);
+        } else if (x + z) % 3 == 0 {
+            sink.put(x, y + 4, z, Block::CHEST.default_state);
+        } else {
+            sink.put(x, y + 4, z, Block::SPRUCE_SLAB.default_state);
+        }
+        if along == length - 1 && from_keel == 0 {
+            sink.put(x, y, z, Block::DARK_OAK_LOG.default_state);
+            sink.put(x, y - 1, z, Block::DARK_OAK_FENCE.default_state);
+            sink.put(x, y - 2, z, Block::DARK_OAK_FENCE.default_state);
+        }
+    }
+    let mast = along == length / 2 && from_keel == 0;
+    let yard = along == length / 2;
+    let sail = along == length / 2 + 1;
+    if mast {
+        for h in 2..=13 {
+            sink.put(x, y + h, z, Block::SPRUCE_LOG.default_state);
+        }
+        sink.put(x, y + 14, z, Block::WHITE_BANNER.default_state);
+    }
+    if yard {
+        sink.put(x, y + 9, z, Block::SPRUCE_LOG.default_state);
+        sink.put(x, y + 10, z, Block::OAK_FENCE.default_state);
+    }
+    if sail && from_keel <= 2 {
+        for h in 4..=10 {
+            sink.put(x, y + h, z, Block::WHITE_WOOL.default_state);
+        }
+    }
+    if from_keel == 0 && !mast && !stern && along % 2 == 0 {
+        sink.put(x, y + 7, z, Block::OAK_FENCE.default_state);
+        sink.put(x, y + 11, z, Block::IRON_CHAIN.default_state);
+    } else if !stern && !bow && !on_rail && (x + z) % 5 == 0 {
+        sink.put(x, y + 2, z, Block::BARREL.default_state);
+    }
+    let _ = palette;
+}
+
+fn place_fishing_boat(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let rect = blob_of(plan, x, z, CellKind::Boat);
     let (cx, cz) = rect.center();
     let sea = plan.heights.sea_level;
     dredge_hull(sink, x, ground, z, sea);
@@ -4681,113 +4939,31 @@ fn place_ship(
     };
     let mid = (beam - 1) / 2;
     let from_keel = (across - mid).abs();
-    // Pointed bow: drop the outer cells at the forward end.
-    if along <= 1 && from_keel >= (mid - along).max(0) && from_keel > 0 {
+    let half = hull_half_beam(along, length, mid.max(1));
+    if from_keel > half {
         sink.put(x, y, z, Block::WATER.default_state);
         return;
     }
-    let draft = if along <= 2 || along >= length - 3 {
-        1
-    } else {
-        2
-    };
-    for d in 1..=draft {
-        sink.put(
-            x,
-            y - d,
-            z,
-            if from_keel == 0 {
-                Block::DARK_OAK_LOG.default_state
-            } else {
-                Block::DARK_OAK_PLANKS.default_state
-            },
-        );
-    }
-    sink.put(x, y, z, Block::DARK_OAK_PLANKS.default_state);
-    let bow = along <= 3;
-    let stern = along >= length - 4;
-    let mast = along == length / 2 && from_keel == 0;
-    let yard = along == length / 2;
-    let sail = along == length / 2 + 1;
-    if rect.on_edge(x, z) {
-        sink.put(x, y + 1, z, Block::DARK_OAK_LOG.default_state);
-        if stern {
-            sink.put(x, y + 2, z, Block::DARK_OAK_PLANKS.default_state);
-            sink.put(x, y + 3, z, Block::DARK_OAK_PLANKS.default_state);
-            sink.put(x, y + 4, z, Block::DARK_OAK_FENCE.default_state);
-        } else if bow && along >= 1 {
-            sink.put(x, y + 2, z, Block::DARK_OAK_PLANKS.default_state);
-            sink.put(x, y + 3, z, Block::DARK_OAK_FENCE.default_state);
-        } else if rect.is_corner(x, z) {
-            sink.put(x, y + 2, z, Block::DARK_OAK_FENCE.default_state);
-        }
-        if from_keel == mid {
-            sink.put(x, y + 2, z, Block::DARK_OAK_FENCE.default_state);
-            if along % 3 == 0 {
-                sink.put(x, y + 3, z, Block::IRON_CHAIN.default_state);
-            }
-        }
-    } else {
-        sink.put(x, y + 1, z, Block::SPRUCE_SLAB.default_state);
-        if stern {
-            sink.put(x, y + 2, z, Block::DARK_OAK_PLANKS.default_state);
-            sink.put(x, y + 3, z, Block::DARK_OAK_PLANKS.default_state);
-            if (x + z) % 3 == 0 {
-                sink.put(x, y + 4, z, Block::CHEST.default_state);
-            }
-        } else if bow && along >= 1 {
-            sink.put(x, y + 2, z, Block::DARK_OAK_PLANKS.default_state);
-        }
-        if mast {
-            for h in 2..=12 {
-                sink.put(x, y + h, z, Block::SPRUCE_LOG.default_state);
-            }
-            sink.put(x, y + 13, z, Block::WHITE_BANNER.default_state);
-        }
-        if yard {
-            sink.put(x, y + 8, z, Block::SPRUCE_LOG.default_state);
-            sink.put(x, y + 9, z, Block::OAK_FENCE.default_state);
-        }
-        if sail && from_keel <= mid {
-            for h in 4..=7 {
-                sink.put(x, y + h, z, Block::WHITE_WOOL.default_state);
-            }
-        }
-        if from_keel == 0 && !mast && along % 2 == 0 {
-            sink.put(x, y + 6, z, Block::OAK_FENCE.default_state);
-            sink.put(x, y + 10, z, Block::IRON_CHAIN.default_state);
-        } else if !stern && !bow && (x + z) % 5 == 0 {
-            sink.put(x, y + 2, z, Block::BARREL.default_state);
-        }
-    }
-    let _ = (cx, cz, palette);
-}
-
-fn place_fishing_boat(
-    sink: &mut impl BlockSink,
-    plan: &TownPlan,
-    x: i32,
-    ground: i32,
-    z: i32,
-    palette: &Palette,
-) {
-    let rect = blob_of(plan, x, z, CellKind::Boat);
-    let (cx, cz) = rect.center();
-    let sea = plan.heights.sea_level;
-    dredge_hull(sink, x, ground, z, sea);
-    let y = sea.max(ground);
+    sink.put(x, y - 1, z, Block::SPRUCE_PLANKS.default_state);
     sink.put(x, y, z, Block::SPRUCE_PLANKS.default_state);
-    if rect.on_edge(x, z) {
+    let rail = from_keel == half;
+    if rail {
         sink.put(x, y + 1, z, Block::OAK_LOG.default_state);
-    } else if x == cx && z == cz {
-        sink.put(x, y + 1, z, Block::OAK_FENCE.default_state);
-        sink.put(x, y + 2, z, Block::WHITE_WOOL.default_state);
-        sink.put(x, y + 3, z, Block::LANTERN.default_state);
     } else {
         sink.put(x, y + 1, z, Block::SPRUCE_SLAB.default_state);
-        if (x + z) % 3 == 0 {
-            sink.put(x, y + 1, z, Block::CHEST.default_state);
+    }
+    if x == cx && z == cz {
+        for h in 2..=5 {
+            sink.put(x, y + h, z, Block::OAK_FENCE.default_state);
         }
+        sink.put(x, y + 6, z, Block::LANTERN.default_state);
+    }
+    if along == length / 2 + 1 && from_keel <= 1 {
+        for h in 3..=5 {
+            sink.put(x, y + h, z, Block::WHITE_WOOL.default_state);
+        }
+    } else if !rail && (x + z) % 3 == 0 {
+        sink.put(x, y + 1, z, Block::CHEST.default_state);
     }
     let _ = palette;
 }
@@ -4913,6 +5089,36 @@ fn place_breakwater(
     if (x + z) % 4 == 0 {
         sink.put(x, top + 2, z, palette.brick_wall);
     }
+}
+
+fn place_bandit_ravine(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let across = matches!(plan.occ.kind(x + 1, z), CellKind::SiegeTrench)
+        && matches!(plan.occ.kind(x - 1, z), CellKind::SiegeTrench);
+    let along = matches!(plan.occ.kind(x, z + 1), CellKind::SiegeTrench)
+        && matches!(plan.occ.kind(x, z - 1), CellKind::SiegeTrench);
+    let keel = across || along;
+    let depth = if keel { 5 } else { 3 };
+    let bed = ground - depth;
+    sink.put(x, bed, z, palette.andesite);
+    if keel && (x + z) % 4 == 0 {
+        sink.put(x, bed + 1, z, Block::WATER.default_state);
+    } else {
+        sink.put(x, bed + 1, z, Block::COARSE_DIRT.default_state);
+    }
+    for y in bed + 2..=ground {
+        sink.put(x, y, z, Block::AIR.default_state);
+    }
+    if !keel {
+        sink.put(x, ground - 1, z, palette.cobble);
+    }
+    clear_above(sink, x, ground + 1, ground + 6, z);
 }
 
 fn place_siege_trench(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {

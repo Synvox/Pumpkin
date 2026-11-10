@@ -350,7 +350,12 @@ fn write_scene_renders(
             | SceneKind::DocksQuarter
             | SceneKind::LumberCamp
             | SceneKind::CathedralClose
-            | SceneKind::Extramural => 6,
+            | SceneKind::Extramural
+            | SceneKind::RuinedAbbey
+            | SceneKind::BanditHideout
+            | SceneKind::HermitTower
+            | SceneKind::StoneCircle
+            | SceneKind::Gallows => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -511,9 +516,9 @@ fn write_scene_renders(
             &out_dir.join(format!("{stem}-scene-harbour-ship-close.png")),
             &render_exterior_rot(
                 volume,
-                hull.inflate(3),
+                hull.inflate(4),
                 2,
-                "Cog · dark-oak hull, spruce deck, sail",
+                "Cog · curved hull, square sail, sterncastle, rudder",
                 ship_beam_rot(hull),
             ),
         )?;
@@ -1408,6 +1413,18 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     }
     if id == Block::WATER.id {
         return [45, 82, 162];
+    }
+    if id == Block::GOLD_BLOCK.id {
+        return [252, 210, 42];
+    }
+    if id == Block::YELLOW_TERRACOTTA.id {
+        return [230, 168, 42];
+    }
+    if id == Block::ORANGE_TERRACOTTA.id {
+        return [220, 118, 36];
+    }
+    if id == Block::ORANGE_STAINED_GLASS_PANE.id {
+        return [220, 130, 40];
     }
     if id == Block::SAND.id || id == Block::SANDSTONE.id || id == Block::CUT_SANDSTONE.id {
         return [219, 207, 163];

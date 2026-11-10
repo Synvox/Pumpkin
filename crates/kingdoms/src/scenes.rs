@@ -79,6 +79,16 @@ pub enum SceneKind {
     CathedralClose,
     /// Cottages, tannery and almshouse outside the main gate.
     Extramural,
+    /// Collapsed cloister and nave between towns.
+    RuinedAbbey,
+    /// Palisade camp tucked in a carved ravine.
+    BanditHideout,
+    /// Lone round tower on a crag.
+    HermitTower,
+    /// Ring of standing stones on a green.
+    StoneCircle,
+    /// Gallows at a hinterland road junction.
+    Gallows,
 }
 
 impl SceneKind {
@@ -115,6 +125,11 @@ impl SceneKind {
             Self::LumberCamp => "Lumber camp",
             Self::CathedralClose => "Cathedral close",
             Self::Extramural => "Extramural suburb",
+            Self::RuinedAbbey => "Ruined abbey",
+            Self::BanditHideout => "Bandit hideout",
+            Self::HermitTower => "Hermit's tower",
+            Self::StoneCircle => "Stone circle",
+            Self::Gallows => "Crossroads gallows",
         }
     }
 }
@@ -275,7 +290,332 @@ pub fn place_scenes(
         &mut scenes,
     );
     paint_wind_sails(occ, lots);
+    place_wayside_pois(occ, grid, search, town, keep_out, &mut extra, &mut scenes);
     scenes
+}
+
+fn place_wayside_pois(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    place_ruined_abbey(occ, grid, search, town, keep_out, rng, scenes);
+    place_bandit_hideout(occ, grid, search, town, keep_out, rng, scenes);
+    place_hermit_tower(occ, grid, search, town, keep_out, rng, scenes);
+    place_stone_circle(occ, grid, search, town, keep_out, rng, scenes);
+    place_crossroads_gallows(occ, grid, search, town, keep_out, rng, scenes);
+}
+
+fn place_ruined_abbey(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let Some(yard) = find_site(occ, grid, search, town, keep_out, 28, 24, true, rng)
+        .or_else(|| find_site(occ, grid, search, town, keep_out, 24, 20, true, rng))
+    else {
+        return;
+    };
+    occ.fill(yard, CellKind::Green, true);
+    let nave = Rect::new(
+        yard.min_x + 4,
+        yard.min_z + 3,
+        yard.max_x - 4,
+        yard.min_z + 12,
+    );
+    occ.fill(nave, CellKind::Ruin, true);
+    let cloister = Rect::new(
+        yard.min_x + 6,
+        yard.min_z + 14,
+        yard.max_x - 6,
+        yard.max_z - 3,
+    );
+    occ.fill(cloister, CellKind::Arcade, true);
+    occ.fill(cloister.deflate(2), CellKind::Green, true);
+    let (cx, cz) = cloister.center();
+    occ.set(cx, cz, CellKind::Fountain, true);
+    for z in cloister.min_z..=cloister.max_z {
+        if (z + yard.min_x) % 5 == 0 {
+            occ.set(cloister.min_x, z, CellKind::Ruin, true);
+            occ.set(cloister.max_x, z, CellKind::Ruin, true);
+        }
+    }
+    for x in nave.min_x + 2..=nave.max_x - 2 {
+        if x % 3 == 0 {
+            occ.set(x, nave.min_z - 1, CellKind::Grave, true);
+        }
+    }
+    scenes.push(Scene {
+        kind: SceneKind::RuinedAbbey,
+        rect: yard,
+    });
+}
+
+fn place_bandit_hideout(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let Some(yard) = find_site(
+        occ,
+        grid,
+        search,
+        town,
+        keep_out.inflate(6),
+        18,
+        16,
+        false,
+        rng,
+    ) else {
+        return;
+    };
+    occ.fill(yard, CellKind::Green, true);
+    let (cx, cz) = yard.center();
+    for z in (yard.min_z + 1)..yard.max_z {
+        for x in cx - 1..=cx + 1 {
+            occ.set(x, z, CellKind::SiegeTrench, true);
+        }
+    }
+    let camp = Rect::new(yard.min_x + 1, yard.min_z + 2, cx - 2, yard.max_z - 2);
+    occ.fill(camp, CellKind::CampCourt, true);
+    for z in camp.min_z..=camp.max_z {
+        occ.set(camp.min_x, z, CellKind::Palisade, true);
+        occ.set(camp.max_x, z, CellKind::Palisade, true);
+    }
+    for x in camp.min_x..=camp.max_x {
+        occ.set(x, camp.min_z, CellKind::Palisade, true);
+        occ.set(x, camp.max_z, CellKind::Palisade, true);
+    }
+    occ.set(camp.max_x, cz, CellKind::PalisadeGate, true);
+    let tents = [
+        Rect::new(
+            camp.min_x + 2,
+            camp.min_z + 2,
+            camp.min_x + 3,
+            camp.min_z + 3,
+        ),
+        Rect::new(camp.min_x + 2, cz - 1, camp.min_x + 3, cz),
+        Rect::new(
+            camp.min_x + 2,
+            camp.max_z - 3,
+            camp.min_x + 3,
+            camp.max_z - 2,
+        ),
+    ];
+    for tent in tents {
+        occ.fill(tent, CellKind::Tent, true);
+    }
+    occ.set(camp.min_x + 2, camp.max_z - 1, CellKind::Cage, true);
+    scenes.push(Scene {
+        kind: SceneKind::BanditHideout,
+        rect: yard,
+    });
+}
+
+fn place_hermit_tower(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let Some(rect) = find_peak_site(occ, grid, search, town, keep_out, 5, 5, 2, rng) else {
+        return;
+    };
+    let (cx, cz) = rect.center();
+    for dz in -2..=2 {
+        for dx in -2..=2 {
+            if dx * dx + dz * dz > 5 {
+                continue;
+            }
+            occ.set(cx + dx, cz + dz, CellKind::WatchPost, true);
+        }
+    }
+    scenes.push(Scene {
+        kind: SceneKind::HermitTower,
+        rect,
+    });
+}
+
+fn place_stone_circle(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let Some(yard) = find_site(
+        occ,
+        grid,
+        search,
+        town,
+        keep_out.inflate(8),
+        13,
+        13,
+        false,
+        rng,
+    ) else {
+        return;
+    };
+    occ.fill(yard, CellKind::Green, true);
+    let (cx, cz) = yard.center();
+    occ.set(cx, cz, CellKind::Plaza, true);
+    for (dx, dz) in [
+        (0, -4),
+        (3, -3),
+        (4, 0),
+        (3, 3),
+        (0, 4),
+        (-3, 3),
+        (-4, 0),
+        (-3, -3),
+    ] {
+        occ.set(cx + dx, cz + dz, CellKind::StandingStone, true);
+    }
+    scenes.push(Scene {
+        kind: SceneKind::StoneCircle,
+        rect: yard,
+    });
+}
+
+fn place_crossroads_gallows(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let mut best = None;
+    let mut best_score = i32::MIN;
+    let pad = town.inflate(28);
+    let mut z = search.min_z + 8;
+    while z + 4 < search.max_z {
+        let mut x = search.min_x + 8;
+        while x + 4 < search.max_x {
+            x += 7;
+            if pad.contains(x, z) || keep_out.contains(x, z) {
+                continue;
+            }
+            if civic_nearby(occ, x, z, 4) {
+                continue;
+            }
+            if !matches!(
+                occ.kind(x, z),
+                CellKind::Road
+                    | CellKind::RoadStairN
+                    | CellKind::RoadStairS
+                    | CellKind::RoadStairE
+                    | CellKind::RoadStairW
+            ) {
+                continue;
+            }
+            let arms = Dir::ALL
+                .iter()
+                .filter(|dir| {
+                    matches!(
+                        occ.kind(x + dir.dx(), z + dir.dz()),
+                        CellKind::Road
+                            | CellKind::RoadStairN
+                            | CellKind::RoadStairS
+                            | CellKind::RoadStairE
+                            | CellKind::RoadStairW
+                            | CellKind::Bridge
+                    )
+                })
+                .count();
+            if arms < 3 {
+                continue;
+            }
+            let rect = Rect::new(x - 2, z - 2, x + 2, z + 2);
+            if !occ.bounds.contains(rect.min_x, rect.min_z)
+                || !occ.bounds.contains(rect.max_x, rect.max_z)
+            {
+                continue;
+            }
+            if !grid.rect_is_dry(rect) {
+                continue;
+            }
+            let score = arms as i32 * 20 + rng.gen_range(0, 6);
+            if score > best_score {
+                best_score = score;
+                best = Some((x, z, rect));
+            }
+        }
+        z += 7;
+    }
+    let Some((jx, jz, rect)) = best.or_else(|| {
+        find_site_near_road(occ, grid, search, town, keep_out.inflate(16), 5, 5, rng).and_then(
+            |rect| {
+                let (cx, cz) = rect.center();
+                if civic_nearby(occ, cx, cz, 4) {
+                    None
+                } else {
+                    Some((cx, cz, rect))
+                }
+            },
+        )
+    }) else {
+        return;
+    };
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            if matches!(
+                occ.kind(x, z),
+                CellKind::Empty | CellKind::Green | CellKind::Farm | CellKind::FarmEdge
+            ) {
+                occ.set(x, z, CellKind::Plaza, true);
+            }
+        }
+    }
+    occ.set(jx, jz, CellKind::Gallows, true);
+    scenes.push(Scene {
+        kind: SceneKind::Gallows,
+        rect,
+    });
+}
+
+fn civic_nearby(occ: &Occupancy, x: i32, z: i32, r: i32) -> bool {
+    for dz in -r..=r {
+        for dx in -r..=r {
+            if matches!(
+                occ.kind(x + dx, z + dz),
+                CellKind::Building
+                    | CellKind::Eave
+                    | CellKind::TownWall
+                    | CellKind::TownTower
+                    | CellKind::TownGate
+                    | CellKind::Market
+                    | CellKind::CathedralNave
+                    | CellKind::CathedralTransept
+                    | CellKind::CathedralChoir
+                    | CellKind::CathedralTower
+                    | CellKind::CastleKeep
+                    | CellKind::CastleHall
+                    | CellKind::CastleWall
+            ) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Piers, cog ships, warehouses and a lighthouse after wet cells are remapped.
@@ -5787,7 +6127,7 @@ fn paint_sandstone_basilica(occ: &mut Occupancy, yard: Rect) {
     occ.fill(nave, CellKind::CathedralNave, true);
     let (nx, nz) = nave.center();
     occ.fill(
-        Rect::new(nx - 5, nz - 5, nx + 5, nz + 5),
+        Rect::new(nx - 7, nz - 7, nx + 7, nz + 7),
         CellKind::CathedralChoir,
         true,
     );
@@ -5800,10 +6140,10 @@ fn paint_sandstone_basilica(occ: &mut Occupancy, yard: Rect) {
     occ.fill(east, CellKind::CathedralTransept, true);
     occ.fill(
         Rect::new(
-            nave.min_x - 5,
-            nave.max_z - 1,
-            nave.min_x - 1,
-            nave.max_z + 4,
+            nave.min_x - 7,
+            nave.max_z - 3,
+            nave.min_x + 1,
+            nave.max_z + 5,
         ),
         CellKind::CathedralTower,
         true,
@@ -8839,7 +9179,10 @@ mod tests {
         let (nave, choir, tower, _, fly) = cathedral_counts(&plan);
         assert!(nave >= 40, "basilica nave {nave}");
         assert!(choir >= 40, "gold-dome drum {choir}");
-        assert!((12..50).contains(&tower), "one minaret-style tower {tower}");
+        assert!(
+            (12..120).contains(&tower),
+            "one minaret-style tower {tower}"
+        );
         assert_eq!(fly, 0, "desert basilica has no flying buttresses");
     }
 
@@ -9002,5 +9345,195 @@ mod tests {
             plan.lots.len()
         );
         let _ = checked;
+    }
+
+    #[test]
+    fn round26_desert_dome_covers_the_crossing() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Sandstone);
+        let mut min_x = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut min_z = i32::MAX;
+        let mut max_z = i32::MIN;
+        let mut choir = 0;
+        for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
+            for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
+                if plan.occ.kind(x, z) != CellKind::CathedralChoir {
+                    continue;
+                }
+                choir += 1;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_z = min_z.min(z);
+                max_z = max_z.max(z);
+            }
+        }
+        let wide = (max_x - min_x + 1).min(max_z - min_z + 1);
+        assert!(choir >= 80, "dome drum choir {choir}");
+        assert!(
+            wide >= 13,
+            "dome occupancy should be 13–15 wide, got {wide}"
+        );
+    }
+
+    #[test]
+    fn round26_exploration_pois_scatter() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            6,
+        );
+        let oak = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let kinds: Vec<_> = oak.scenes.iter().map(|s| s.kind).collect();
+        for need in [
+            SceneKind::RuinedAbbey,
+            SceneKind::BanditHideout,
+            SceneKind::HermitTower,
+            SceneKind::StoneCircle,
+            SceneKind::Gallows,
+        ] {
+            assert!(kinds.contains(&need), "missing {need:?} in {kinds:?}");
+        }
+        let mut standing = 0;
+        let mut gallows = 0;
+        for z in oak.occ.bounds.min_z..=oak.occ.bounds.max_z {
+            for x in oak.occ.bounds.min_x..=oak.occ.bounds.max_x {
+                match oak.occ.kind(x, z) {
+                    CellKind::StandingStone => standing += 1,
+                    CellKind::Gallows => gallows += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(standing >= 6, "stone circle menhirs {standing}");
+        assert!(gallows >= 1, "crossroads gallows {gallows}");
+    }
+
+    #[test]
+    fn round26_cog_has_square_sail_and_sterncastle() {
+        let origin = town_in_cell(314_159, 0, 0);
+        let coast = HeightGrid::synthetic_coast(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            58,
+            origin.x + 40,
+        );
+        let plan = build_plan(314_159, origin, coast, PaletteKind::Oak);
+        let mut ship_cells = Vec::new();
+        for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
+            for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
+                if plan.occ.kind(x, z) == CellKind::Ship {
+                    ship_cells.push((x, z));
+                }
+            }
+        }
+        assert!(ship_cells.len() >= 20, "cog hull {}", ship_cells.len());
+        let volume = crate::stamp::fill_volume(&plan);
+        let sea = plan.heights.sea_level;
+        let mut wool = Vec::new();
+        let mut fence_below = 0;
+        let mut stern_deck = 0;
+        for &(x, z) in &ship_cells {
+            for y in sea - 3..=sea + 16 {
+                let Some(state) = volume.get(x, y, z) else {
+                    continue;
+                };
+                let id = pumpkin_data::Block::from_state_id(state.id).id;
+                if id == pumpkin_data::Block::WHITE_WOOL.id {
+                    wool.push((x, y, z));
+                }
+                if id == pumpkin_data::Block::DARK_OAK_FENCE.id && y <= sea {
+                    fence_below += 1;
+                }
+                if id == pumpkin_data::Block::DARK_OAK_PLANKS.id && y >= sea + 3 {
+                    stern_deck += 1;
+                }
+            }
+        }
+        let min_x = wool.iter().map(|c| c.0).min().unwrap_or(0);
+        let max_x = wool.iter().map(|c| c.0).max().unwrap_or(0);
+        let min_z = wool.iter().map(|c| c.2).min().unwrap_or(0);
+        let max_z = wool.iter().map(|c| c.2).max().unwrap_or(0);
+        let min_y = wool.iter().map(|c| c.1).min().unwrap_or(0);
+        let max_y = wool.iter().map(|c| c.1).max().unwrap_or(0);
+        let span_xz = (max_x - min_x + 1).max(max_z - min_z + 1);
+        let span_y = max_y - min_y + 1;
+        assert!(
+            span_xz >= 5 && span_y >= 6 && wool.len() >= 30,
+            "square sail {span_xz}×{span_y} n={}",
+            wool.len()
+        );
+        assert!(stern_deck >= 8, "sterncastle deck {stern_deck}");
+        assert!(fence_below >= 1, "rudder below waterline {fence_below}");
+    }
+
+    #[test]
+    fn round26_gold_dome_is_a_hemisphere() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Sandstone);
+        let volume = crate::stamp::fill_volume(&plan);
+        let mut gold = Vec::new();
+        for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
+            for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
+                if plan.occ.kind(x, z) != CellKind::CathedralChoir {
+                    continue;
+                }
+                for y in volume.min_y..volume.min_y + volume.sy {
+                    let Some(state) = volume.get(x, y, z) else {
+                        continue;
+                    };
+                    let id = pumpkin_data::Block::from_state_id(state.id).id;
+                    if id == pumpkin_data::Block::GOLD_BLOCK.id
+                        || id == pumpkin_data::Block::YELLOW_TERRACOTTA.id
+                        || id == pumpkin_data::Block::ORANGE_TERRACOTTA.id
+                    {
+                        gold.push((x, y, z));
+                    }
+                }
+            }
+        }
+        let min_x = gold.iter().map(|c| c.0).min().unwrap_or(0);
+        let max_x = gold.iter().map(|c| c.0).max().unwrap_or(0);
+        let min_z = gold.iter().map(|c| c.2).min().unwrap_or(0);
+        let max_z = gold.iter().map(|c| c.2).max().unwrap_or(0);
+        let min_y = gold.iter().map(|c| c.1).min().unwrap_or(0);
+        let max_y = gold.iter().map(|c| c.1).max().unwrap_or(0);
+        let wide = (max_x - min_x + 1).min(max_z - min_z + 1);
+        let tall = max_y - min_y + 1;
+        assert!(
+            wide >= 13 && tall >= 6 && gold.len() >= 80,
+            "dome {wide}×{wide} h={tall} n={}",
+            gold.len()
+        );
     }
 }
