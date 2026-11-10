@@ -189,7 +189,9 @@ mod tests {
     use crate::height::register_world_gen;
     use crate::plan::{build_plan, plan_for};
     use crate::portal::PregenPortal;
-    use crate::stamp::{MARKER_FLOOR, stamp_plan_in_chunk};
+    use crate::stamp::{
+        MARKER_FLOOR, is_vanilla_tree_part, keeps_planned_timber, stamp_plan_in_chunk,
+    };
     use crate::town::town_in_cell;
     use pumpkin_data::dimension::Dimension;
     use pumpkin_util::math::vector3::Vector3;
@@ -275,6 +277,86 @@ mod tests {
             "mossy well floor missing at the seam"
         );
         let _ = origin;
+    }
+
+    #[test]
+    fn generated_chunks_inside_ring_have_no_vanilla_trees() {
+        use pumpkin_data::Block;
+        let seed = Seed(20_261_025);
+        let boxed = get_world_gen(seed, Dimension::OVERWORLD, false, Vec::new(), String::new());
+        let world_gen = Arc::from(boxed);
+        register_world_gen(Arc::clone(&world_gen));
+        register_hooks(world_gen.extensions());
+        let plan = plan_for(seed.0, 0, 0, &world_gen);
+        let wall = plan.town.inflate(2);
+        let mut sample = (wall.min_x, (wall.min_z + wall.max_z) / 2);
+        'find: for z in wall.min_z - 3..=wall.max_z + 3 {
+            for x in wall.min_x - 3..=wall.min_x + 6 {
+                if matches!(
+                    plan.occ.kind(x, z),
+                    crate::cells::CellKind::Plaza
+                        | crate::cells::CellKind::TownWall
+                        | crate::cells::CellKind::CityDitch
+                ) && plan.strips_trees(x, z)
+                {
+                    sample = (x, z);
+                    break 'find;
+                }
+            }
+        }
+        let (sx, sz) = sample;
+        let cx0 = (sx >> 4) - 1;
+        let cz0 = (sz >> 4) - 1;
+        let mut leaks = Vec::new();
+        for cz in cz0..=cz0 + 2 {
+            for cx in cx0..=cx0 + 2 {
+                let generated = generate_single_chunk_with_radius(
+                    &world_gen,
+                    &PregenPortal,
+                    cx,
+                    cz,
+                    StagedChunkEnum::Features,
+                    1,
+                );
+                let proto = extract_proto(generated);
+                let min_y = i32::from(proto.bottom_y());
+                let height = i32::from(proto.height());
+                for z in cz * 16..cz * 16 + 16 {
+                    for x in cx * 16..cx * 16 + 16 {
+                        if !plan.strips_trees(x, z) {
+                            continue;
+                        }
+                        let kind = plan.occ.kind(x, z);
+                        let planned = plan.heights.height(x, z).max(plan.heights.sea_level);
+                        let garden = matches!(
+                            kind,
+                            crate::cells::CellKind::Green | crate::cells::CellKind::Orchard
+                        );
+                        if keeps_planned_timber(kind) && !garden {
+                            continue;
+                        }
+                        for y in min_y..min_y + height {
+                            if garden && y <= planned + 6 {
+                                continue;
+                            }
+                            let id = proto.get_block_state(&Vector3::new(x, y, z));
+                            let block = Block::from_state_id(id);
+                            if is_vanilla_tree_part(block.id) {
+                                leaks.push(format!("{x},{y},{z} {} kind={kind:?}", block.name));
+                                if leaks.len() >= 8 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            leaks.is_empty(),
+            "vanilla trees inside the ring: {}",
+            leaks.join("; ")
+        );
     }
 
     #[test]

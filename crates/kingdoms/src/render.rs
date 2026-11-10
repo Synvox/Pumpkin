@@ -412,6 +412,8 @@ fn write_scene_renders(
                 "Royal capital · inner and outer bailey",
             ),
         )?;
+    }
+    if plan.walled_city {
         if let Some(walk) = wall_walk_rect(plan) {
             save(
                 &out_dir.join(format!("{stem}-scene-wall-walk.png")),

@@ -218,6 +218,7 @@ fn planned_timber(kind: CellKind) -> bool {
             | CellKind::Vine
             | CellKind::Shrine
             | CellKind::FieldWall
+            | CellKind::Green
     )
 }
 

@@ -162,6 +162,21 @@ impl Palette {
         if mossy { self.mossy } else { self.cobble }
     }
 
+    /// Lower-city curtain and towers. Taiga uses cobble, desert sandstone,
+    /// plains and harbour stay stone brick.
+    #[must_use]
+    pub fn city_masonry(self, variant: u8) -> &'static BlockState {
+        match self.kind {
+            PaletteKind::Spruce => match variant % 6 {
+                0..=2 => self.cobble,
+                3 => self.mossy,
+                4 => self.andesite,
+                _ => self.bricks,
+            },
+            PaletteKind::Sandstone | PaletteKind::Oak => self.masonry(variant),
+        }
+    }
+
     /// Castle masonry, with light aging.
     #[must_use]
     pub fn masonry(self, variant: u8) -> &'static BlockState {
