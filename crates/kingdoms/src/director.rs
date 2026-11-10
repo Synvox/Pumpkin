@@ -2706,14 +2706,18 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
     }
     apply_morale(town_id, tick, &snapshots, captain_down, breached);
-    apply_capture(
-        town_id,
-        tick,
-        raiders_in_keep,
-        defenders_in_keep,
-        occupier_from_keep(&snapshots, keep_rect, &owner_faction),
-        1,
-    );
+    // Soak: castle.inner currently contains the gate, so a wave at the
+    // portcullis would capture in HOLD_TICKS and dump the live bodies.
+    if !soaking() {
+        apply_capture(
+            town_id,
+            tick,
+            raiders_in_keep,
+            defenders_in_keep,
+            occupier_from_keep(&snapshots, keep_rect, &owner_faction),
+            1,
+        );
+    }
     update_capture_meter(
         world,
         town_id,
@@ -5468,14 +5472,17 @@ fn tick_abstract_raid(world: &Arc<World>, town_id: &str, tick: u32) {
     } else {
         0
     };
-    apply_capture(
-        town_id,
-        tick,
-        raiders_in_keep,
-        defenders_in_keep,
-        occupier_from_side(side, &kingdom),
-        ABSTRACT_PERIOD,
-    );
+    // Same soak hold as the live path: abstract capture would dump the front.
+    if !soaking() {
+        apply_capture(
+            town_id,
+            tick,
+            raiders_in_keep,
+            defenders_in_keep,
+            occupier_from_side(side, &kingdom),
+            ABSTRACT_PERIOD,
+        );
+    }
 }
 
 fn finish_abstract_victory(world: &Arc<World>, town_id: &str, tick: u32) {
