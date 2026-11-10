@@ -516,6 +516,13 @@ pub fn in_courtyard(rect: Rect, x: f64, z: f64) -> bool {
     ix >= rect.min_x && ix <= rect.max_x && iz >= rect.min_z && iz <= rect.max_z
 }
 
+/// Inner bailey minus the gatehouse. `castle.inner` includes the portcullis,
+/// so a wave at the gate must not count as occupying the keep.
+#[must_use]
+pub fn in_capture_zone(inner: Rect, gatehouse: Rect, x: f64, z: f64) -> bool {
+    in_courtyard(inner, x, z) && !in_courtyard(gatehouse, x, z)
+}
+
 /// One column to try as a respawn stand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StandCandidate {
@@ -827,6 +834,18 @@ mod tests {
         let floor = |x: i32, _z: i32| if x == 40 { 64 } else { 80 };
         let (x, y, z) = pick_safe_stand(keep, court, &[other], floor, solid);
         assert_eq!((x, y, z), (40, 64, 2));
+    }
+
+    #[test]
+    fn capture_zone_excludes_the_gatehouse() {
+        let inner = crate::geom::Rect::new(0, 0, 40, 40);
+        let gatehouse = crate::geom::Rect::new(16, 0, 24, 8);
+        assert!(in_capture_zone(inner, gatehouse, 20.5, 22.5));
+        assert!(in_capture_zone(inner, gatehouse, 20.5, 40.5));
+        assert!(!in_capture_zone(inner, gatehouse, 20.5, 4.5));
+        assert!(!in_capture_zone(inner, gatehouse, 20.5, 0.5));
+        assert!(!in_capture_zone(inner, gatehouse, 100.0, 100.0));
+        assert!(!in_capture_zone(inner, gatehouse, 20.5, 41.5));
     }
 
     #[test]

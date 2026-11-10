@@ -61,7 +61,7 @@ Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `G
 
 `TownInfo` stays geometry only. Capture, siege jobs, and AI live in the director (`siege.rs`). Town ownership is `kingdoms-ownership.json` in the world folder and shows up on `battle_state.owner`.
 
-A town flips only when attackers hold the keep courtyard **and** defenders there are wiped out or routed. The hold needs `max(8, 10% of the surviving raid)` attackers in the keep for 200 ticks (~10 s). Nearby players see a boss-bar and actionbar capture meter (`Capture 12/40 hold 80/200`). `/raid stop` and battle end (`Victory` / capture / retake) despawn leftover raid soldiers, extra defenders tagged `kingdoms:temp`, and ram display entities so a later fight does not stack bodies.
+A town flips only when attackers hold the inner bailey **excluding the gatehouse** (`in_capture_zone`: `castle.inner` minus `castle.gatehouse`) **and** defenders there are wiped out or routed. `castle.inner` includes the portcullis, so a wave standing at the gate does not count. The hold needs `max(8, 10% of the surviving raid)` attackers in that zone for 200 ticks (~10 s). Nearby players see a boss-bar and actionbar capture meter (`Capture 12/40 hold 80/200`). `/raid stop` and battle end (`Victory` / capture / retake) despawn leftover raid soldiers, extra defenders tagged `kingdoms:temp`, and ram display entities so a later fight does not stack bodies.
 
 A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). It either breaches the iron-bar gate or is destroyed. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks) or their captain dies; a living captain rallies routed soldiers within 16 blocks.
 
@@ -204,6 +204,66 @@ For an external AI director (e.g. on Sails). Enable with env; bind is localhost 
 Bodies over 16 KiB return 413. More than 20 requests/second return 429. A successful bearer auth pauses the war clock for 30 s.
 
 Webhook body is JSON. Header `X-Kingdoms-Signature: sha256=<hex>` is HMAC-SHA256 of the raw body. The full request/response contract is below so a Sails war-map can be built against it.
+
+### Sails quickstart
+
+Pumpkin binds the director on localhost. Sails reaches it through a Cloudflare Tunnel. Observational `GET /war` does not pause the in-game war clock; `POST /raids` and other mutating calls do for 30 s.
+
+**Token.** Generate at least 32 characters and put the same value on both sides:
+
+```bash
+export TOKEN="$(openssl rand -hex 24)"   # 48 chars
+# pumpkin.toml world:
+KINGDOMS_HTTP=1
+KINGDOMS_HTTP_TOKEN=$TOKEN
+KINGDOMS_HTTP_BIND=127.0.0.1:8742
+KINGDOMS_HTTP_WEBHOOK=https://war.example.com/kingdoms/events
+KINGDOMS_HTTP_WEBHOOK_SECRET=$TOKEN      # optional; defaults to the bearer token
+```
+
+**Tunnel.** `cloudflared` ingress to the bind address only; do not expose 8742 on a public NIC.
+
+```yaml
+# ~/.cloudflared/config.yml
+tunnel: <tunnel-id>
+credentials-file: /home/pumpkin/.cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: kingdoms.example.com
+    service: http://127.0.0.1:8742
+  - service: http_status:404
+```
+
+Sails then calls `https://kingdoms.example.com` with `Authorization: Bearer $TOKEN`.
+
+**Webhook signing.** Every POST to `KINGDOMS_HTTP_WEBHOOK` has header `X-Kingdoms-Signature: sha256=<hex>` over the raw body bytes (HMAC-SHA256, secret = `KINGDOMS_HTTP_WEBHOOK_SECRET` or the bearer token). Verify the bytes you received; do not re-encode the JSON. Reject 401/413/429 the same way the server does (token, body > 16 KiB, > 20 req/s).
+
+```python
+import hmac, hashlib
+def check(secret: str, body: bytes, header: str) -> bool:
+    expect = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expect, header.strip().lower())
+```
+
+`kingdoms-mock-director` is the in-repo client (`GET /war`, `POST /raids`, webhook listener).
+
+**Director loop.** Poll `/war` (clock stays on), pick a quiet owned town, `POST /raids`, then wait for `town_captured` / `raid_ended` on the webhook before the next front:
+
+```bash
+BASE=https://kingdoms.example.com
+AUTH="Authorization: Bearer $TOKEN"
+# 1. front-line map
+curl -sS -H "$AUTH" "$BASE/war"
+# 2. open a front (pauses the in-game clock for 30 s)
+curl -sS -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"town":"20261025:0:0","size":40,"side":"pillager"}' "$BASE/raids"
+# 3. optional: name a marshal, shout, stop
+curl -sS -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"kingdom":"alder","name":"Sir Aldric","title":"marshal","line":"Hold the gate."}' \
+  "$BASE/heroes"
+curl -sS -H "$AUTH" -X POST "$BASE/raids/1/stop"
+```
+
+On Sails, run that in a 2–5 s loop: `GET /war` → if `fronts` is under the cap and a town has `raid_active: false`, POST a raid; on webhook `town_captured` or `gate_breached`, shout via `POST /heroes/<kingdom>/shout`. Full JSON shapes are in the contract below.
 
 ```bash
 export TOKEN=dev-token-must-be-32-chars-min

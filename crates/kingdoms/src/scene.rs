@@ -88,6 +88,7 @@ pub trait TownScene {
     fn road_approach(&self) -> Option<ScenePost>;
     fn wall(&self) -> &[[i32; 2]];
     fn keep_rect(&self) -> Rect;
+    fn gatehouse_rect(&self) -> Rect;
 
     /// Gate nearest to a world column. Used when pillagers approach.
     fn nearest_gate(&self, x: i32, z: i32) -> Option<GateInfo> {
@@ -264,6 +265,10 @@ impl TownScene for TownInfoScene {
     fn keep_rect(&self) -> Rect {
         self.info.castle.inner
     }
+
+    fn gatehouse_rect(&self) -> Rect {
+        self.info.castle.gatehouse
+    }
 }
 
 fn posts(info: &TownInfo, role: SpawnRole) -> Vec<ScenePost> {
@@ -336,5 +341,40 @@ mod tests {
         let gate = scene.gates()[0];
         let rally = scene.threatened_rally(gate.x + 40, gate.z);
         assert!(dist2(rally.x, rally.z, gate.x, gate.z) < dist2(rally.x, rally.z, keep.x, keep.z));
+    }
+
+    #[test]
+    fn capture_zone_excludes_the_gatehouse_on_a_plan() {
+        let scene = scene();
+        let inner = scene.keep_rect();
+        let gatehouse = scene.gatehouse_rect();
+        assert!(gatehouse.width() > 0 && gatehouse.depth() > 0);
+        let (gx, gz) = gatehouse.center();
+        assert!(!crate::siege::in_capture_zone(
+            inner,
+            gatehouse,
+            f64::from(gx) + 0.5,
+            f64::from(gz) + 0.5
+        ));
+        let mut found = false;
+        'search: for x in inner.min_x..=inner.max_x {
+            for z in inner.min_z..=inner.max_z {
+                if gatehouse.contains(x, z) {
+                    continue;
+                }
+                assert!(crate::siege::in_capture_zone(
+                    inner,
+                    gatehouse,
+                    f64::from(x) + 0.5,
+                    f64::from(z) + 0.5
+                ));
+                found = true;
+                break 'search;
+            }
+        }
+        assert!(
+            found,
+            "inner bailey should have a capture cell outside the gatehouse"
+        );
     }
 }

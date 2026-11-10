@@ -50,8 +50,8 @@ use crate::goals::{
 };
 use crate::info::TownInfo;
 use crate::lod::{
-    ACQUIRE_RANGE, ALARM_RANGE, CIVILIAN_SLEEP_RANGE, DEFAULT_PATH_CAP, LodTier, PathBudget,
-    SpatialBuckets,
+    ACQUIRE_RANGE, ALARM_RANGE, CIVILIAN_SLEEP_RANGE, DEFAULT_PATH_CAP, LodTier, PLAYER_SIM_RANGE,
+    PathBudget, SpatialBuckets,
 };
 use crate::raid::{
     RaidSide, RaidSpec, WAVE_ADVANCE_REMAINING, WAVE_SPACING_TICKS, WaveMember, compose_wave,
@@ -62,7 +62,8 @@ use crate::roles::{PopulationSpec, VillagerRole, citizen_slots};
 use crate::scene::{ScenePost, TownInfoScene, TownScene};
 use crate::schedule::{self, CivilianPost};
 use crate::siege::{
-    self, HOLD_TICKS, MarchJob, TownOwner, WALL_WALK_LIFT, capture_need, in_courtyard, tick_hold_n,
+    self, HOLD_TICKS, MarchJob, TownOwner, WALL_WALK_LIFT, capture_need, in_capture_zone,
+    in_courtyard, tick_hold_n,
 };
 use crate::sim::{SimSnapshot, write_named_snapshots_with_kills};
 use crate::town::town_containing;
@@ -131,12 +132,19 @@ const PHASE_WARN_MS: f64 = 20.0;
 const SQUAD_RANGE: f64 = 48.0;
 /// Goat-horn command cooldown.
 const HORN_COOLDOWN_TICKS: u32 = 40;
+/// First live ticks skip engines so join does not dump 200 ms of town work.
+const JOIN_AMORTIZE_TICKS: u32 = 40;
+/// Item / XP orbs despawned per town tick during a live raid.
+const DROPS_PER_TICK: usize = 8;
+/// Engines / punch / repair-scan towns per world tick.
+const HEAVY_TOWNS_PER_TICK: u32 = 1;
 
 static WORST_MSPT_CENTS: AtomicU32 = AtomicU32::new(0);
 static WORST_DIRECTOR_CENTS: AtomicU32 = AtomicU32::new(0);
 static SPAWNS_THIS_TICK: AtomicU32 = AtomicU32::new(0);
 static TICKETS_THIS_TICK: AtomicU32 = AtomicU32::new(0);
 static REPAIR_SCANS_THIS_TICK: AtomicU32 = AtomicU32::new(0);
+static HEAVY_THIS_TICK: AtomicU32 = AtomicU32::new(0);
 static REPAIR_SCAN_BUSY: AtomicBool = AtomicBool::new(false);
 
 fn post_y_cache() -> &'static Mutex<HashMap<(i32, i32), i32>> {
@@ -402,6 +410,7 @@ struct TownWar {
     pending_unticket: Vec<Vector2<i32>>,
     repair_scan_cursor: usize,
     named_npcs: bool,
+    live_age: u32,
 }
 
 struct Wired {
@@ -1142,6 +1151,7 @@ impl TownWar {
             pending_unticket: Vec::new(),
             repair_scan_cursor: 0,
             named_npcs: false,
+            live_age: 0,
         }
     }
 
@@ -1717,6 +1727,7 @@ pub fn tick_world(world: &Arc<World>) {
     let seed = world.level.seed.0;
     SPAWNS_THIS_TICK.store(0, Ordering::Relaxed);
     TICKETS_THIS_TICK.store(0, Ordering::Relaxed);
+    HEAVY_THIS_TICK.store(0, Ordering::Relaxed);
     REPAIR_SCANS_THIS_TICK.store(0, Ordering::Relaxed);
     let mut dir = lock();
     dir.tick = dir.tick.wrapping_add(1);
@@ -1958,21 +1969,39 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         )
     };
 
-    let mut min_x = bounds.min_x - 48;
-    let mut min_z = bounds.min_z - 48;
-    let mut max_x = bounds.max_x + 48;
-    let mut max_z = bounds.max_z + 48;
-    for p in camps.iter().chain(gates.iter()) {
-        min_x = min_x.min(p.x - 48);
-        min_z = min_z.min(p.z - 48);
-        max_x = max_x.max(p.x + 48);
-        max_z = max_z.max(p.z + 48);
+    let live_age = {
+        let dir = lock();
+        dir.towns.get(town_id).map_or(0, |w| w.live_age)
+    };
+    let amortizing = live_age < JOIN_AMORTIZE_TICKS;
+    let mut drop_ids: Vec<i32> = Vec::new();
+    let mut entities = if materialized {
+        raid_snapshot_entities(world, town_id)
+    } else {
+        let pad = if amortizing { 16 } else { 48 };
+        let mut min_x = bounds.min_x - pad;
+        let mut min_z = bounds.min_z - pad;
+        let mut max_x = bounds.max_x + pad;
+        let mut max_z = bounds.max_z + pad;
+        for p in camps.iter().chain(gates.iter()) {
+            min_x = min_x.min(p.x - pad);
+            min_z = min_z.min(p.z - pad);
+            max_x = max_x.max(p.x + pad);
+            max_z = max_z.max(p.z + pad);
+        }
+        let aabb = BoundingBox::new(
+            Vector3::new(f64::from(min_x), -64.0, f64::from(min_z)),
+            Vector3::new(f64::from(max_x), 320.0, f64::from(max_z)),
+        );
+        world.get_all_at_box(&aabb)
+    };
+    entities = take_combat_entities(entities, &mut drop_ids);
+    if !amortizing && tick.is_multiple_of(20) && drop_ids.len() < DROPS_PER_TICK {
+        sweep_nearby_drops(world, bounds, &mut drop_ids);
     }
-    let aabb = BoundingBox::new(
-        Vector3::new(f64::from(min_x), -64.0, f64::from(min_z)),
-        Vector3::new(f64::from(max_x), 320.0, f64::from(max_z)),
-    );
-    let entities = world.get_all_at_box(&aabb);
+    if !drop_ids.is_empty() {
+        remove_ephemeral(world, &drop_ids);
+    }
 
     let mut buckets = SpatialBuckets::new();
     let mut snapshots: Vec<(Arc<dyn EntityBase>, Faction)> = Vec::new();
@@ -2296,6 +2325,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         ram_dest,
         ladder_dest,
         keep_rect,
+        gatehouse_rect,
         breached,
         owner_pillager,
         owner_faction,
@@ -2359,6 +2389,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 z: ladder.z,
             },
             war.scene.keep_rect(),
+            war.scene.gatehouse_rect(),
             war.gate_breached,
             war.owner.is_pillager(),
             owner_faction(&war.owner, &war.kingdom),
@@ -2373,7 +2404,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             PostTarget::from_post(well, standing_y(world, well)),
         )
     };
-    maybe_refill_repair(world, town_id, tick, alarm);
+    if !amortizing {
+        maybe_refill_repair(world, town_id, tick, alarm);
+    }
     let work_dests = standing_dests(&work_posts, keep_dest.y, 0);
     let home_dests = standing_dests(&home_posts, keep_dest.y, 0);
     let wall_dests = standing_dests(&wall_posts, keep_dest.y, WALL_WALK_LIFT);
@@ -2438,7 +2471,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         };
         let pos = base.pos.load();
         let routed = has_tag(base, TAG_ROUTED);
-        if in_courtyard(keep_rect, pos.x, pos.z) && !routed {
+        if in_capture_zone(keep_rect, gatehouse_rect, pos.x, pos.z) && !routed {
             if is_hostile(faction, &owner_faction) {
                 raiders_in_keep += 1;
             } else if is_allied(faction, &owner_faction) {
@@ -2448,12 +2481,27 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
         let is_builder = role == Some(VillagerRole::Builder);
         let offscreen = !player_near_list(&player_xz, pos.x, pos.z, CIVILIAN_SLEEP_RANGE);
+        let far_from_player = !player_near_list(&player_xz, pos.x, pos.z, PLAYER_SIM_RANGE);
         let idle_villager = matches!(role, Some(VillagerRole::Civilian | VillagerRole::Guard))
             || (matches!(faction, Faction::Kingdom(_)) && role.is_none());
         if offscreen && idle_villager && !is_builder {
             mob.get_mob_entity().set_no_ai(true);
             n_sleep += 1;
             n_no_ai += 1;
+            continue;
+        }
+        if far_from_player && !is_builder {
+            mob.get_mob_entity().set_no_ai(true);
+            n_no_ai += 1;
+            n_sleep += 1;
+            if LodTier::Alert.should_tick(base.entity_id, tick) {
+                let dest = match faction {
+                    Faction::Pillager => march_dest,
+                    _ => keep_dest,
+                };
+                slide_direct(base, dest);
+                n_slid += 1;
+            }
             continue;
         }
         let hostile = buckets.nearest_hostile(pos.x, pos.z, faction, ACQUIRE_RANGE);
@@ -2688,9 +2736,12 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
     }
     tick_moving_ram(world, town_id, tick, &snapshots, breached, &mut ram_at_gate);
-    let engines_started = Instant::now();
-    tick_siege_engines(world, town_id, tick, alarm);
-    log_slow_phase(tick, "engines", engines_started);
+    let run_heavy = !amortizing && take_heavy_town();
+    if run_heavy {
+        let engines_started = Instant::now();
+        tick_siege_engines(world, town_id, tick, alarm);
+        log_slow_phase(tick, "engines", engines_started);
+    }
     if ram_at_gate && !breached {
         let gate = {
             let dir = lock();
@@ -2720,15 +2771,15 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
     }
     apply_morale(town_id, tick, &snapshots, captain_down, breached);
-    // Soak: castle.inner currently contains the gate, so a wave at the
-    // portcullis would capture in HOLD_TICKS and dump the live bodies.
+    // Soak skips capture so three fronts stay live for the MSPT sample.
+    // Production uses inner bailey minus the gatehouse (`in_capture_zone`).
     if !soaking() {
         apply_capture(
             town_id,
             tick,
             raiders_in_keep,
             defenders_in_keep,
-            occupier_from_keep(&snapshots, keep_rect, &owner_faction),
+            occupier_from_keep(&snapshots, keep_rect, gatehouse_rect, &owner_faction),
             1,
         );
     }
@@ -2789,8 +2840,14 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     }
     maybe_soldier_chatter(world, town_id, tick);
 
-    if tick.is_multiple_of(RESPAWN_PERIOD) {
+    if !amortizing && tick.is_multiple_of(RESPAWN_PERIOD) {
         crate::populate::respawn_missing(world, town_id);
+    }
+    {
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.live_age = war.live_age.saturating_add(1);
+        }
     }
 }
 
@@ -3190,6 +3247,108 @@ fn take_ticket_slots(want: u32) -> u32 {
         {
             return take;
         }
+    }
+}
+
+fn take_heavy_town() -> bool {
+    loop {
+        let used = HEAVY_THIS_TICK.load(Ordering::Relaxed);
+        if used >= HEAVY_TOWNS_PER_TICK {
+            return false;
+        }
+        if HEAVY_THIS_TICK
+            .compare_exchange(used, used + 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+fn is_ephemeral_drop(ty: &EntityType) -> bool {
+    ty == &EntityType::ITEM || ty == &EntityType::EXPERIENCE_ORB
+}
+
+fn take_combat_entities(
+    entities: Vec<Arc<dyn EntityBase>>,
+    drop_ids: &mut Vec<i32>,
+) -> Vec<Arc<dyn EntityBase>> {
+    let mut out = Vec::with_capacity(entities.len());
+    for entity in entities {
+        if is_ephemeral_drop(entity.get_entity().entity_type) {
+            if drop_ids.len() < DROPS_PER_TICK {
+                drop_ids.push(entity.get_entity().entity_id);
+            }
+            continue;
+        }
+        out.push(entity);
+    }
+    out
+}
+
+fn raid_snapshot_entities(world: &World, town_id: &str) -> Vec<Arc<dyn EntityBase>> {
+    let ids = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        if let Some(raid) = &war.raid {
+            ids.extend(raid.living.iter().copied());
+            ids.extend(raid.temps.iter().copied());
+        }
+        ids.extend(war.wired.keys().copied());
+        ids
+    };
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for id in ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(entity) = world.get_entity_by_id(id) {
+            out.push(entity);
+        }
+    }
+    out
+}
+
+fn sweep_nearby_drops(world: &World, bounds: crate::geom::Rect, drop_ids: &mut Vec<i32>) {
+    if drop_ids.len() >= DROPS_PER_TICK {
+        return;
+    }
+    let (cx, cz) = bounds.center();
+    let aabb = BoundingBox::new(
+        Vector3::new(f64::from(cx - 24), -64.0, f64::from(cz - 24)),
+        Vector3::new(f64::from(cx + 24), 320.0, f64::from(cz + 24)),
+    );
+    for entity in world.get_all_at_box(&aabb) {
+        if drop_ids.len() >= DROPS_PER_TICK {
+            break;
+        }
+        if is_ephemeral_drop(entity.get_entity().entity_type) {
+            drop_ids.push(entity.get_entity().entity_id);
+        }
+    }
+}
+
+fn remove_ephemeral(world: &World, ids: &[i32]) {
+    if ids.is_empty() {
+        return;
+    }
+    let mut n = 0u32;
+    let mut seen = HashSet::new();
+    for id in ids {
+        if !seen.insert(*id) {
+            continue;
+        }
+        if let Some(entity) = world.get_entity_by_id(*id) {
+            entity.get_entity().remove();
+            n += 1;
+        }
+    }
+    if n > 0 {
+        tracing::debug!(despawned = n, "kingdoms drops cleared");
     }
 }
 
@@ -5576,6 +5735,7 @@ fn army_kingdom(side: RaidSide, home: &KingdomId) -> KingdomId {
 fn occupier_from_keep(
     snapshots: &[(Arc<dyn EntityBase>, Faction)],
     keep_rect: crate::geom::Rect,
+    gatehouse: crate::geom::Rect,
     owner: &Faction,
 ) -> TownOwner {
     let mut pillager = 0u32;
@@ -5587,7 +5747,7 @@ fn occupier_from_keep(
             continue;
         }
         let pos = base.pos.load();
-        if !in_courtyard(keep_rect, pos.x, pos.z) {
+        if !in_capture_zone(keep_rect, gatehouse, pos.x, pos.z) {
             continue;
         }
         if !is_hostile(faction, owner) {
@@ -6247,6 +6407,10 @@ mod tests {
         assert_eq!(TICKETS_PER_WORLD_TICK, 3);
         assert_eq!(CAPTURES_PER_TICK, 1);
         assert_eq!(PORTCULLIS_BARS_PER_TICK, 2);
+        assert_eq!(JOIN_AMORTIZE_TICKS, 40);
+        assert_eq!(DROPS_PER_TICK, 8);
+        assert_eq!(HEAVY_TOWNS_PER_TICK, 1);
+        assert!((PLAYER_SIM_RANGE - 48.0).abs() < f64::EPSILON);
         assert_eq!(resolve_stand_y(80, Some(70), 63), 80);
         assert_eq!(resolve_stand_y(0, Some(70), 63), 70);
         assert_eq!(resolve_stand_y(0, None, 63), 64);
