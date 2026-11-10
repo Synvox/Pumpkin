@@ -6822,6 +6822,35 @@ mod tests {
     }
 
     #[test]
+    fn standard_bearer_completes_a_flag_capture_in_a_live_raid() {
+        assert_eq!(crate::faction::TAG_BEARER, "kingdoms:bearer");
+        let flag = PostTarget {
+            x: 40,
+            y: 64,
+            z: 40,
+        };
+        let march = PostTarget { x: 1, y: 64, z: 1 };
+        let dest = overlay_flag_dest(march, &Faction::Pillager, true, false, false, flag);
+        assert_eq!(
+            (dest.x, dest.z),
+            (flag.x, flag.z),
+            "raid captain standard-bearer paths to the plate"
+        );
+        let owner = TownOwner::Kingdom("alder".to_owned());
+        let mut hold = 0;
+        let mut update = siege::HoldUpdate::default();
+        for _ in 0..HOLD_TICKS {
+            update = tick_flag_hold(&owner, FlagPresence::stacked(3, 0), hold, 0, 3, 3, 1);
+            hold = update.occupy_hold;
+        }
+        assert!(update.captured);
+        assert_eq!(
+            owner_banner(&TownOwner::Pillager),
+            owner_banner(&TownOwner::parse("pillager"))
+        );
+    }
+
+    #[test]
     fn battle_state_exposes_owner_and_breach() {
         let state = BattleState {
             town_id: "20261025:0:0".to_owned(),
