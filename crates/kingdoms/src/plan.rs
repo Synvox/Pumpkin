@@ -25,8 +25,8 @@ use crate::info::{GateInfo, GateKind, RoadInfo, TownInfo};
 use crate::palette::PaletteKind;
 use crate::rng::TownRng;
 use crate::scenes::{
-    Scene, SceneKind, TREE_STRIP_MARGIN, force_lot, paint_harbour_town, paint_scene_yards,
-    paint_wind_sails, place_scenes, rect_hits_mill_sail, try_lot, water_body_ok,
+    Scene, SceneKind, TREE_STRIP_MARGIN, force_lot, paint_fish_market, paint_harbour_town,
+    paint_scene_yards, paint_wind_sails, place_scenes, rect_hits_mill_sail, try_lot, water_body_ok,
 };
 use crate::town::{
     CELL_SIZE, TownPos, border_crossing, border_goal, town_containing, town_in_cell,
@@ -37,7 +37,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 16;
+pub const PLAN_CACHE_VERSION: u32 = 17;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -812,6 +812,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &mut rng,
         &mut scenes,
     );
+    paint_fish_market(&mut occ, &grid, &mut lots, seed, town_rect);
     if walled_city {
         paint_winding_lanes(
             &mut occ,
@@ -842,6 +843,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
             town_rect,
             &mut TownRng::salted(seed, 24, 6),
         );
+        paint_fish_market(&mut occ, &grid, &mut lots, seed, town_rect);
         paint_extramural(
             &mut occ,
             &grid,
@@ -1759,6 +1761,11 @@ fn paint_pomerium(occ: &mut Occupancy, town: Rect) {
                         | CellKind::Grave
                         | CellKind::Arcade
                         | CellKind::Lychgate
+                        | CellKind::Quay
+                        | CellKind::Crane
+                        | CellKind::Dock
+                        | CellKind::Ship
+                        | CellKind::Boat
                 )
             {
                 continue;
@@ -2964,7 +2971,7 @@ fn packable_city_lot(
     if rect_hits_keep_court(occ, rect) {
         return false;
     }
-    if !grid.rect_is_dry(rect) {
+    if !grid.rect_is_buildable(rect) {
         return false;
     }
     for z in rect.min_z..=rect.max_z {
@@ -3589,7 +3596,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 16);
+        assert_eq!(PLAN_CACHE_VERSION, 17);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -3627,7 +3634,7 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 16;
+    const PLAN_LAYOUT_VERSION: u32 = 17;
     const PLAN_LAYOUT_HASH: u64 = 0x832e_32b7_2973_47a6;
 
     #[test]
