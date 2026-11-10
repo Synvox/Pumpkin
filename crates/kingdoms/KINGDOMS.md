@@ -654,20 +654,20 @@ A shorter war-clock pass (size 24, three fronts) also reached the plate: `plate_
 
 Plots: `/opt/cursor/artifacts/soak-r12-branch480-summary.json`, `soak-r12-master480-summary.json`, `soak-r12-branch-clock24-summary.json`. Flag crops: `flag-plinth-se.png`, `flag-plinth-se-flipped.png`, `flag-plinth-court.png`.
 
-Round 13 (this PR): capital sieges walk outer town → civic → castle → gatehouse → plate (flow-field rings, no phantom join wall). Defenders rush the plate on `capture_started`; the captain shouts "To the flag!". The mast is eight fences with a real banner, a 3×2 wool panel, and lit braziers at the pedestal corners. Distant NoAI soldiers skip living movement/collision and targeting outside 64 blocks of a player; alarmed far combatants still slide on the Alert lod; the first 40 live ticks AI-loop at most 64 bodies and defer portcullis writes. `PLAN_CACHE_VERSION` stays 13 (stamp-only flag).
+Round 13 (this PR): capital sieges walk outer town → civic → castle → gatehouse → plate (flow-field rings, no phantom join wall). Defenders rush the plate on `capture_started`; the captain shouts "To the flag!". The mast is eight fences with a real banner, a 3×2 wool panel, and lit braziers at the pedestal corners. Distant soldiers skip targeting outside 64 blocks of a player; alarmed far combatants still slide on the Alert lod; the first 40 live ticks AI-loop at most 64 bodies and defer portcullis writes. Kingdoms raid bodies set `director_driven` so pumpkin-core skips living movement only for those mobs; a plain `/summon` NoAI still falls and collides. Idle towns snapshot one X-strip per tick; ticket warmup prewarms a flow field instead of walking the town AABB. `PLAN_CACHE_VERSION` stays 14 (stamp-only flag, rebased onto PR #34).
 
-Release identical-load soak (seed `20261025`, 3 fronts, `/raid start` 120 40, `KINGDOMS_BODY_BUDGET=600`, `CARGO_PROFILE_RELEASE_LTO=off`, plan cache v13) vs master `34cfd1fa`:
+Release identical-load soak (seed `20261025`, 3 fronts, `/raid start` 120 40, `KINGDOMS_BODY_BUDGET=600`, `CARGO_PROFILE_RELEASE_LTO=off`, plan cache v14) vs master `0ee472f8`:
 
-| | branch (this PR) | master `34cfd1fa` |
+| | branch (this PR) | master `0ee472f8` |
 | --- | ---: | ---: |
-| MSPT p50 / p95 / max | **59.81** / 72.63 / 108.68 | 77.58 / 97.65 / 195.25 |
-| director_ms p50 / p95 / max (CSV) | **2.05** / 3.42 / 19.14 | 3.16 / 5.10 / 8.25 |
-| first-town-tick hitch (director_ms) | 297.68 (`town:0:0` 295.54) | **157.27** (log max 379.69) |
-| live fronts / bodies max | 3 / **480** | 4 / 564 |
-| captures / plate_r / keep_r max | **2** / **79** / **57** | 1 / 43 / 43 |
-| `Can't keep up` | 41 | 32 |
+| MSPT p50 / p95 / max | 55.34 / 72.22 / 90.21 | **50.91** / 64.94 / 80.63 |
+| director_ms p50 / p95 / max (CSV) | 1.82 / 3.08 / 1058.01 | **0.88** / 2.77 / 158.28 |
+| first-town-tick hitch (director_ms) | 213.63 (`town:0:-1` engines 208.49) | **112.94** (`town:0:-1` entities 110.88) |
+| live fronts / bodies max | 3 / **480** (peak 601) | 3 / 480 |
+| captures / plate_r / keep_r max | 2 / 76 / 58 | **3** / **119** / **119** |
+| `Can't keep up` | 32 | **23** |
 
-p50 is still above the 50 ms budget; leftover cost is vanilla entity/chunk sim of ~480 NoAI soldiers (living `tick_movement` is skipped for NoAI). Director CSV stays under 20 ms after join; the remaining 297 ms hitch is the first live tick of capital `0:0` (chunk/entity snapshot at join), not the AI loop (`loop_us` ~0.2 ms). Two of three 120-raider sieges stacked on the plate and flipped, including capital `0:0` (`keep_r` 19 then 86 at capture). Master `34cfd1fa` also flipped `0:0` in this release run (`keep_r` 43) but only that one town. Charge shouts (`kind=charge`) fired on the capturing towns.
+p50 is still above the 50 ms budget; leftover cost is vanilla entity/chunk sim of ~480 packed soldiers. Director CSV p50/p95 stays a few milliseconds. The first hitch after the three scheduled raids is 213 ms (first siege-engine write on `0:-1`); a later 1.0 s spike was alder2's `raid start here` after a bad teleport, which is the soak script opening a fourth town. Two of three 120-raider sieges stacked on the plate and flipped (`keep_r` 58). Charge shouts (`kind=charge`) fired on the capturing towns.
 
 Plots: `/opt/cursor/artifacts/soak-r13-branch480-summary.json`, `soak-r13-master480-summary.json`. Flag crops: `flag-plinth-se.png`, `flag-plinth-se-flipped.png`, `flag-plinth-court.png`.
 
