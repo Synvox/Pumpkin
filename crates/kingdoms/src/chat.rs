@@ -68,7 +68,7 @@ impl ShoutKind {
             Self::Rally => "To the walls. Hold the line.",
             Self::Retreat => "Fall back to the keep. Do not break.",
             Self::Victory => "The town is ours. Raise the colours.",
-            Self::Charge => "With me. Take the keep!",
+            Self::Charge => "To the flag!",
             Self::Hold => "Shields! Hold this ground.",
             Self::Fallen => "Captain is down. Stand fast.",
         }
@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(ShoutKind::parse("charge"), Some(ShoutKind::Charge));
         assert_eq!(ShoutKind::parse("hold"), Some(ShoutKind::Hold));
         assert_eq!(ShoutKind::parse("fallen"), Some(ShoutKind::Fallen));
-        assert!(line(ShoutKind::Charge).contains("keep"));
+        assert!(line(ShoutKind::Charge).contains("flag"));
         assert!(ShoutKind::parse("kill").is_none());
     }
 

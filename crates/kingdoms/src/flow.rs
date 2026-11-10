@@ -126,10 +126,18 @@ impl FlowField {
 
     fn raster_walls(&mut self, scene: &dyn TownScene) {
         let wall = scene.wall();
-        if wall.len() < 2 {
+        // Capital concatenates 4-corner rings. Raster each ring on its own so
+        // the join does not draw a phantom wall across the lower city.
+        for ring in wall.chunks(4) {
+            self.raster_ring(ring);
+        }
+    }
+
+    fn raster_ring(&mut self, ring: &[[i32; 2]]) {
+        if ring.len() < 2 {
             return;
         }
-        for pair in wall.windows(2) {
+        for pair in ring.windows(2) {
             let a = pair[0];
             let b = pair[1];
             walk_line(a[0], a[1], b[0], b[1], |x, z| {
@@ -138,8 +146,8 @@ impl FlowField {
                 self.mark_blocked_block(x, z + 1);
             });
         }
-        let first = wall[0];
-        let last = wall[wall.len() - 1];
+        let first = ring[0];
+        let last = ring[ring.len() - 1];
         walk_line(last[0], last[1], first[0], first[1], |x, z| {
             self.mark_blocked_block(x, z);
         });
@@ -351,6 +359,26 @@ mod tests {
         assert!(
             after < before,
             "waypoint {wx},{wz} should be closer to gate than camp {camp:?} (before {before} after {after})"
+        );
+    }
+
+    #[test]
+    fn capital_field_reaches_the_flag_from_outside_the_outer_wall() {
+        let scene = scene();
+        let flag = scene.flag();
+        let camp = scene.raid_camps()[0];
+        let field = FlowField::toward(&scene, flag, &[camp]);
+        let (wx, wz) = field.waypoint(f64::from(camp.x), f64::from(camp.z));
+        let before = dist(
+            f64::from(camp.x),
+            f64::from(camp.z),
+            field.dest_x,
+            field.dest_z,
+        );
+        let after = dist(wx, wz, field.dest_x, field.dest_z);
+        assert!(
+            after < before,
+            "capital camp {camp:?} must flow toward the flag {flag:?} (waypoint {wx},{wz} before {before} after {after})"
         );
     }
 

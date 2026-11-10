@@ -1501,7 +1501,14 @@ impl LivingEntity {
             self.travel_in_air(caller);
         }
 
-        let suffocating = self.entity.tick_block_collisions(caller);
+        // NoAI already skips travel and shoving. Block-collision scans still
+        // walked every packed soldier's AABB; kingdoms tags raid bodies NoAI
+        // and slides them from the director.
+        let suffocating = if effective_ai {
+            self.entity.tick_block_collisions(caller)
+        } else {
+            false
+        };
 
         if suffocating {
             caller.damage(caller, 1.0, DamageType::IN_WALL);
@@ -3622,7 +3629,15 @@ impl EntityBase for LivingEntity {
         let in_death_animation = self.health.load() <= 0.0 && self.death_time.load(Relaxed) < 20;
         let is_player = self.entity.entity_type == &EntityType::PLAYER;
         if (is_alive || in_death_animation) && !is_player {
-            self.tick_movement(caller);
+            let no_ai = caller
+                .get_mob()
+                .is_some_and(|mob| mob.get_mob_entity().is_no_ai());
+            // Kingdoms raid soldiers are NoAI and director-slid. Skipping the
+            // rest of living movement avoids per-body collision and travel work
+            // at a few hundred packed fighters.
+            if !no_ai {
+                self.tick_movement(caller);
+            }
             // Vanilla-like order: freeze logic runs after movement/collisions.
             self.entity.tick_frozen(caller);
         } else if is_alive {

@@ -2804,21 +2804,66 @@ fn clear_hill_above_roof(
 fn place_flag_plinth(sink: &mut impl BlockSink, plan: &TownPlan, x: i32, ground: i32, z: i32) {
     let (fx, fz) = plan.castle.flag;
     sink.put(x, ground, z, Block::STONE_BRICKS.default_state);
-    clear_above(sink, x, ground + 1, ground + 6, z);
+    clear_above(sink, x, ground + 1, ground + 12, z);
     if x == fx && z == fz {
-        for y in 1..=4 {
+        for y in 1..=crate::siege::FLAG_MAST_FENCES {
             sink.put(x, ground + y, z, Block::OAK_FENCE.default_state);
         }
-        let banner =
-            match crate::faction::KingdomId::for_cell(plan.origin.cell_x, plan.origin.cell_z)
-                .as_str()
-            {
-                "raven" => Block::BLUE_BANNER.default_state,
-                _ => Block::GREEN_BANNER.default_state,
-            };
-        sink.put(x, ground + 5, z, banner);
+        let owner = crate::siege::TownOwner::kingdom(&crate::faction::KingdomId::for_cell(
+            plan.origin.cell_x,
+            plan.origin.cell_z,
+        ));
+        sink.put(
+            x,
+            ground + crate::siege::FLAG_MAST_FENCES + 1,
+            z,
+            crate::siege::owner_banner(&owner).default_state,
+        );
+        place_flag_panel(sink, plan, x, ground, z, &owner);
+        place_flag_braziers(sink, x, ground, z);
     } else {
         sink.put(x, ground + 1, z, Block::STONE_PRESSURE_PLATE.default_state);
+    }
+}
+
+fn flag_panel_axes(plan: &TownPlan, fx: i32, fz: i32) -> (i32, i32, i32, i32) {
+    let (kx, kz) = plan.castle.keep.center();
+    let dx = (fx - kx).signum();
+    let dz = (fz - kz).signum();
+    if dx.abs() >= dz.abs() {
+        (if dx == 0 { 1 } else { dx }, 0, 0, 1)
+    } else {
+        (0, dz, 1, 0)
+    }
+}
+
+fn place_flag_panel(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    fx: i32,
+    ground: i32,
+    fz: i32,
+    owner: &crate::siege::TownOwner,
+) {
+    let (dx, dz, px, pz) = flag_panel_axes(plan, fx, fz);
+    let wool = crate::siege::owner_wool(owner).default_state;
+    let base_y = ground + crate::siege::FLAG_MAST_FENCES;
+    let half = crate::siege::FLAG_PANEL_WIDTH / 2;
+    for row in 0..crate::siege::FLAG_PANEL_HEIGHT {
+        for col in -half..=half {
+            sink.put(fx + dx + col * px, base_y + row, fz + dz + col * pz, wool);
+        }
+    }
+}
+
+fn place_flag_braziers(sink: &mut impl BlockSink, fx: i32, ground: i32, fz: i32) {
+    let off = crate::siege::FLAG_BRAZIER_OFFSET;
+    for (dx, dz) in [(-off, -off), (-off, off), (off, -off), (off, off)] {
+        let x = fx + dx;
+        let z = fz + dz;
+        sink.put(x, ground, z, Block::STONE_BRICKS.default_state);
+        sink.put(x, ground + 1, z, Block::CAMPFIRE.default_state);
+        clear_above(sink, x, ground + 2, ground + 4, z);
     }
 }
 
