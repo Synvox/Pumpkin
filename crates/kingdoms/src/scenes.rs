@@ -2012,6 +2012,27 @@ fn place_vineyard_cottages(
     }
 }
 
+fn near_gothic(occ: &Occupancy, rect: Rect) -> bool {
+    let pad = rect.inflate(28);
+    for z in pad.min_z..=pad.max_z {
+        for x in pad.min_x..=pad.max_x {
+            if !occ.bounds.contains(x, z) {
+                continue;
+            }
+            if matches!(
+                occ.kind(x, z),
+                CellKind::CathedralNave
+                    | CellKind::CathedralTransept
+                    | CellKind::CathedralChoir
+                    | CellKind::CathedralTower
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn landmark_blocked(scenes: &[Scene], rect: Rect) -> bool {
     scenes.iter().any(|scene| {
         matches!(
@@ -2050,7 +2071,7 @@ fn place_stave_church_scene(
     else {
         return;
     };
-    if landmark_blocked(scenes, yard) {
+    if landmark_blocked(scenes, yard) || near_gothic(occ, yard) {
         return;
     }
     for z in yard.min_z..=yard.max_z {
@@ -2663,7 +2684,7 @@ fn place_outskirts(
             if !is_road_cell(occ.kind(x, z)) {
                 continue;
             }
-            if (x + z).rem_euclid(11) != 0 {
+            if (x + z).rem_euclid(5) != 0 {
                 continue;
             }
             if town.inflate(6).contains(x, z) || keep_out.contains(x, z) {
@@ -2679,6 +2700,7 @@ fn place_outskirts(
     let mut farms = 0;
     let mut pastures = 0;
     let mut cottages = 0;
+    let mut workshops = 0;
     for &(x, z) in &samples {
         if shrines < 10 && place_wayside_shrine(occ, grid, x, z) {
             shrines += 1;
@@ -2697,19 +2719,25 @@ fn place_outskirts(
         if orchards < 16 && place_roadside_copse(occ, grid, town, keep_out, x, z, scenes) {
             orchards += 1;
         }
-        if cottages < 8
-            && rng.chance(1, 3)
+        if cottages < 28
+            && rng.chance(2, 3)
             && place_roadside_cottage(occ, grid, lots, seed, town, keep_out, x, z)
         {
             cottages += 1;
         }
-        if inns < 4
-            && rng.chance(1, 3)
+        if workshops < 12
+            && rng.chance(1, 2)
+            && place_roadside_workshop(occ, grid, lots, seed, town, keep_out, x, z)
+        {
+            workshops += 1;
+        }
+        if inns < 10
+            && rng.chance(1, 2)
             && place_roadside_inn(occ, grid, lots, seed, town, keep_out, x, z)
         {
             inns += 1;
         }
-        if hamlets < 6
+        if hamlets < 10
             && rng.chance(1, 3)
             && place_roadside_hamlet(occ, grid, lots, seed, town, keep_out, x, z, scenes)
         {
@@ -3179,6 +3207,41 @@ fn place_roadside_cottage(
             lots,
             seed,
             BuildingKind::Cottage,
+            rect,
+            dir.opposite(),
+        )
+        .is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn place_roadside_workshop(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    town: Rect,
+    keep_out: Rect,
+    x: i32,
+    z: i32,
+) -> bool {
+    let (w, d) = BuildingKind::Blacksmith.size();
+    for dir in Dir::ALL {
+        let wx = x + dir.dx() * (w + 3);
+        let wz = z + dir.dz() * (d + 3);
+        let rect = Rect::new(wx, wz, wx + w - 1, wz + d - 1);
+        if town.inflate(6).intersects(rect) || keep_out.intersects(rect) {
+            continue;
+        }
+        if try_lot(
+            occ,
+            grid,
+            lots,
+            seed,
+            BuildingKind::Blacksmith,
             rect,
             dir.opposite(),
         )
@@ -5146,6 +5209,9 @@ fn find_gentle_site(
             if town.inflate(2).intersects(rect) || keep_out.intersects(rect) {
                 continue;
             }
+            if near_gothic(occ, rect) {
+                continue;
+            }
             if !site_ok(occ, grid, rect, max_relief) {
                 continue;
             }
@@ -5184,6 +5250,9 @@ fn find_site(
             let rect = Rect::new(x, z, x + w - 1, z + d - 1);
             x += w.max(10);
             if town.inflate(8).intersects(rect) || keep_out.intersects(rect) {
+                continue;
+            }
+            if near_gothic(occ, rect) {
                 continue;
             }
             if !site_ok(occ, grid, rect, 10) {
@@ -6898,6 +6967,25 @@ mod tests {
                 .any(|lot| lot.kind == BuildingKind::StaveChurch),
             "stave church lot missing"
         );
+        if let Some(lot) = spruce
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::StaveChurch)
+        {
+            let pad = lot.rect.inflate(8);
+            let gothic = (pad.min_z..=pad.max_z).any(|z| {
+                (pad.min_x..=pad.max_x).any(|x| {
+                    matches!(
+                        spruce.occ.kind(x, z),
+                        CellKind::CathedralNave
+                            | CellKind::CathedralTransept
+                            | CellKind::CathedralChoir
+                            | CellKind::CathedralTower
+                    )
+                })
+            });
+            assert!(!gothic, "stave church clipped into a cathedral");
+        }
 
         let desert = build_plan(314_159, origin, grid.clone(), PaletteKind::Sandstone);
         let desert_kinds: Vec<_> = desert.scenes.iter().map(|s| s.kind).collect();
@@ -6933,5 +7021,72 @@ mod tests {
             oak.scenes.iter().any(|s| s.kind == SceneKind::Vineyard),
             "hillside vineyard village"
         );
+    }
+
+    #[test]
+    fn round20_street_infill_and_keep_forecourt() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let oak = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let houses = oak
+            .lots
+            .iter()
+            .filter(|lot| {
+                matches!(
+                    lot.kind,
+                    BuildingKind::Cottage
+                        | BuildingKind::Timber
+                        | BuildingKind::Townhouse
+                        | BuildingKind::Tavern
+                        | BuildingKind::Blacksmith
+                )
+            })
+            .count();
+        assert!(houses >= 18, "street infill houses {houses}");
+        let roadside = oak
+            .lots
+            .iter()
+            .filter(|lot| {
+                matches!(
+                    lot.kind,
+                    BuildingKind::Cottage | BuildingKind::Tavern | BuildingKind::Blacksmith
+                ) && Dir::ALL.iter().any(|dir| {
+                    let (cx, cz) = lot.rect.center();
+                    (1..=10).any(|dist| {
+                        is_road_cell(oak.occ.kind(cx + dir.dx() * dist, cz + dir.dz() * dist))
+                    })
+                })
+            })
+            .count();
+        assert!(roadside >= 8, "lots facing a street {roadside}");
+        let (kx, kz) = oak.castle.keep.center();
+        let (hx, hz) = oak.castle.hall.center();
+        let mut court = 0;
+        let search = oak.castle.inner.inflate(8);
+        for z in search.min_z..=search.max_z {
+            for x in search.min_x..=search.max_x {
+                if oak.occ.kind(x, z) != CellKind::CastleCourt {
+                    continue;
+                }
+                if oak.castle.keep_mass_at(x, z).is_some() {
+                    continue;
+                }
+                let near_keep = (x - kx).abs().max((z - kz).abs()) <= 18;
+                let near_hall = (x - hx).abs().max((z - hz).abs()) <= 18;
+                if near_keep && near_hall {
+                    court += 1;
+                }
+            }
+        }
+        assert!(court >= 8, "keep-hall flag court pad {court}");
     }
 }

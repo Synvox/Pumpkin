@@ -84,7 +84,7 @@ pub fn write_renders(
         &out_dir.join(format!("{stem}-castle-skyline.png")),
         &skyline,
     )?;
-    for (rot, name) in [(0u8, "se"), (1u8, "sw")] {
+    for (rot, name) in [(0u8, "se"), (1u8, "sw"), (2u8, "nw"), (3u8, "ne")] {
         save(
             &out_dir.join(format!("{stem}-castle-skyline-{name}.png")),
             &render_iso_view(
@@ -182,6 +182,12 @@ fn write_scene_renders(
         let mut rect = scene.rect;
         if scene.kind == SceneKind::Harbour {
             rect = harbour_scene_rect(plan, rect);
+        } else if scene.kind == SceneKind::StaveChurch {
+            if let Some(lot) = plan.lots.iter().find(|lot| {
+                lot.kind == BuildingKind::StaveChurch && scene.rect.intersects(lot.rect)
+            }) {
+                rect = lot.rect.inflate(6);
+            }
         } else if scene.kind == SceneKind::Vineyard {
             // Keep the outer terraces in frame.
         } else if rect.width() > 56 || rect.depth() > 56 {

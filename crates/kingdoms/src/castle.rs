@@ -297,13 +297,13 @@ pub fn paint_castle(
     if capital {
         paint_bailey_hedges(occ, &inner_ring.verts, &outer_ring.verts);
     }
-    occ.fill(hall, CellKind::CastleHall, true);
+    fill_without_keep(occ, &keep_masses, hall, CellKind::CastleHall);
     paint_buttresses(occ, hall, CellKind::CastleHall);
-    occ.fill(chapel, CellKind::CastleChapel, true);
+    fill_without_keep(occ, &keep_masses, chapel, CellKind::CastleChapel);
     paint_apse(occ, chapel, gate_dir.opposite());
-    occ.fill(stables, CellKind::CastleStables, true);
-    occ.fill(barracks, CellKind::CastleBarracks, true);
-    occ.fill(kitchen, CellKind::CastleKitchen, true);
+    fill_without_keep(occ, &keep_masses, stables, CellKind::CastleStables);
+    fill_without_keep(occ, &keep_masses, barracks, CellKind::CastleBarracks);
+    fill_without_keep(occ, &keep_masses, kitchen, CellKind::CastleKitchen);
     let passage = match gate_dir {
         Dir::North | Dir::South => {
             Rect::new(gate_pt.0 - 2, gate_pt.1 - 6, gate_pt.0 + 2, gate_pt.1 + 6)
@@ -319,7 +319,7 @@ pub fn paint_castle(
         CellKind::CastleBarbican,
     );
     for spec in &tower_specs {
-        fill_shape(occ, *spec, CellKind::CastleTower);
+        fill_shape_except_keep(occ, *spec, CellKind::CastleTower, &keep_masses);
     }
     paint_approach(occ, gate_pt, gate_dir);
     paint_moat(occ, grid, &outer_ring.verts, gate_pt, gate_dir);
@@ -835,12 +835,36 @@ fn barbican_spec(rect: Rect, dir: Dir) -> TowerSpec {
 }
 
 fn fill_shape(occ: &mut Occupancy, spec: TowerSpec, kind: CellKind) {
+    fill_shape_except_keep(occ, spec, kind, &[]);
+}
+
+fn fill_shape_except_keep(
+    occ: &mut Occupancy,
+    spec: TowerSpec,
+    kind: CellKind,
+    masses: &[KeepMass],
+) {
     let b = spec.bounds();
     for z in b.min_z..=b.max_z {
         for x in b.min_x..=b.max_x {
-            if spec.contains(x, z) {
-                occ.set(x, z, kind, true);
+            if !spec.contains(x, z) {
+                continue;
             }
+            if masses.iter().any(|mass| mass.spec.contains(x, z)) {
+                continue;
+            }
+            occ.set(x, z, kind, true);
+        }
+    }
+}
+
+fn fill_without_keep(occ: &mut Occupancy, masses: &[KeepMass], rect: Rect, kind: CellKind) {
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            if masses.iter().any(|mass| mass.spec.contains(x, z)) {
+                continue;
+            }
+            occ.set(x, z, kind, true);
         }
     }
 }

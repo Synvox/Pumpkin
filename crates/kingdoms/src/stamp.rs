@@ -304,6 +304,25 @@ pub fn stamp_column(
             clear_above(sink, x, ground + 1, ground + 40, z);
         }
     }
+    // Hall, kitchen, chapel, and curtain towers fill after keep masses and
+    // overwrite occupancy. Stamp the keep anyway so the spire's near faces
+    // are not replaced by a lower L-roof (harbour great-keep SE V).
+    let kind = if plan.castle.keep_mass_at(x, z).is_some()
+        && matches!(
+            kind,
+            CellKind::CastleWall
+                | CellKind::CastleInnerWall
+                | CellKind::CastleTower
+                | CellKind::CastleHall
+                | CellKind::CastleChapel
+                | CellKind::CastleKitchen
+                | CellKind::CastleStables
+                | CellKind::CastleBarracks
+        ) {
+        CellKind::CastleKeep
+    } else {
+        kind
+    };
     match kind {
         CellKind::Empty => {}
         CellKind::Road => place_road(sink, plan, x, ground, z, &palette, None),
@@ -358,32 +377,28 @@ pub fn stamp_column(
                 place_building(sink, plan, lot, x, ground, z, &palette);
             }
         }
-        CellKind::CastleWall => {
-            place_curtain(
-                sink,
-                plan,
-                x,
-                floor,
-                ground,
-                z,
-                &palette,
-                plan.castle.outer_ring.height,
-                true,
-            );
-        }
-        CellKind::CastleInnerWall => {
-            place_curtain(
-                sink,
-                plan,
-                x,
-                floor,
-                ground,
-                z,
-                &palette,
-                plan.castle.inner_ring.height,
-                true,
-            );
-        }
+        CellKind::CastleWall => place_curtain(
+            sink,
+            plan,
+            x,
+            floor,
+            ground,
+            z,
+            &palette,
+            plan.castle.outer_ring.height,
+            true,
+        ),
+        CellKind::CastleInnerWall => place_curtain(
+            sink,
+            plan,
+            x,
+            floor,
+            ground,
+            z,
+            &palette,
+            plan.castle.inner_ring.height,
+            true,
+        ),
         CellKind::CastleTower => {
             if let Some(spec) = plan.castle.tower_at(x, z) {
                 place_shaped_tower(sink, plan, spec, x, ground, z, &palette);
@@ -2053,7 +2068,7 @@ fn mass_roof_needs_cap(spec: TowerSpec, x: i32, z: i32) -> bool {
             d <= 2
         }
         RoofKind::Cone => dist <= 2,
-        RoofKind::Spire => dx.abs().max(dz.abs()) == 0,
+        RoofKind::Spire => dx.abs().max(dz.abs()) <= 1,
     }
 }
 
@@ -2110,11 +2125,15 @@ fn place_spire_pyramid(
     for y in top + 1..roof_y {
         sink.put(x, y, z, cap);
     }
-    if dist == 0 {
+    if dist <= 1 {
+        // A 3×3 cap under the finial so the peak is a ridge block, not a
+        // slot of outward stairs facing each other (open-ridge check).
         sink.put(x, roof_y, z, cap);
-        sink.put(x, roof_y + 1, z, palette.bricks);
-        sink.put(x, roof_y + 2, z, palette.brick_wall);
-        sink.put(x, roof_y + 3, z, Block::LANTERN.default_state);
+        if dist == 0 {
+            sink.put(x, roof_y + 1, z, palette.bricks);
+            sink.put(x, roof_y + 2, z, palette.brick_wall);
+            sink.put(x, roof_y + 3, z, Block::LANTERN.default_state);
+        }
     } else {
         sink.put(x, roof_y, z, stair_state(palette.roof, dir));
     }
@@ -5223,5 +5242,170 @@ mod roof_tests {
         assert_eq!(cardinal, corner, "eaves must match on every face");
         assert_eq!(mid_card, mid_diag, "equal rings must sit at equal height");
         assert!(apex > cardinal, "apex should rise above the eaves");
+    }
+
+    fn block_tag(state: &BlockState) -> &'static str {
+        let name = Block::from_state_id(state.id).name;
+        if name.contains("dark_oak_stairs") {
+            "dStair"
+        } else if name.contains("dark_oak") {
+            "dOak"
+        } else if name.contains("oak_stairs") {
+            "oStair"
+        } else if name.contains("lantern") {
+            "lantern"
+        } else if name.contains("brick") {
+            "brick"
+        } else if name.contains("cobble") {
+            "cobble"
+        } else if name.contains("andesite") || name.contains("tuff") {
+            "stone"
+        } else if name.contains("plank") {
+            "plank"
+        } else if name.contains("banner") {
+            "banner"
+        } else if name.contains("wall") {
+            "wall"
+        } else {
+            name
+        }
+    }
+
+    fn roof_structure_y(blocks: &[PlannedBlock], x: i32, z: i32) -> Option<(i32, &'static str)> {
+        let mut best: Option<(i32, &'static str)> = None;
+        for block in blocks {
+            if block.x != x || block.z != z {
+                continue;
+            }
+            let state = block.block_state();
+            if state.is_air() {
+                continue;
+            }
+            let tag = block_tag(state);
+            if matches!(tag, "lantern" | "banner" | "wall") {
+                continue;
+            }
+            if best.is_none_or(|(y, _)| block.y > y) {
+                best = Some((block.y, tag));
+            }
+        }
+        best
+    }
+
+    #[test]
+    #[allow(clippy::print_stdout, clippy::unwrap_used)]
+    fn harbour_keep_roof_has_no_interior_valley() {
+        use pumpkin_data::dimension::Dimension;
+        use pumpkin_util::world_seed::Seed;
+        use pumpkin_world::generation::get_world_gen;
+        use std::sync::Arc;
+
+        let boxed = get_world_gen(
+            Seed(1),
+            Dimension::OVERWORLD,
+            false,
+            Vec::new(),
+            String::new(),
+        );
+        let world_gen = Arc::from(boxed);
+        crate::height::register_world_gen(Arc::clone(&world_gen));
+        let plan = crate::plan::plan_for(1, -4, 5, &world_gen);
+        let primary = plan
+            .castle
+            .keep_masses
+            .iter()
+            .copied()
+            .find(|mass| mass.spec.inner && matches!(mass.spec.roof, RoofKind::Spire))
+            .or_else(|| plan.castle.keep_masses.first().copied())
+            .expect("harbour keep mass");
+        let spec = primary.spec;
+        let (cx, cz) = (spec.cx, spec.cz);
+        let dump = spec.bounds().inflate(6);
+        let hall = plan.castle.hall;
+        let slice = crate::geom::Rect::new(
+            dump.min_x.min(hall.min_x),
+            dump.min_z.min(hall.min_z),
+            dump.max_x.max(hall.max_x),
+            dump.max_z.max(hall.max_z),
+        );
+        let blocks = planned_blocks_in(&plan, slice);
+
+        println!(
+            "keep {:?} hall {hall:?} spire cx={cx} cz={cz} r={} h={}",
+            plan.castle.keep, spec.radius, spec.height
+        );
+        for mass in &plan.castle.keep_masses {
+            println!(
+                "mass cx={} cz={} r={} h={} shape={:?} roof={:?}",
+                mass.spec.cx,
+                mass.spec.cz,
+                mass.spec.radius,
+                mass.spec.height,
+                mass.spec.shape,
+                mass.spec.roof
+            );
+        }
+
+        println!("--- x-y slice at spire cz={cz} ---");
+        for x in slice.min_x..=slice.max_x {
+            let kind = plan.occ.kind(x, cz);
+            let mass = plan.castle.keep_mass_at(x, cz);
+            let Some((y, tag)) = roof_structure_y(&blocks, x, cz) else {
+                continue;
+            };
+            println!(
+                "x={x:>6} y={y:<3} {tag:<8} kind={kind:?} roof={:?}",
+                mass.map(|m| m.spec.roof)
+            );
+        }
+        println!("--- z-y slice at spire cx={cx} ---");
+        for z in slice.min_z..=slice.max_z {
+            let kind = plan.occ.kind(cx, z);
+            let mass = plan.castle.keep_mass_at(cx, z);
+            let Some((y, tag)) = roof_structure_y(&blocks, cx, z) else {
+                continue;
+            };
+            println!(
+                "z={z:>6} y={y:<3} {tag:<8} kind={kind:?} roof={:?}",
+                mass.map(|m| m.spec.roof)
+            );
+        }
+
+        let mut valleys = Vec::new();
+        let bounds = spec.bounds();
+        for z in bounds.min_z..=bounds.max_z {
+            for x in bounds.min_x..=bounds.max_x {
+                let Some(mass) = plan.castle.keep_mass_at(x, z) else {
+                    continue;
+                };
+                if mass.spec.cx != cx || mass.spec.cz != cz {
+                    continue;
+                }
+                let Some((y, _)) = roof_structure_y(&blocks, x, z) else {
+                    continue;
+                };
+                let dx = x - cx;
+                let dz = z - cz;
+                let d = dx.abs().max(dz.abs());
+                if d == 0 {
+                    continue;
+                }
+                let px = x - dx.signum();
+                let pz = z - dz.signum();
+                let Some((py, _)) = roof_structure_y(&blocks, px, pz) else {
+                    continue;
+                };
+                if y > py {
+                    valleys.push(format!(
+                        "({x},{z}) y={y} cheb={d} inward ({px},{pz}) y={py}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            valleys.is_empty(),
+            "keep roof valley (far column higher than inward neighbor):\n{}",
+            valleys.join("\n")
+        );
     }
 }
