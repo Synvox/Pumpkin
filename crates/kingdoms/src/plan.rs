@@ -15,7 +15,9 @@ use pumpkin_world::generation::noise::router::multi_noise_sampler::MultiNoiseSam
 use serde::{Deserialize, Serialize};
 
 use crate::buildings::{BuildingKind, Lot};
-use crate::castle::{CASTLE_MIN, CASTLE_SIZE, CastlePlan, paint_castle, site_castle};
+use crate::castle::{
+    CASTLE_MIN, CASTLE_SIZE, CastlePlan, paint_castle, paint_keep_forecourt, site_castle,
+};
 use crate::cells::{CellKind, Occupancy};
 use crate::geom::{Dir, Rect, bresenham};
 use crate::height::{HeightGrid, SAMPLE_STEP, world_gen_for};
@@ -34,7 +36,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 13;
+pub const PLAN_CACHE_VERSION: u32 = 14;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -612,7 +614,13 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     let bounds = clip_to_grid(&grid, union(core, hinter));
     let mut occ = Occupancy::new(bounds);
     let castle = paint_castle(&mut occ, &grid, castle_rect, &mut rng, capital);
-    paint_keep_forecourt(&mut occ, &castle);
+    paint_keep_forecourt(
+        &mut occ,
+        castle.inner,
+        castle.keep,
+        castle.hall,
+        &castle.keep_masses,
+    );
 
     let market = flattest_dry(&grid, inner_town, 28, 28);
     occ.fill(market, CellKind::Market, false);
@@ -789,10 +797,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &castle.inner_ring.verts,
         castle.keep,
         castle.hall,
-        castle.chapel,
-        castle.kitchen,
         castle.gatehouse,
-        castle.palace,
         &castle.keep_masses,
     );
 
@@ -1225,57 +1230,6 @@ fn evict_lots(occ: &mut Occupancy, lots: &mut Vec<Lot>, rect: Rect) {
         for z in old.min_z..=old.max_z {
             for x in old.min_x..=old.max_x {
                 occ.set(x, z, CellKind::Empty, true);
-            }
-        }
-    }
-}
-
-/// Paved inner-bailey pad between keep and hall so a flag plinth has a court.
-fn paint_keep_forecourt(occ: &mut Occupancy, castle: &CastlePlan) {
-    let (kx, kz) = castle.keep.center();
-    let (hx, hz) = castle.hall.center();
-    let search = castle.inner.inflate(8);
-    let mut best = None;
-    let mut best_score = i32::MAX;
-    for z in search.min_z..=search.max_z {
-        for x in search.min_x..=search.max_x {
-            if !occ.bounds.contains(x, z) {
-                continue;
-            }
-            if castle.keep_mass_at(x, z).is_some() {
-                continue;
-            }
-            if !matches!(
-                occ.kind(x, z),
-                CellKind::Green | CellKind::Empty | CellKind::CastleCourt | CellKind::Plaza
-            ) {
-                continue;
-            }
-            let score = (x - kx).abs() + (z - kz).abs() + (x - hx).abs() + (z - hz).abs();
-            if score < best_score {
-                best_score = score;
-                best = Some((x, z));
-            }
-        }
-    }
-    let Some((cx, cz)) = best else {
-        return;
-    };
-    for dz in -2..=2 {
-        for dx in -2..=2 {
-            let x = cx + dx;
-            let z = cz + dz;
-            if !occ.bounds.contains(x, z) {
-                continue;
-            }
-            if castle.keep_mass_at(x, z).is_some() {
-                continue;
-            }
-            if matches!(
-                occ.kind(x, z),
-                CellKind::Green | CellKind::Empty | CellKind::CastleCourt | CellKind::Plaza
-            ) {
-                occ.set(x, z, CellKind::CastleCourt, false);
             }
         }
     }
@@ -2860,7 +2814,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 13);
+        assert_eq!(PLAN_CACHE_VERSION, 14);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -2898,8 +2852,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 13;
-    const PLAN_LAYOUT_HASH: u64 = 0x2178_3ef6_dc7e_f082;
+    const PLAN_LAYOUT_VERSION: u32 = 14;
+    const PLAN_LAYOUT_HASH: u64 = 0x2926_19fb_feff_05bc;
 
     #[test]
     fn plan_cache_version_tracks_layout() {
@@ -2927,37 +2881,24 @@ mod tests {
                 .contains(plan.castle.flag.0, plan.castle.flag.1),
             "flag must not sit in the gatehouse"
         );
-        let keep = plan.castle.keep;
-        let keep_edge = {
-            let x = plan.castle.flag.0;
-            let z = plan.castle.flag.1;
-            let dx = if x < keep.min_x {
-                keep.min_x - x
-            } else if x > keep.max_x {
-                x - keep.max_x
-            } else {
-                0
-            };
-            let dz = if z < keep.min_z {
-                keep.min_z - z
-            } else if z > keep.max_z {
-                z - keep.max_z
-            } else {
-                0
-            };
-            dx.max(dz)
-        };
-        assert!(
-            keep_edge >= 3,
-            "flag must sit clear of the keep spire keep_edge={keep_edge} flag={:?} keep={keep:?}",
-            plan.castle.flag,
-        );
         assert!(
             plan.castle
                 .keep_mass_at(plan.castle.flag.0, plan.castle.flag.1)
                 .is_none(),
             "flag must not sit inside a keep mass flag={:?}",
             plan.castle.flag
+        );
+        let (kx, kz) = plan.castle.keep.center();
+        let (hx, hz) = plan.castle.hall.center();
+        let (fx, fz) = plan.castle.flag;
+        let near_keep = (fx - kx).abs().max((fz - kz).abs()) <= 18;
+        let near_hall = (fx - hx).abs().max((fz - hz).abs()) <= 18;
+        assert!(
+            near_keep && near_hall,
+            "flag must sit on the keep-hall court flag={:?} keep_c={:?} hall_c={:?}",
+            plan.castle.flag,
+            (kx, kz),
+            (hx, hz),
         );
         let hash = plan.layout_fingerprint();
         assert_eq!(
