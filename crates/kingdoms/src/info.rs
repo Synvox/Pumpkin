@@ -344,6 +344,7 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));
             }
             SceneKind::Cathedral
+            | SceneKind::CathedralClose
             | SceneKind::Mine
             | SceneKind::Riverside
             | SceneKind::Vineyard
