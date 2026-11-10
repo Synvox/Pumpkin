@@ -144,7 +144,30 @@ pub struct MobEntity {
     /// Kingdoms raid bodies skip living movement. `/summon` `NoAI` does not.
     director_driven: AtomicBool,
 }
+
 impl MobEntity {
+    /// Far `director_driven` bodies skip vanilla ticks this often (2–4).
+    pub const SPARSE_TICK_PERIOD: u32 = 4;
+
+    /// True when this kingdoms raid body should skip the rest of vanilla tick.
+    #[must_use]
+    pub fn skip_sparse_vanilla_tick(&self) -> bool {
+        if !self.is_director_driven() {
+            return false;
+        }
+        if !self.living_entity.entity.no_physics.load(Relaxed) {
+            return false;
+        }
+        let n = self
+            .living_entity
+            .entity
+            .tick_count
+            .load(Relaxed)
+            .unsigned_abs();
+        let id = self.living_entity.entity.entity_id.unsigned_abs();
+        n % Self::SPARSE_TICK_PERIOD != id % Self::SPARSE_TICK_PERIOD
+    }
+
     /// Vanilla `Mob.getNavigation`/`getMoveControl`: a rider steering a mob drives that mob.
     /// Only the mob's own AI step ticks its own navigator and move control directly.
     pub fn steered(&self) -> SteeredMob<'_> {

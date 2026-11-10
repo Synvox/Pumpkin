@@ -1675,6 +1675,12 @@ impl World {
             order::set_entity_order(Some(first_order + index as u64 * order::ORDERS_PER_ENTITY));
 
             entity.get_entity().tick_count.fetch_add(1, Relaxed);
+            let sparse = entity
+                .get_mob()
+                .is_some_and(|mob| mob.get_mob_entity().skip_sparse_vanilla_tick());
+            if sparse {
+                return;
+            }
             entity.tick(entity.as_ref(), server_ref);
 
             let entity_inner = entity.get_entity();

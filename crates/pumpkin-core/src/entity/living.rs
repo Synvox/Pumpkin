@@ -3622,10 +3622,10 @@ impl EntityBase for LivingEntity {
         let is_alive = !self.dead.load(Relaxed) && self.health.load() > 0.0;
         let in_death_animation = self.health.load() <= 0.0 && self.death_time.load(Relaxed) < 20;
         let is_player = self.entity.entity_type == &EntityType::PLAYER;
+        let director_driven = caller
+            .get_mob()
+            .is_some_and(|mob| mob.get_mob_entity().is_director_driven());
         if (is_alive || in_death_animation) && !is_player {
-            let director_driven = caller
-                .get_mob()
-                .is_some_and(|mob| mob.get_mob_entity().is_director_driven());
             // Kingdoms raid bodies skip living movement; `/summon` `NoAI` does not.
             if !director_driven {
                 self.tick_movement(caller);
@@ -3664,8 +3664,10 @@ impl EntityBase for LivingEntity {
             super::player::Player::get_supporting_block_pos,
         );
 
-        // Notify the block under the entity each tick if a supporting block position is found
-        if self.entity.is_affected_by_blocks()
+        // Notify the block under the entity each tick if a supporting block position is found.
+        // Kingdoms raid bodies skip this chunk read; `/summon` does not.
+        if !director_driven
+            && self.entity.is_affected_by_blocks()
             && let Some(supporting) = supporting_pos
         {
             let world = self.entity.world.load_full();
@@ -4703,6 +4705,33 @@ mod ai_step_tests {
 
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         assert_eq!(living.entity.pos.load(), position);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn director_driven_sparse_tick_skips_three_of_four() -> TestResult {
+        let folder = tempfile::tempdir()?;
+        let world = world(&folder);
+        let mob = probe(world.clone(), Arc::new(AtomicUsize::new(0)));
+        mob.mob.set_director_driven(true);
+        mob.mob
+            .living_entity
+            .entity
+            .no_physics
+            .store(true, Ordering::Relaxed);
+        let skipped = (0..8)
+            .map(|n| {
+                mob.mob
+                    .living_entity
+                    .entity
+                    .tick_count
+                    .store(n, Ordering::Relaxed);
+                mob.mob.skip_sparse_vanilla_tick()
+            })
+            .filter(|skip| *skip)
+            .count();
+        world.level.shutdown().await;
+        assert_eq!(skipped, 6);
         Ok(())
     }
 

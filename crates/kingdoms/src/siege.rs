@@ -1,10 +1,11 @@
 //! Siege jobs, gate close/breach, and town ownership.
 //!
 //! Capture is a flag-plate hold: attackers standing on the keep plinth with
-//! no defenders within [`FLAG_PAUSE_RANGE`] for [`HOLD_TICKS`] flip the town.
-//! A defender on or near the plate pauses the clock; an empty plate decays
-//! progress. Villagers reclaim the same way. Ownership is a JSON file in the
-//! world folder so it survives restarts.
+//! more bodies than defenders on that plate for [`HOLD_TICKS`] flip the town.
+//! A stacked attacking column is not frozen by keep guards merely nearby;
+//! defenders on the plate can still contest. An empty plate decays progress.
+//! Villagers reclaim the same way. Ownership is a JSON file in the world
+//! folder so it survives restarts.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -434,7 +435,8 @@ pub fn owner_wool(owner: &TownOwner) -> &'static Block {
 
 /// Advance a courtyard hold. Returns the new hold counter and a flip, if any.
 ///
-/// Attackers must meet [`capture_need`] on the plate with no defenders nearby.
+/// Attackers must meet [`capture_need`] on the plate with more holders than
+/// defenders standing on it.
 #[must_use]
 pub fn tick_hold(
     current: &TownOwner,
@@ -480,7 +482,8 @@ pub fn tick_hold_n(
     )
 }
 
-/// Plate-aware hold: nearby defenders pause; an empty plate decays.
+/// Plate-aware hold: a stacked column captures unless defenders match it
+/// on the plate. Nearby keep guards do not freeze the clock.
 #[must_use]
 pub fn tick_flag_hold(
     current: &TownOwner,
@@ -494,10 +497,12 @@ pub fn tick_flag_hold(
     let mut occupy = occupy_hold;
     let mut retake = retake_hold;
     let hold = hold_ticks();
-    let occupy_ok = presence.attackers_on_plate >= occupy_need && presence.defenders_near == 0;
-    let retake_ok = presence.defenders_on_plate >= retake_need && presence.attackers_near == 0;
-    let contested = (presence.attackers_on_plate > 0 && presence.defenders_near > 0)
-        || (presence.defenders_on_plate > 0 && presence.attackers_near > 0);
+    let occupy_ok = presence.attackers_on_plate >= 1
+        && presence.attackers_near >= occupy_need
+        && presence.attackers_on_plate > presence.defenders_on_plate;
+    let retake_ok = presence.defenders_on_plate >= retake_need
+        && presence.defenders_on_plate > presence.attackers_on_plate;
+    let contested = presence.attackers_on_plate > 0 && presence.defenders_on_plate > 0;
     if occupy_ok {
         occupy = occupy.saturating_add(delta);
         retake = 0;
@@ -1054,7 +1059,28 @@ mod tests {
     }
 
     #[test]
-    fn defenders_near_the_flag_pause_capture() {
+    fn one_holder_on_the_plate_with_enough_nearby_captures() {
+        let owner = TownOwner::Kingdom("alder".to_owned());
+        let update = tick_flag_hold(
+            &owner,
+            FlagPresence {
+                attackers_on_plate: 1,
+                defenders_on_plate: 0,
+                attackers_near: 6,
+                defenders_near: 6,
+            },
+            HOLD_TICKS - 1,
+            0,
+            6,
+            3,
+            1,
+        );
+        assert!(update.captured);
+        assert!(!update.paused);
+    }
+
+    #[test]
+    fn defenders_near_the_flag_do_not_pause_a_stacked_column() {
         let owner = TownOwner::Kingdom("alder".to_owned());
         let update = tick_flag_hold(
             &owner,
@@ -1062,7 +1088,29 @@ mod tests {
                 attackers_on_plate: 40,
                 defenders_on_plate: 0,
                 attackers_near: 40,
-                defenders_near: 1,
+                defenders_near: 8,
+            },
+            HOLD_TICKS - 1,
+            0,
+            3,
+            3,
+            1,
+        );
+        assert!(update.captured);
+        assert!(!update.paused);
+        assert_eq!(update.occupy_hold, 0);
+    }
+
+    #[test]
+    fn equal_stacks_on_the_plate_pause_capture() {
+        let owner = TownOwner::Kingdom("alder".to_owned());
+        let update = tick_flag_hold(
+            &owner,
+            FlagPresence {
+                attackers_on_plate: 40,
+                defenders_on_plate: 40,
+                attackers_near: 40,
+                defenders_near: 40,
             },
             HOLD_TICKS - 1,
             0,

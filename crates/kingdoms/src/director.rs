@@ -51,8 +51,8 @@ use crate::goals::{
 };
 use crate::info::{GateInfo, TownInfo};
 use crate::lod::{
-    ACQUIRE_RANGE, ALARM_RANGE, CIVILIAN_SLEEP_RANGE, DEFAULT_PATH_CAP, LodTier, PLAYER_SIM_RANGE,
-    PathBudget, SpatialBuckets,
+    ACQUIRE_RANGE, ALARM_RANGE, CIVILIAN_SLEEP_RANGE, DEFAULT_PATH_CAP, LodTier, PLAYER_CULL_RANGE,
+    PLAYER_SIM_RANGE, PathBudget, SpatialBuckets,
 };
 use crate::raid::{
     RaidSide, RaidSpec, WAVE_ADVANCE_REMAINING, WAVE_SPACING_TICKS, WaveMember, compose_wave,
@@ -87,15 +87,17 @@ const PLAYER_ARROW_RANGE: f64 = 32.0;
 const CAPTURE_METER_RANGE: f64 = 64.0;
 const DEFAULT_WAR_CLOCK_TICKS: u32 = 2400;
 /// Quiet ticks after hold lockout so builders can repair for the new owner.
-const REPAIR_WINDOW_TICKS: u32 = 400;
+const REPAIR_WINDOW_TICKS: u32 = 2400;
 const DEFAULT_WAR_CLOCK_FRONTS: usize = 1;
 const DEFAULT_WAR_CLOCK_SIZE: u16 = 24;
 const REPAIR_PERIOD: u32 = 40;
-const REPAIR_PLACE_PERIOD: u32 = 10;
+const REPAIR_PLACE_PER_TICK: u32 = 2;
 const REPAIR_REACH: f64 = 2.5;
 const REPAIR_QUEUE_CAP: usize = 24;
 /// Columns inspected for missing blocks per repair pass.
-const REPAIR_SCAN_COLUMNS: usize = 1;
+const REPAIR_SCAN_COLUMNS: usize = 4;
+/// No flag-distance progress for this long counts as a stuck column.
+const STUCK_TICKS: u32 = 200;
 
 const COMBAT_LOG_CAP: usize = 512;
 const RESPAWN_PERIOD: u32 = 200;
@@ -115,6 +117,8 @@ const SPAWNS_PER_WORLD_TICK: u32 = 12;
 const ROUT_TAGS_PER_TICK: usize = 8;
 /// Leftover raid bodies despawned per town per tick.
 const DESPAWNS_PER_TICK: usize = 12;
+/// Far wave members turned into sliding ghosts per town per tick.
+const GHOST_SPAWNS_PER_TICK: usize = 8;
 /// Nearby players credited on a capture or successful defense.
 const CREDIT_RANGE: f64 = 64.0;
 /// Minimum ticks between any soldier/captain line on the whole director.
@@ -142,12 +146,13 @@ const JOIN_ENTITY_BUDGET: usize = 64;
 const DROPS_PER_TICK: usize = 8;
 /// Engines / punch / repair-scan towns per world tick.
 const HEAVY_TOWNS_PER_TICK: u32 = 1;
-/// Raiders within this range of the threatened gate count as storming it.
-const STORMING_RANGE: f64 = 8.0;
+/// Raiders within this range of a gate count as storming it.
+const STORMING_RANGE: f64 = 16.0;
 /// This many pillagers at the portcullis count as a breach even without the ram.
 const STORMING_COUNT: usize = 8;
-/// Allied bodies this close to the plate rush it once capture starts.
-const DEFENDER_RUSH_RANGE: f64 = 48.0;
+/// Stuck columns breach if this many raiders are within [`STUCK_STORM_RANGE`].
+const STUCK_STORM_COUNT: usize = 3;
+const STUCK_STORM_RANGE: f64 = 24.0;
 
 static WORST_MSPT_CENTS: AtomicU32 = AtomicU32::new(0);
 static WORST_DIRECTOR_CENTS: AtomicU32 = AtomicU32::new(0);
@@ -411,6 +416,8 @@ struct TownWar {
     gate_breached: bool,
     repair_jobs: VecDeque<RepairJob>,
     repair_assigned: HashMap<i32, RepairJob>,
+    builders: Vec<i32>,
+    builders_scanned: bool,
     last_repair_tick: u32,
     ram: Option<crate::ram::SiegeRam>,
     treb_shot: Option<crate::engines::TrebShot>,
@@ -444,11 +451,28 @@ struct TownWar {
     flag_attackers: u32,
     flag_defenders: u32,
     last_flag_event: u32,
+    last_progress_dist: f64,
+    last_progress_tick: u32,
+    repair_placed: u32,
+    repair_started: u32,
+    repair_placed_tick: u32,
+    repair_placed_this_tick: u32,
 }
 
 struct Wired {
     faction: Faction,
     captain: bool,
+}
+
+/// Despawned raid body that still slides and counts toward the plate.
+#[derive(Clone)]
+struct GhostSoldier {
+    faction: Faction,
+    x: f64,
+    y: f64,
+    z: f64,
+    bearer: bool,
+    raider: bool,
 }
 
 struct ActiveRaid {
@@ -471,6 +495,7 @@ struct ActiveRaid {
     virt_raiders: u16,
     virt_defenders: u16,
     virt_march: u32,
+    ghosts: Vec<GhostSoldier>,
 }
 
 impl Director {
@@ -582,7 +607,8 @@ impl Director {
                 if raid.materialized {
                     // Soldiers only. Militia and named civilians sit in `wired`
                     // after the bell and must not eat KINGDOMS_BODY_BUDGET.
-                    raid.living.len() + raid.temps.len()
+                    // Ghosts still occupy a budget slot so cull does not refill.
+                    raid.living.len() + raid.temps.len() + raid.ghosts.len()
                 } else {
                     0
                 }
@@ -717,6 +743,7 @@ impl Director {
                 virt_raiders,
                 virt_defenders,
                 virt_march: 0,
+                ghosts: Vec::new(),
             });
             war.alarm = true;
             war.gates_closed = false;
@@ -1189,6 +1216,8 @@ impl TownWar {
             gate_breached: false,
             repair_jobs: VecDeque::new(),
             repair_assigned: HashMap::new(),
+            builders: Vec::new(),
+            builders_scanned: false,
             last_repair_tick: 0,
             ram: None,
             treb_shot: None,
@@ -1220,6 +1249,12 @@ impl TownWar {
             flag_attackers: 0,
             flag_defenders: 0,
             last_flag_event: 0,
+            last_progress_dist: f64::INFINITY,
+            last_progress_tick: 0,
+            repair_placed: 0,
+            repair_started: 0,
+            repair_placed_tick: 0,
+            repair_placed_this_tick: 0,
         }
     }
 
@@ -2160,13 +2195,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     war.threatened = Some(t);
                 }
             } else {
-                let warming = war.raid.as_ref().is_some_and(|r| {
-                    tick < r.warm_until
-                        || !r.pending_members.is_empty()
-                        || r.pending_retake > 0
-                        || r.extra_left > 0
-                });
-                war.alarm = warming;
+                war.alarm = false;
             }
             if !hostiles_in_town {
                 let bounds = inhabited_bounds(&war.scene);
@@ -2250,20 +2279,18 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     // Hold the soak load: a gate blender would otherwise trip
                     // "raid defeated" and dump a live front in under a minute.
                     finished = false;
+                    let present = raid.living.len() + raid.ghosts.len();
                     if raid.pending_members.is_empty()
                         && raid.pending_retake == 0
-                        && raid.living.len() < usize::from(raid.spec.raiders) / 2
+                        && present < usize::from(raid.spec.raiders) / 2
                     {
-                        let need = raid
-                            .spec
-                            .raiders
-                            .saturating_sub(raid.living.len() as u16)
-                            .max(40);
+                        let need = raid.spec.raiders.saturating_sub(present as u16).max(40);
                         raid.pending_members = compose_wave(need, 0);
                     }
                 } else if raid.materialized
                     && raid.wave >= raid.spec.waves
                     && raid.living.is_empty()
+                    && raid.ghosts.is_empty()
                     && raid.spawned_this_wave > 0
                     && raid.pending_members.is_empty()
                     && raid.pending_retake == 0
@@ -2287,15 +2314,28 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 assign_named_npcs(&snapshots);
                 war.named_npcs = true;
             }
-            let gate = war.threatened.unwrap_or_else(|| war.scene.keep());
-            war.raider_gate_dist = snapshots
+            let keep = war.scene.keep();
+            let mut closest = snapshots
                 .iter()
                 .filter(|(_, f)| matches!(f, Faction::Pillager))
                 .map(|(e, _)| {
                     let p = e.get_entity().pos.load();
-                    (p.x - f64::from(gate.x)).hypot(p.z - f64::from(gate.z))
+                    (p.x - f64::from(keep.x)).hypot(p.z - f64::from(keep.z))
                 })
                 .fold(f64::INFINITY, f64::min);
+            if let Some(raid) = &war.raid {
+                for ghost in &raid.ghosts {
+                    if matches!(ghost.faction, Faction::Pillager) {
+                        closest = closest
+                            .min((ghost.x - f64::from(keep.x)).hypot(ghost.z - f64::from(keep.z)));
+                    }
+                }
+            }
+            war.raider_gate_dist = closest;
+            if closest + 1.0 < war.last_progress_dist {
+                war.last_progress_dist = closest;
+                war.last_progress_tick = tick;
+            }
             if finished {
                 if let Some(raid) = war.raid.take() {
                     pending_despawn.extend(raid.living);
@@ -2479,19 +2519,12 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     };
     if !amortizing {
         maybe_refill_repair(world, town_id, tick, alarm);
+        place_queued_repairs(world, town_id, tick);
     }
     let work_dests = standing_dests(&work_posts, keep_dest.y, 0);
     let home_dests = standing_dests(&home_posts, keep_dest.y, 0);
     let wall_dests = standing_dests(&wall_posts, keep_dest.y, WALL_WALK_LIFT);
-    let player_xz: Vec<(f64, f64)> = world
-        .players
-        .load()
-        .iter()
-        .map(|p| {
-            let pos = p.living_entity.entity.pos.load();
-            (pos.x, pos.z)
-        })
-        .collect();
+    let player_xz = world_player_xz(world);
     arm_militia_tick(&snapshots, alarm);
     shout_named_npcs(world, town_id, tick, alarm, inner_gate_dest);
     let squads = collect_squads(world);
@@ -2514,6 +2547,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     let mut defenders_on_plate = 0u32;
     let mut attackers_near = 0u32;
     let mut defenders_near = 0u32;
+    let mut in_courtyard_n = 0u32;
+    let mut cull: Vec<(i32, GhostSoldier)> = Vec::new();
     let flag_xz = (keep_dest.x, keep_dest.z);
     let mut curtain_cross: Option<(i32, f64, f64, f64)> = None;
     let mut archer_walk: Option<(i32, f64, f64, f64)> = None;
@@ -2548,6 +2583,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             continue;
         };
         let pos = base.pos.load();
+        let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
+        let is_builder = role == Some(VillagerRole::Builder);
         let routed = has_tag(base, TAG_ROUTED);
         if !routed {
             if on_flag_plate(flag_xz, pos.x, pos.z) {
@@ -2566,12 +2603,32 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     defenders_in_keep += 1;
                 }
             }
+            if matches!(faction, Faction::Pillager) && in_courtyard(gatehouse_rect, pos.x, pos.z) {
+                in_courtyard_n += 1;
+            }
+        }
+        if !amortizing
+            && !is_builder
+            && job_of(base) != MarchJob::Ram
+            && cull.len() < DESPAWNS_PER_TICK
+            && !player_near_list(&player_xz, pos.x, pos.z, PLAYER_CULL_RANGE)
+        {
+            cull.push((
+                base.entity_id,
+                GhostSoldier {
+                    faction: faction.clone(),
+                    x: pos.x,
+                    y: pos.y,
+                    z: pos.z,
+                    bearer: has_tag(base, TAG_BEARER),
+                    raider: has_tag(base, TAG_RAIDER),
+                },
+            ));
+            continue;
         }
         if amortizing && !in_join_ai_window(snap_i, live_age, snapshots.len()) {
             continue;
         }
-        let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
-        let is_builder = role == Some(VillagerRole::Builder);
         let offscreen = !player_near_list(&player_xz, pos.x, pos.z, CIVILIAN_SLEEP_RANGE);
         let far_from_player = !player_near_list(&player_xz, pos.x, pos.z, PLAYER_SIM_RANGE);
         let idle_villager = matches!(role, Some(VillagerRole::Civilian | VillagerRole::Guard))
@@ -2598,10 +2655,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             } else {
                 LodTier::Far
             };
-            if far_tier.should_tick(base.entity_id, tick) {
-                let dest = match faction {
-                    Faction::Pillager if breached => overlay_flag_dest(
-                        keep_dest,
+            let dest = match faction {
+                Faction::Pillager => {
+                    let dest = overlay_flag_dest(
+                        march_dest,
                         faction,
                         has_tag(base, TAG_BEARER),
                         pos.x,
@@ -2609,27 +2666,22 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                         keep_rect,
                         gatehouse_rect,
                         &siege_gates,
-                        true,
+                        breached,
                         capturing,
                         keep_dest,
-                    ),
-                    Faction::Pillager => march_dest,
-                    _ if capturing => overlay_flag_dest(
-                        keep_dest,
-                        faction,
-                        false,
-                        pos.x,
-                        pos.z,
-                        keep_rect,
-                        gatehouse_rect,
-                        &siege_gates,
-                        breached,
-                        true,
-                        keep_dest,
-                    ),
-                    _ => keep_dest,
-                };
-                if amortizing {
+                    );
+                    if dest_is_plate(dest, keep_dest) {
+                        plate_slot(base.entity_id, dest)
+                    } else {
+                        dest
+                    }
+                }
+                _ => march_dest,
+            };
+            let rush_plate = dest_is_plate(dest, keep_dest);
+            if rush_plate || far_tier.should_tick(base.entity_id, tick) {
+                let dist = (pos.x - f64::from(dest.x)).hypot(pos.z - f64::from(dest.z));
+                if amortizing || dist <= STUCK_STORM_RANGE || rush_plate {
                     slide_direct(base, dest);
                 } else {
                     slide_along_field(base, town_id, dest);
@@ -2755,6 +2807,11 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             capturing,
             keep_dest,
         );
+        let dest = if matches!(faction, Faction::Pillager) && dest_is_plate(dest, keep_dest) {
+            plate_slot(id, dest)
+        } else {
+            dest
+        };
         let dest = overlay_civilian_posts(
             dest,
             role,
@@ -2801,7 +2858,15 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         let dist = (pos.x - dest_v.x).hypot(pos.z - dest_v.z);
         let period = slide_period(dist, in_combat);
         let follower = !in_combat && !is_squad_leader(id);
-        let due = if follower {
+        // Followers refresh every 24 ticks (~0.2 blk/s), too slow to cross a
+        // two-ring capital before the soak ends. Raiders use the alarm period.
+        let due = if is_builder && repair_dest.is_some()
+            || (matches!(faction, Faction::Pillager) && dest_is_plate(dest, keep_dest))
+        {
+            true
+        } else if matches!(faction, Faction::Pillager) && alarm {
+            tick.is_multiple_of(period)
+        } else if follower {
             should_refresh_path(id, tick as i32, dist < DIRECT_RANGE)
         } else if alarm {
             tick.is_multiple_of(period)
@@ -2809,7 +2874,12 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             dist > DIRECT_RANGE || base.tick_count.load(Ordering::Relaxed) == 0
         };
         if due {
-            if amortizing || (follower && dist < DIRECT_RANGE) {
+            if amortizing
+                || (follower && dist < DIRECT_RANGE)
+                || (matches!(faction, Faction::Pillager) && dist <= STUCK_STORM_RANGE)
+                || (matches!(faction, Faction::Pillager) && dest_is_plate(dest, keep_dest))
+                || (is_builder && repair_dest.is_some())
+            {
                 slide_direct(base, dest);
             } else {
                 slide_along_field(base, town_id, dest);
@@ -2858,6 +2928,31 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             n_repair += 1;
         }
     }
+    tick_ghosts(
+        world,
+        town_id,
+        tick,
+        if amortizing {
+            &[]
+        } else {
+            player_xz.as_slice()
+        },
+        march_dest,
+        keep_dest,
+        keep_rect,
+        gatehouse_rect,
+        &siege_gates,
+        breached,
+        capturing,
+        &owner_faction,
+        &mut attackers_on_plate,
+        &mut defenders_on_plate,
+        &mut attackers_near,
+        &mut defenders_near,
+        &mut raiders_in_keep,
+        &mut defenders_in_keep,
+        &mut in_courtyard_n,
+    );
     let loop_us = loop_started.elapsed().as_micros();
     log_slow_phase(tick, "entities", loop_started);
     if curtain_cross.is_some() || archer_walk.is_some() || ram_sally.is_some() {
@@ -2896,26 +2991,47 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         tick_siege_engines(world, town_id, tick, alarm);
         log_slow_phase(tick, "engines", engines_started);
     }
-    let storming = snapshots
-        .iter()
-        .filter(|(entity, faction)| {
-            matches!(faction, Faction::Pillager) && {
-                let p = entity.get_entity().pos.load();
-                (p.x - f64::from(march_dest.x) - 0.5).hypot(p.z - f64::from(march_dest.z) - 0.5)
-                    <= STORMING_RANGE
-            }
-        })
-        .count()
-        >= STORMING_COUNT;
-    if (ram_at_gate || storming) && !breached {
-        let gate = {
+    let ghosts = {
+        let dir = lock();
+        dir.towns
+            .get(town_id)
+            .and_then(|w| w.raid.as_ref())
+            .map_or_else(Vec::new, |r| r.ghosts.clone())
+    };
+    let mut stormed = packed_storm_gate(
+        &snapshots,
+        &ghosts,
+        &siege_gates,
+        STORMING_RANGE,
+        STORMING_COUNT,
+    );
+    let last_progress = {
+        let dir = lock();
+        dir.towns
+            .get(town_id)
+            .map_or(tick, |w| w.last_progress_tick)
+    };
+    if stormed.is_none() && tick.saturating_sub(last_progress) >= STUCK_TICKS {
+        stormed = packed_storm_gate(
+            &snapshots,
+            &ghosts,
+            &siege_gates,
+            STUCK_STORM_RANGE,
+            STUCK_STORM_COUNT,
+        )
+        .or_else(|| nearest_gate_to_raiders(&snapshots, &ghosts, &siege_gates));
+    }
+    let storming = stormed.is_some();
+    if ram_at_gate || storming {
+        let ram_gate = {
             let dir = lock();
             dir.towns.get(town_id).and_then(|w| {
                 w.threatened
                     .or_else(|| w.scene.gates().first().map(|g| ScenePost::new(g.x, g.z)))
-                    .zip(w.scene.gates().first().copied())
+                    .and_then(|post| gate_info_near(&siege_gates, post).map(|g| (post, g)))
             })
         };
+        let gate = stormed.map(|g| (ScenePost::new(g.x, g.z), g)).or(ram_gate);
         let cells = if let Some((post, gate)) = gate {
             siege::gate_bar_cells(world, gate, standing_y(world, post))
         } else {
@@ -2924,13 +3040,19 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         let n = cells.len();
         {
             let mut dir = lock();
-            if let Some(war) = dir.towns.get_mut(town_id) {
+            let fire = if let Some(war) = dir.towns.get_mut(town_id) {
+                let already = war.gate_breached;
                 war.gate_breached = true;
-                if war.pending_breach.is_empty() {
-                    war.pending_breach = cells;
+                let fresh = cells.iter().any(|c| !war.pending_breach.contains(c));
+                if fresh {
+                    war.pending_breach.extend(cells);
                 }
-            }
+                !already || fresh
+            } else {
+                false
+            };
             if let Some((_, gate)) = gate
+                && fire
                 && (n > 0 || storming)
             {
                 dir.push_event(CombatEvent {
@@ -2940,7 +3062,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     other: Some(n as i32),
                     x: f64::from(gate.x),
                     z: f64::from(gate.z),
-                    note: if ram_at_gate {
+                    note: if ram_at_gate && stormed.is_none() {
                         format!("{town_id} ram breached gate")
                     } else {
                         format!("{town_id} raiders stormed the gate")
@@ -2949,6 +3071,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             }
         }
     }
+    apply_cull(town_id, &cull);
     apply_morale(town_id, tick, &snapshots, captain_down, breached);
     {
         let dir = lock();
@@ -3036,9 +3159,45 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     }
     if tick.is_multiple_of(100) && (alarm || n_repair > 0 || n_arrows > 0) {
         let n_entities = snapshots.len();
-        tracing::info!(
-            "kingdoms raid entity tick town={town_id} ticking={n_ticking} loaded={n_loaded} active={n_active} no_ai={n_no_ai} sleep={n_sleep} slid={n_slid} melee={n_melee} ranged={n_ranged} arrows={n_arrows} repair={n_repair} loop_us={loop_us} keep_r={raiders_in_keep} keep_d={defenders_in_keep} entities={n_entities}"
+        let (ghost_n, flag_d, last_prog, placed, started) = {
+            let dir = lock();
+            dir.towns
+                .get(town_id)
+                .map_or((0, f64::INFINITY, 0, 0, 0), |w| {
+                    (
+                        w.raid.as_ref().map_or(0, |r| r.ghosts.len()),
+                        w.raider_gate_dist,
+                        w.last_progress_tick,
+                        w.repair_placed,
+                        w.repair_started,
+                    )
+                })
+        };
+        let reason = raid_outcome_reason(
+            attackers_on_plate,
+            in_courtyard_n,
+            storming,
+            snapshots
+                .iter()
+                .filter(|(_, f)| matches!(f, Faction::Pillager))
+                .count() as u32
+                + ghost_n as u32,
+            tick,
+            last_prog,
         );
+        tracing::info!(
+            "kingdoms raid entity tick town={town_id} ticking={n_ticking} loaded={n_loaded} active={n_active} no_ai={n_no_ai} sleep={n_sleep} slid={n_slid} melee={n_melee} ranged={n_ranged} arrows={n_arrows} repair={n_repair} loop_us={loop_us} keep_r={raiders_in_keep} keep_d={defenders_in_keep} entities={n_entities} ghosts={ghost_n}"
+        );
+        tracing::info!(
+            "kingdoms raid outcome town={town_id} reason={reason} plate_r={attackers_on_plate} courtyard={in_courtyard_n} storming={storming} flag_d={flag_d:.1} ghosts={ghost_n}"
+        );
+        if placed > 0 {
+            let elapsed = tick.saturating_sub(started).max(1);
+            let per_min = f64::from(placed) * 1200.0 / f64::from(elapsed);
+            tracing::info!(
+                "kingdoms repair rate town={town_id} placed={placed} per_min={per_min:.1}"
+            );
+        }
     }
 
     if spawn_soldiers {
@@ -3077,12 +3236,13 @@ fn take_spawn_slots(want: u32) -> u32 {
 }
 
 fn spawn_soldiers_this_tick(world: &Arc<World>, town_id: &str, tick: u32) {
+    // Far wave members become ghosts even when the live body budget is full.
+    spawn_wave_batch(world, town_id, tick);
     if lock().live_body_count() >= body_budget() {
         return;
     }
     // Raiders first so extras cannot spend the whole world spawn budget and
     // leave the wave empty (which used to trip "raid defeated").
-    spawn_wave_batch(world, town_id, tick);
     let extra = lock()
         .towns
         .get(town_id)
@@ -3195,10 +3355,11 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         }
         return;
     }
-    let slots = take_spawn_slots(SPAWNS_PER_TICK as u32) as usize;
-    if slots == 0 {
+    if lock().live_body_count() >= body_budget() {
         return;
     }
+    let players = world_player_xz(world);
+    let pull = SPAWNS_PER_TICK;
     let batch: Vec<(usize, WaveMember)> = {
         let mut dir = lock();
         let Some(war) = dir.towns.get_mut(town_id) else {
@@ -3207,7 +3368,7 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         let Some(raid) = &mut war.raid else {
             return;
         };
-        let n = slots.min(raid.pending_members.len());
+        let n = pull.min(raid.pending_members.len());
         let start = raid.spawn_cursor as usize;
         raid.pending_members
             .drain(..n)
@@ -3218,19 +3379,53 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
     if batch.is_empty() {
         return;
     }
+    let camp_y = standing_y(world, camp);
+    let mut remaining = body_budget().saturating_sub(lock().live_body_count());
     let mut spawned_ids = Vec::new();
+    let mut new_ghosts = Vec::new();
     let mut leftover = Vec::new();
-    for (i, member) in &batch {
+    let mut live_jobs = Vec::new();
+    for (i, member) in batch {
         let vindicator = member.entity_type == &EntityType::VINDICATOR;
-        let job = MarchJob::assign(*i, vindicator);
+        let job = MarchJob::assign(i, vindicator);
         let post = match job {
             MarchJob::Ram if !rams.is_empty() => rams[i % rams.len()],
             MarchJob::Ladder if !ladders.is_empty() => ladders[i % ladders.len()],
             _ => tents[i % tents.len()],
         };
-        let y = standing_y(world, post);
+        let y = if job == MarchJob::Ram || job == MarchJob::Ladder {
+            standing_y(world, post)
+        } else {
+            camp_y
+        };
         let ring = (i / tents.len().max(1)) as u16;
         let pos = spawn_offset(post, ring, y);
+        if job != MarchJob::Ram && should_virtualize(&players, pos.x, pos.z) {
+            if remaining == 0 {
+                leftover.push(member);
+            } else {
+                new_ghosts.push(GhostSoldier {
+                    faction: Faction::Pillager,
+                    x: pos.x,
+                    y: pos.y,
+                    z: pos.z,
+                    bearer: member.captain,
+                    raider: true,
+                });
+                remaining -= 1;
+            }
+        } else {
+            live_jobs.push((member, pos, job, post));
+        }
+    }
+    let slots =
+        take_spawn_slots(live_jobs.len().min(SPAWNS_PER_TICK).min(remaining) as u32) as usize;
+    for (n, (member, pos, job, post)) in live_jobs.into_iter().enumerate() {
+        if n >= slots {
+            leftover.push(member);
+            continue;
+        }
+        let vindicator = member.entity_type == &EntityType::VINDICATOR;
         let entity = Entity::new(world.clone(), pos, member.entity_type);
         let base: Arc<dyn EntityBase> = if vindicator {
             pumpkin_core::entity::mob::vindicator::VindicatorEntity::new(entity)
@@ -3246,7 +3441,7 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         if world.spawn_entity(base) {
             spawned_ids.push(id);
         } else {
-            leftover.push(*member);
+            leftover.push(member);
         }
     }
     let mut dir = lock();
@@ -3257,8 +3452,10 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
     {
         leftover.append(&mut raid.pending_members);
         raid.pending_members = leftover;
-        raid.spawn_cursor = raid.spawn_cursor.saturating_add(spawned_ids.len() as u16);
+        let added = spawned_ids.len() + new_ghosts.len();
+        raid.spawn_cursor = raid.spawn_cursor.saturating_add(added as u16);
         raid.living.extend(spawned_ids.iter().copied());
+        raid.ghosts.extend(new_ghosts);
         if raid.pending_members.is_empty() {
             let count = raid.spawn_cursor;
             raid.spawned_this_wave = count;
@@ -3319,7 +3516,16 @@ pub fn spawn_citizen(
         add_to_team(world, kingdom, &base.get_scoreboard_name());
     }
     let id = base.get_entity().entity_id;
-    world.spawn_entity(base).then_some(id)
+    let spawned = world.spawn_entity(base);
+    if spawned && role == VillagerRole::Builder {
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id)
+            && !war.builders.contains(&id)
+        {
+            war.builders.push(id);
+        }
+    }
+    spawned.then_some(id)
 }
 
 /// Re-bind AI on tagged entities that were loaded from disk.
@@ -3390,13 +3596,19 @@ pub fn try_take_path_budget() -> bool {
 /// O(1) flow-field waypoint toward `dest` for this town.
 #[must_use]
 pub fn flow_waypoint(town_id: &str, x: f64, z: f64, dest: PostTarget) -> (f64, f64) {
-    let mut dir = lock();
-    let Some(war) = dir.towns.get_mut(town_id) else {
+    let dir = lock();
+    let Some(war) = dir.towns.get(town_id) else {
         let v = dest.vec();
         return (v.x, v.z);
     };
-    let field = war.field_toward(ScenePost::new(dest.x, dest.z));
-    field.waypoint(x, z)
+    let key = crate::flow::cache_key(ScenePost::new(dest.x, dest.z));
+    if let Some(field) = war.fields.get(&key) {
+        return field.waypoint(x, z);
+    }
+    // Building a capital-sized BFS here was the 1.2 s first-town hitch.
+    // Warmup prewarms the flag and outer-gate fields; otherwise bee-line.
+    let v = dest.vec();
+    (v.x, v.z)
 }
 
 fn queue_raid_warmup(town_id: &str) {
@@ -3508,6 +3720,7 @@ fn raid_snapshot_entities(world: &World, town_id: &str) -> Vec<Arc<dyn EntityBas
             ids.extend(raid.temps.iter().copied());
         }
         ids.extend(war.wired.keys().copied());
+        ids.extend(war.builders.iter().copied());
         ids
     };
     entities_from_ids(world, ids)
@@ -3540,11 +3753,21 @@ fn prewarm_town_fields(town_id: &str) {
     let Some(war) = dir.towns.get_mut(town_id) else {
         return;
     };
-    if !war.fields.is_empty() {
+    let flag = war.scene.flag();
+    if !war.fields.contains_key(&crate::flow::cache_key(flag)) {
+        let _ = war.field_toward(flag);
         return;
     }
-    let dest = war.scene.flag();
-    let _ = war.field_toward(dest);
+    let flag_dest = PostTarget {
+        x: flag.x,
+        y: flag.height_or(64),
+        z: flag.z,
+    };
+    let gate = outermost_gate_dest(war.scene.gates(), flag_dest);
+    let post = ScenePost::new(gate.x, gate.z);
+    if !war.fields.contains_key(&crate::flow::cache_key(post)) {
+        let _ = war.field_toward(post);
+    }
 }
 
 fn take_snapshot_cursor(town_id: &str) -> u32 {
@@ -3914,12 +4137,106 @@ fn apply_finished_repair_scan() {
     }
 }
 
-fn maybe_refill_repair(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool) {
-    apply_finished_repair_scan();
-    if alarm || !tick.is_multiple_of(REPAIR_PERIOD) {
+fn remember_builders(world: &World, town_id: &str) {
+    let posts = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        if war.builders_scanned {
+            return;
+        }
+        let mut posts = vec![war.scene.keep()];
+        posts.extend(war.scene.civilian_homes().iter().copied().take(8));
+        posts
+    };
+    let mut ids = Vec::new();
+    for post in posts {
+        let aabb = BoundingBox::new(
+            Vector3::new(f64::from(post.x) - 16.0, -64.0, f64::from(post.z) - 16.0),
+            Vector3::new(f64::from(post.x) + 16.0, 320.0, f64::from(post.z) + 16.0),
+        );
+        for entity in world.get_all_at_box(&aabb) {
+            let base = entity.get_entity();
+            if role_from_tags(base).and_then(|s| VillagerRole::parse(&s))
+                == Some(VillagerRole::Builder)
+            {
+                ids.push(base.entity_id);
+            }
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    let mut dir = lock();
+    if let Some(war) = dir.towns.get_mut(town_id) {
+        war.builders_scanned = true;
+        war.builders = ids;
+        tracing::info!(
+            town = town_id,
+            n = war.builders.len(),
+            "kingdoms builders remembered"
+        );
+    }
+}
+
+fn place_queued_repairs(world: &Arc<World>, town_id: &str, tick: u32) {
+    let in_window = {
+        let dir = lock();
+        dir.towns.get(town_id).is_some_and(|w| {
+            tick >= w.hold_lockout && tick < w.repair_until.max(w.hold_lockout.saturating_add(1))
+        })
+    };
+    if !in_window {
         return;
     }
-    let (scene, threatened, queued, cursor, busy, locked) = {
+    for _ in 0..REPAIR_PLACE_PER_TICK {
+        let job = {
+            let mut dir = lock();
+            let Some(war) = dir.towns.get_mut(town_id) else {
+                return;
+            };
+            if war.repair_placed_tick != tick {
+                war.repair_placed_tick = tick;
+                war.repair_placed_this_tick = 0;
+            }
+            if war.repair_placed_this_tick >= REPAIR_PLACE_PER_TICK {
+                return;
+            }
+            war.repair_jobs.pop_front()
+        };
+        let Some(job) = job else {
+            break;
+        };
+        if !repair::place_one(world, job) {
+            continue;
+        }
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            if war.repair_started == 0 {
+                war.repair_started = tick;
+            }
+            war.repair_placed = war.repair_placed.saturating_add(1);
+            war.repair_placed_this_tick = war.repair_placed_this_tick.saturating_add(1);
+            war.last_repair_tick = tick;
+        }
+    }
+}
+
+fn maybe_refill_repair(world: &Arc<World>, town_id: &str, tick: u32, _alarm: bool) {
+    apply_finished_repair_scan();
+    let in_window = {
+        let dir = lock();
+        dir.towns.get(town_id).is_some_and(|w| {
+            tick >= w.hold_lockout && tick < w.repair_until.max(w.hold_lockout.saturating_add(1))
+        })
+    };
+    // Only the post-flip window. Idle towns used to consume the one scan
+    // slot per tick and starve the town that actually needed repair.
+    if !in_window || !tick.is_multiple_of(REPAIR_PERIOD) {
+        return;
+    }
+    remember_builders(world, town_id);
+    let (scene, threatened, queued, cursor, busy) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
             return;
@@ -3929,11 +4246,12 @@ fn maybe_refill_repair(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool
             war.threatened.map(|p| (p.x, p.z)),
             war.repair_jobs.len() + war.repair_assigned.len(),
             war.repair_scan_cursor,
-            !war.pending_despawn.is_empty() || !war.pending_unticket.is_empty(),
-            tick < war.hold_lockout,
+            // Cull despawns every tick while a soak raid is held open; that
+            // must not starve the post-flip repair window.
+            !in_window && (!war.pending_despawn.is_empty() || !war.pending_unticket.is_empty()),
         )
     };
-    if busy || locked || queued >= 8 {
+    if busy || queued >= REPAIR_QUEUE_CAP {
         return;
     }
     if REPAIR_SCANS_THIS_TICK.fetch_add(1, Ordering::Relaxed) >= 1 {
@@ -4013,16 +4331,30 @@ fn try_place_repair(world: &Arc<World>, town_id: &str, entity_id: i32, tick: u32
         let Some(war) = dir.towns.get_mut(town_id) else {
             return false;
         };
-        if tick.saturating_sub(war.last_repair_tick) < REPAIR_PLACE_PERIOD {
+        if war.repair_placed_tick != tick {
+            war.repair_placed_tick = tick;
+            war.repair_placed_this_tick = 0;
+        }
+        if war.repair_placed_this_tick >= REPAIR_PLACE_PER_TICK {
             return false;
         }
         let Some(job) = war.repair_assigned.remove(&entity_id) else {
             return false;
         };
+        war.repair_placed_this_tick += 1;
         war.last_repair_tick = tick;
         job
     };
     if repair::place_one(world, job) {
+        {
+            let mut dir = lock();
+            if let Some(war) = dir.towns.get_mut(town_id) {
+                if war.repair_started == 0 {
+                    war.repair_started = tick;
+                }
+                war.repair_placed = war.repair_placed.saturating_add(1);
+            }
+        }
         tracing::info!(
             "kingdoms builder placed block x={} y={} z={}",
             job.x,
@@ -5618,7 +5950,7 @@ fn dest_for(
     }
     if role == Some(VillagerRole::Civilian) {
         if capturing && alarm {
-            return keep_dest;
+            return work_dest;
         }
         return match schedule::civilian_post(alarm, world_time) {
             CivilianPost::Keep => keep_dest,
@@ -5632,15 +5964,7 @@ fn dest_for(
         Faction::Kingdom(_) if role == Some(VillagerRole::Guard) && !alarm && !in_combat => {
             patrol_dest
         }
-        Faction::Kingdom(_) if alarm || in_combat => {
-            if capturing {
-                march_dest
-            } else if breached {
-                keep_dest
-            } else {
-                march_dest
-            }
-        }
+        Faction::Kingdom(_) if alarm || in_combat => march_dest,
         Faction::Kingdom(_) => patrol_dest,
         Faction::Pillager => {
             if job == MarchJob::Ladder && !breached {
@@ -5652,6 +5976,19 @@ fn dest_for(
             }
         }
     }
+}
+
+fn plate_slot(entity_id: i32, flag: PostTarget) -> PostTarget {
+    let i = entity_id.unsigned_abs() % 9;
+    PostTarget {
+        x: flag.x + (i % 3) as i32 - 1,
+        y: flag.y,
+        z: flag.z + (i / 3) as i32 - 1,
+    }
+}
+
+fn dest_is_plate(dest: PostTarget, flag: PostTarget) -> bool {
+    (dest.x - flag.x).abs() <= 1 && (dest.z - flag.z).abs() <= 1
 }
 
 fn overlay_flag_dest(
@@ -5668,65 +6005,352 @@ fn overlay_flag_dest(
     flag_dest: PostTarget,
 ) -> PostTarget {
     let raider = bearer || matches!(faction, Faction::Pillager);
-    if in_capture_zone(inner, gatehouse, x, z) {
-        return if raider || breached || capturing {
-            flag_dest
-        } else {
-            dest
-        };
-    }
-    if capturing && !raider {
-        let dist = (x - f64::from(flag_dest.x)).hypot(z - f64::from(flag_dest.z));
-        if dist <= DEFENDER_RUSH_RANGE {
-            return inward_siege_dest(x, z, gates, gatehouse, inner, flag_dest);
-        }
-        return dest;
-    }
     if !raider {
         return dest;
+    }
+    if in_capture_zone(inner, gatehouse, x, z) {
+        return flag_dest;
     }
     if in_courtyard(gatehouse, x, z) && (breached || capturing) {
         return flag_dest;
     }
+    if !gates.is_empty() && !breached && !capturing {
+        return outermost_gate_dest(gates, flag_dest);
+    }
+    // After the first hole, dest the mast. Next-ring waypoints parked the
+    // column at an inner gate far from the plate.
     if breached || capturing {
-        return inward_siege_dest(x, z, gates, gatehouse, inner, flag_dest);
+        return flag_dest;
     }
     dest
 }
 
-/// Next ring toward the keep-court plate: outer town, civic, castle, then
-/// the inner-bailey side of the gatehouse.
-fn inward_siege_dest(
-    x: f64,
-    z: f64,
-    gates: &[GateInfo],
-    gatehouse: Rect,
-    inner: Rect,
-    flag: PostTarget,
-) -> PostTarget {
-    if in_capture_zone(inner, gatehouse, x, z) || in_courtyard(gatehouse, x, z) {
-        return flag;
-    }
+fn outermost_gate_dest(gates: &[GateInfo], flag: PostTarget) -> PostTarget {
     let fx = f64::from(flag.x);
     let fz = f64::from(flag.z);
-    let me = (x - fx).hypot(z - fz);
-    let mut ordered: Vec<&GateInfo> = gates.iter().collect();
-    ordered.sort_by(|a, b| {
-        let da = (f64::from(a.x) - fx).hypot(f64::from(a.z) - fz);
-        let db = (f64::from(b.x) - fx).hypot(f64::from(b.z) - fz);
-        db.total_cmp(&da)
-    });
-    for gate in ordered {
-        let gd = (f64::from(gate.x) - fx).hypot(f64::from(gate.z) - fz);
-        if me > gd + 10.0 {
-            return PostTarget {
-                x: gate.x,
-                y: flag.y,
-                z: gate.z,
-            };
+    gates
+        .iter()
+        .max_by(|a, b| {
+            let da = (f64::from(a.x) - fx).hypot(f64::from(a.z) - fz);
+            let db = (f64::from(b.x) - fx).hypot(f64::from(b.z) - fz);
+            da.total_cmp(&db)
+        })
+        .map_or(flag, |g| PostTarget {
+            x: g.x,
+            y: flag.y,
+            z: g.z,
+        })
+}
+
+fn gate_info_near(gates: &[GateInfo], post: ScenePost) -> Option<GateInfo> {
+    gates
+        .iter()
+        .copied()
+        .min_by_key(|g| (g.x - post.x).abs() + (g.z - post.z).abs())
+}
+
+fn packed_storm_gate(
+    snapshots: &[(Arc<dyn EntityBase>, Faction)],
+    ghosts: &[GhostSoldier],
+    gates: &[GateInfo],
+    range: f64,
+    need: usize,
+) -> Option<GateInfo> {
+    let mut best: Option<(usize, GateInfo)> = None;
+    for &gate in gates {
+        let gx = f64::from(gate.x) + 0.5;
+        let gz = f64::from(gate.z) + 0.5;
+        let live = snapshots
+            .iter()
+            .filter(|(entity, faction)| {
+                matches!(faction, Faction::Pillager) && {
+                    let p = entity.get_entity().pos.load();
+                    (p.x - gx).hypot(p.z - gz) <= range
+                }
+            })
+            .count();
+        let ghost_n = ghosts
+            .iter()
+            .filter(|g| {
+                matches!(g.faction, Faction::Pillager) && (g.x - gx).hypot(g.z - gz) <= range
+            })
+            .count();
+        let n = live + ghost_n;
+        if n >= need && best.is_none_or(|(bn, _)| n >= bn) {
+            best = Some((n, gate));
         }
     }
-    gatehouse_inner_dest(gatehouse, inner, flag)
+    best.map(|(_, g)| g)
+}
+
+fn nearest_gate_to_raiders(
+    snapshots: &[(Arc<dyn EntityBase>, Faction)],
+    ghosts: &[GhostSoldier],
+    gates: &[GateInfo],
+) -> Option<GateInfo> {
+    let mut px = 0.0;
+    let mut pz = 0.0;
+    let mut n = 0u32;
+    for (entity, faction) in snapshots {
+        if !matches!(faction, Faction::Pillager) {
+            continue;
+        }
+        let p = entity.get_entity().pos.load();
+        px += p.x;
+        pz += p.z;
+        n += 1;
+    }
+    for ghost in ghosts {
+        if !matches!(ghost.faction, Faction::Pillager) {
+            continue;
+        }
+        px += ghost.x;
+        pz += ghost.z;
+        n += 1;
+    }
+    if n == 0 {
+        return None;
+    }
+    let mx = px / f64::from(n);
+    let mz = pz / f64::from(n);
+    gates.iter().copied().min_by(|a, b| {
+        let da = (f64::from(a.x) - mx).hypot(f64::from(a.z) - mz);
+        let db = (f64::from(b.x) - mx).hypot(f64::from(b.z) - mz);
+        da.total_cmp(&db)
+    })
+}
+
+fn raid_outcome_reason(
+    attackers_on_plate: u32,
+    in_courtyard: u32,
+    storming: bool,
+    raiders: u32,
+    tick: u32,
+    last_progress_tick: u32,
+) -> &'static str {
+    if attackers_on_plate > 0 {
+        "on_plate"
+    } else if in_courtyard > 0 {
+        "in_courtyard"
+    } else if storming {
+        "storming"
+    } else if raiders == 0 {
+        "repelled"
+    } else if tick.saturating_sub(last_progress_tick) >= STUCK_TICKS {
+        "stuck"
+    } else {
+        "marching"
+    }
+}
+
+fn apply_cull(town_id: &str, cull: &[(i32, GhostSoldier)]) {
+    if cull.is_empty() {
+        return;
+    }
+    let ids: Vec<i32> = cull.iter().map(|(id, _)| *id).collect();
+    let mut dir = lock();
+    if let Some(war) = dir.towns.get_mut(town_id) {
+        if let Some(raid) = &mut war.raid {
+            raid.living.retain(|id| !ids.contains(id));
+            raid.temps.retain(|id| !ids.contains(id));
+            raid.ghosts.extend(cull.iter().map(|(_, g)| g.clone()));
+        }
+        war.pending_despawn.extend(ids);
+    }
+}
+
+fn count_ghost_presence(
+    ghost: &GhostSoldier,
+    flag_xz: (i32, i32),
+    gatehouse: Rect,
+    owner_faction: &Faction,
+    attackers_on_plate: &mut u32,
+    defenders_on_plate: &mut u32,
+    attackers_near: &mut u32,
+    defenders_near: &mut u32,
+    raiders_in_keep: &mut u32,
+    defenders_in_keep: &mut u32,
+    in_courtyard_n: &mut u32,
+) {
+    if on_flag_plate(flag_xz, ghost.x, ghost.z) {
+        if is_hostile(&ghost.faction, owner_faction) {
+            *attackers_on_plate += 1;
+            *raiders_in_keep += 1;
+        } else if is_allied(&ghost.faction, owner_faction) {
+            *defenders_on_plate += 1;
+        }
+    }
+    if near_flag(flag_xz, ghost.x, ghost.z) {
+        if is_hostile(&ghost.faction, owner_faction) {
+            *attackers_near += 1;
+        } else if is_allied(&ghost.faction, owner_faction) {
+            *defenders_near += 1;
+            *defenders_in_keep += 1;
+        }
+    }
+    if matches!(ghost.faction, Faction::Pillager) && in_courtyard(gatehouse, ghost.x, ghost.z) {
+        *in_courtyard_n += 1;
+    }
+}
+
+fn slide_ghost(ghost: &mut GhostSoldier, dest: PostTarget) {
+    let dx = f64::from(dest.x) + 0.5 - ghost.x;
+    let dz = f64::from(dest.z) + 0.5 - ghost.z;
+    let len = dx.hypot(dz);
+    let climb = (f64::from(dest.y) - ghost.y).clamp(-0.45, 0.45);
+    if len < 0.05 {
+        ghost.y += climb;
+        return;
+    }
+    let step = SLIDE_STEP.min(len);
+    ghost.x += dx / len * step;
+    ghost.z += dz / len * step;
+    ghost.y += climb;
+}
+
+fn spawn_lod_body(world: &Arc<World>, town_id: &str, ghost: &GhostSoldier) -> Option<i32> {
+    if take_spawn_slots(1) == 0 {
+        return None;
+    }
+    let pos = Vector3::new(ghost.x, ghost.y, ghost.z);
+    match &ghost.faction {
+        Faction::Pillager => {
+            let entity = Entity::new(world.clone(), pos, &EntityType::PILLAGER);
+            let base: Arc<dyn EntityBase> =
+                pumpkin_core::entity::mob::pillager::PillagerEntity::new(entity)
+                    as Arc<dyn EntityBase>;
+            if let Some(mob) = base.get_mob() {
+                bind_raider(
+                    mob,
+                    town_id,
+                    ghost.bearer,
+                    MarchJob::Assault,
+                    world,
+                    ScenePost::new(ghost.x.floor() as i32, ghost.z.floor() as i32),
+                );
+                add_pillager_team(world, &base.get_scoreboard_name());
+            }
+            let id = base.get_entity().entity_id;
+            world.spawn_entity(base).then_some(id)
+        }
+        Faction::Kingdom(kingdom) => {
+            spawn_citizen(world, town_id, kingdom, VillagerRole::Guard, false, pos)
+        }
+        Faction::Neutral => None,
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "ghosts share the live plate counters"
+)]
+fn tick_ghosts(
+    world: &Arc<World>,
+    town_id: &str,
+    tick: u32,
+    player_xz: &[(f64, f64)],
+    march_dest: PostTarget,
+    keep_dest: PostTarget,
+    keep_rect: Rect,
+    gatehouse_rect: Rect,
+    siege_gates: &[GateInfo],
+    breached: bool,
+    capturing: bool,
+    owner_faction: &Faction,
+    attackers_on_plate: &mut u32,
+    defenders_on_plate: &mut u32,
+    attackers_near: &mut u32,
+    defenders_near: &mut u32,
+    raiders_in_keep: &mut u32,
+    defenders_in_keep: &mut u32,
+    in_courtyard_n: &mut u32,
+) {
+    let flag_xz = (keep_dest.x, keep_dest.z);
+    let respawn = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        let Some(raid) = war.raid.as_mut() else {
+            return;
+        };
+        let far_tier = LodTier::Alert;
+        let mut keep = Vec::with_capacity(raid.ghosts.len());
+        let mut respawn = Vec::new();
+        for (i, mut ghost) in raid.ghosts.drain(..).enumerate() {
+            if player_near_list(player_xz, ghost.x, ghost.z, PLAYER_SIM_RANGE) {
+                respawn.push(ghost);
+                continue;
+            }
+            if far_tier.should_tick(i as i32, tick) {
+                let dest = overlay_flag_dest(
+                    march_dest,
+                    &ghost.faction,
+                    ghost.bearer,
+                    ghost.x,
+                    ghost.z,
+                    keep_rect,
+                    gatehouse_rect,
+                    siege_gates,
+                    breached,
+                    capturing,
+                    keep_dest,
+                );
+                let dest = if dest_is_plate(dest, keep_dest) {
+                    plate_slot(i as i32, dest)
+                } else {
+                    dest
+                };
+                slide_ghost(&mut ghost, dest);
+            }
+            count_ghost_presence(
+                &ghost,
+                flag_xz,
+                gatehouse_rect,
+                owner_faction,
+                attackers_on_plate,
+                defenders_on_plate,
+                attackers_near,
+                defenders_near,
+                raiders_in_keep,
+                defenders_in_keep,
+                in_courtyard_n,
+            );
+            keep.push(ghost);
+        }
+        raid.ghosts = keep;
+        respawn
+    };
+    let mut spawned: Vec<(i32, bool)> = Vec::new();
+    let mut leftover = Vec::new();
+    for ghost in respawn {
+        if spawned.len() >= GHOST_SPAWNS_PER_TICK {
+            leftover.push(ghost);
+            continue;
+        }
+        if let Some(id) = spawn_lod_body(world, town_id, &ghost) {
+            spawned.push((
+                id,
+                ghost.raider || matches!(ghost.faction, Faction::Pillager),
+            ));
+        } else {
+            leftover.push(ghost);
+        }
+    }
+    if spawned.is_empty() && leftover.is_empty() {
+        return;
+    }
+    let mut dir = lock();
+    if let Some(raid) = dir.towns.get_mut(town_id).and_then(|w| w.raid.as_mut()) {
+        for (id, raider) in spawned {
+            if raider {
+                raid.living.push(id);
+            } else {
+                raid.temps.push(id);
+            }
+        }
+        raid.ghosts.extend(leftover);
+    }
 }
 
 fn in_join_ai_window(index: usize, live_age: u32, n: usize) -> bool {
@@ -5741,23 +6365,6 @@ fn in_join_ai_window(index: usize, live_age: u32, n: usize) -> bool {
         index + n - start
     };
     pos < budget
-}
-
-/// First waypoint past the portcullis, on the inner-bailey side of the gatehouse.
-fn gatehouse_inner_dest(gatehouse: Rect, inner: Rect, flag: PostTarget) -> PostTarget {
-    let (gx, gz) = gatehouse.center();
-    let dx = (flag.x - gx).signum();
-    let dz = (flag.z - gz).signum();
-    let mut x = gx;
-    let mut z = gz;
-    for _ in 0..24 {
-        x += dx;
-        z += dz;
-        if inner.contains(x, z) && !gatehouse.contains(x, z) {
-            return PostTarget { x, y: flag.y, z };
-        }
-    }
-    flag
 }
 
 fn swap_flag_banner(town_id: &str, owner: &TownOwner) {
@@ -5869,6 +6476,22 @@ fn player_near_list(players: &[(f64, f64)], x: f64, z: f64, range: f64) -> bool 
         .any(|(px, pz)| (*px - x).hypot(*pz - z) <= range)
 }
 
+fn world_player_xz(world: &World) -> Vec<(f64, f64)> {
+    world
+        .players
+        .load()
+        .iter()
+        .map(|p| {
+            let pos = p.living_entity.entity.pos.load();
+            (pos.x, pos.z)
+        })
+        .collect()
+}
+
+fn should_virtualize(players: &[(f64, f64)], x: f64, z: f64) -> bool {
+    !player_near_list(players, x, z, PLAYER_CULL_RANGE)
+}
+
 fn apply_capture(
     town_id: &str,
     tick: u32,
@@ -5959,10 +6582,28 @@ fn tick_town_flag(
     war.flag_defenders = presence.defenders_near;
     if war.occupy_hold > 0 && tick.is_multiple_of(20) {
         tracing::info!(
-            "kingdoms capture hold town={town_id} plate_r={} near_d={} need={occupy_need} hold={}/{HOLD_TICKS} paused={}",
+            "kingdoms capture hold town={town_id} plate_r={} plate_d={} near_d={} need={occupy_need} hold={}/{HOLD_TICKS} paused={}",
             presence.attackers_on_plate,
+            presence.defenders_on_plate,
             presence.defenders_near,
             war.occupy_hold,
+            update.paused
+        );
+        if parse_town_id(town_id).is_some_and(|(_, cx, cz)| cx == 0 && cz == 0) {
+            tracing::info!(
+                "kingdoms capital hold town={town_id} plate_r={} plate_d={} hold={}/{}",
+                presence.attackers_on_plate,
+                presence.defenders_on_plate,
+                war.occupy_hold,
+                hold_ticks()
+            );
+        }
+    } else if presence.attackers_on_plate > 0 && tick.is_multiple_of(20) {
+        tracing::info!(
+            "kingdoms capture blocked town={town_id} plate_r={} plate_d={} near_r={} need={occupy_need} paused={}",
+            presence.attackers_on_plate,
+            presence.defenders_on_plate,
+            presence.attackers_near,
             update.paused
         );
     }
@@ -6099,6 +6740,14 @@ fn commit_capture(flip: PendingFlip) {
             flip.raiders_in_keep,
             flip.need
         );
+        if parse_town_id(&flip.town_id).is_some_and(|(_, cx, cz)| cx == 0 && cz == 0) {
+            tracing::info!(
+                "kingdoms capital captured town={} raiders_in_keep={} need={} hold={HOLD_TICKS}",
+                flip.town_id,
+                flip.raiders_in_keep,
+                flip.need
+            );
+        }
     } else {
         let owner = TownOwner::kingdom(&flip.kingdom);
         let mut dir = lock();
@@ -7081,8 +7730,8 @@ mod tests {
         assert_eq!(clock_side(&alder, 1), RaidSide::Raven);
         assert_eq!(clock_side(&alder, 2), RaidSide::Raven);
         assert_eq!(clock_side(&raven, 2), RaidSide::Alder);
-        assert_eq!(REPAIR_WINDOW_TICKS, 400);
-        assert_eq!(HOLD_LOCKOUT_TICKS + REPAIR_WINDOW_TICKS, 800);
+        assert_eq!(REPAIR_WINDOW_TICKS, 2400);
+        assert_eq!(HOLD_LOCKOUT_TICKS + REPAIR_WINDOW_TICKS, 2800);
     }
 
     #[test]
@@ -7091,7 +7740,9 @@ mod tests {
         assert_eq!(SPAWNS_PER_WORLD_TICK, 12);
         assert_eq!(ROUT_TAGS_PER_TICK, 8);
         assert_eq!(DESPAWNS_PER_TICK, 12);
-        assert_eq!(REPAIR_SCAN_COLUMNS, 1);
+        assert_eq!(GHOST_SPAWNS_PER_TICK, 8);
+        assert_eq!(REPAIR_SCAN_COLUMNS, 4);
+        assert_eq!(REPAIR_PLACE_PER_TICK, 2);
         assert_eq!(TICKETS_PER_TICK, 1);
         assert_eq!(TICKETS_PER_WORLD_TICK, 3);
         assert_eq!(CAPTURES_PER_TICK, 1);
@@ -7121,8 +7772,11 @@ mod tests {
         assert_eq!(DROPS_PER_TICK, 8);
         assert_eq!(HEAVY_TOWNS_PER_TICK, 1);
         assert_eq!(STORMING_COUNT, 8);
-        assert!((STORMING_RANGE - 8.0).abs() < f64::EPSILON);
+        assert!((STORMING_RANGE - 16.0).abs() < f64::EPSILON);
+        assert_eq!(STUCK_STORM_COUNT, 3);
+        assert!((STUCK_STORM_RANGE - 24.0).abs() < f64::EPSILON);
         assert!((PLAYER_SIM_RANGE - 64.0).abs() < f64::EPSILON);
+        assert!((PLAYER_CULL_RANGE - 96.0).abs() < f64::EPSILON);
         assert_eq!(resolve_stand_y(80, Some(70), 63), 80);
         assert_eq!(resolve_stand_y(0, Some(70), 63), 70);
         assert_eq!(resolve_stand_y(0, None, 63), 64);
@@ -7157,6 +7811,7 @@ mod tests {
         assert_eq!(crate::abstract_combat::PLAYER_LIVE_RANGE, 128.0);
         assert_eq!(crate::abstract_combat::PLAYER_APPROACH_RANGE, 256.0);
         assert_eq!(crate::lod::CIVILIAN_SLEEP_RANGE, 64.0);
+        assert_eq!(crate::lod::PLAYER_CULL_RANGE, 96.0);
     }
 
     #[test]
@@ -7349,9 +8004,28 @@ mod tests {
             false,
             flag,
         );
-        assert!(
-            inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
-            "after the breach the column walks through the gatehouse, dest={dest:?}"
+        assert_eq!(
+            (dest.x, dest.z),
+            (flag.x, flag.z),
+            "after the breach the column walks the plate, dest={dest:?}"
+        );
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Pillager,
+            false,
+            f64::from(flag.x) + 10.5,
+            f64::from(flag.z) + 0.5,
+            inner,
+            gatehouse,
+            &[],
+            true,
+            false,
+            flag,
+        );
+        assert_eq!(
+            (dest.x, dest.z),
+            (flag.x, flag.z),
+            "raiders already inside {STUCK_STORM_RANGE} of the mast walk the plate"
         );
     }
 
@@ -7383,9 +8057,10 @@ mod tests {
                 false,
                 flag,
             );
-            assert!(
-                inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
-                "raider {i} at gate must walk through the gatehouse dest={dest:?}"
+            assert_eq!(
+                (dest.x, dest.z),
+                (flag.x, flag.z),
+                "raider {i} at gate walks the plate after the breach dest={dest:?}"
             );
             through_gate += 1;
             let dest = overlay_flag_dest(
@@ -7432,14 +8107,29 @@ mod tests {
             update.captured,
             "120 raiders on an empty plate flip the town"
         );
-        let paused = tick_flag_hold(&owner, FlagPresence::stacked(120, 1), 40, 0, need, need, 1);
+        let paused = tick_flag_hold(
+            &owner,
+            FlagPresence::stacked(120, 120),
+            40,
+            0,
+            need,
+            need,
+            1,
+        );
         assert!(
             paused.paused,
-            "a defender on the plate holds the 120-raider push"
+            "an equal defender stack on the plate holds the 120-raider push"
         );
         assert!(!paused.captured);
+        let stacked = tick_flag_hold(&owner, FlagPresence::stacked(120, 1), 40, 0, need, need, 1);
+        assert!(
+            !stacked.paused && stacked.occupy_hold > 40,
+            "one keep guard on the plate does not freeze a 120-raider column"
+        );
         assert_eq!(STORMING_COUNT, 8);
-        assert!((STORMING_RANGE - 8.0).abs() < f64::EPSILON);
+        assert!((STORMING_RANGE - 16.0).abs() < f64::EPSILON);
+        assert_eq!(STUCK_STORM_COUNT, 3);
+        assert!((STUCK_STORM_RANGE - 24.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -7536,8 +8226,8 @@ mod tests {
         );
         assert_eq!(
             (dest.x, dest.z),
-            (gates[0].x, gates[0].z),
-            "outside the outer wall, dest is the town gate"
+            (flag.x, flag.z),
+            "after the first breach, dest is the mast even from outside the wall"
         );
         let dest = overlay_flag_dest(
             dest,
@@ -7554,8 +8244,8 @@ mod tests {
         );
         assert_eq!(
             (dest.x, dest.z),
-            (gates[1].x, gates[1].z),
-            "at the town gate, dest is the civic ring"
+            (flag.x, flag.z),
+            "at the town gate after a breach, dest is the mast, not the civic ring"
         );
         let dest = overlay_flag_dest(
             dest,
@@ -7572,8 +8262,8 @@ mod tests {
         );
         assert_eq!(
             (dest.x, dest.z),
-            (gates[2].x, gates[2].z),
-            "at the civic gate, dest is the castle gate"
+            (flag.x, flag.z),
+            "at the civic gate after a breach, dest is the mast, not the castle"
         );
         let dest = overlay_flag_dest(
             dest,
@@ -7588,14 +8278,82 @@ mod tests {
             false,
             flag,
         );
-        assert!(
-            inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
-            "past the castle gate the column walks the gatehouse dest={dest:?}"
+        assert_eq!(
+            (dest.x, dest.z),
+            (flag.x, flag.z),
+            "past the castle gate the column walks the mast dest={dest:?}"
+        );
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Pillager,
+            false,
+            20.5,
+            -96.0,
+            inner,
+            gatehouse,
+            &gates,
+            false,
+            false,
+            flag,
+        );
+        assert_eq!(
+            (dest.x, dest.z),
+            (gates[0].x, gates[0].z),
+            "before any breach the column walks the outer town gate, not the castle"
         );
     }
 
     #[test]
-    fn defenders_rush_the_plate_once_capture_starts() {
+    fn packed_storm_picks_the_gate_with_bodies_not_the_first() {
+        use crate::geom::Dir;
+        use crate::info::GateKind;
+        let outer = GateInfo {
+            kind: GateKind::Town,
+            x: 20,
+            z: -80,
+            facing: Dir::North,
+        };
+        let castle = GateInfo {
+            kind: GateKind::Castle,
+            x: 20,
+            z: 4,
+            facing: Dir::North,
+        };
+        let ghosts: Vec<GhostSoldier> = (0..8)
+            .map(|i| GhostSoldier {
+                faction: Faction::Pillager,
+                x: 20.5,
+                y: 64.0,
+                z: -80.0 + f64::from(i) * 0.1,
+                bearer: false,
+                raider: true,
+            })
+            .collect();
+        let packed = packed_storm_gate(
+            &[],
+            &ghosts,
+            &[outer, castle],
+            STORMING_RANGE,
+            STORMING_COUNT,
+        );
+        assert_eq!(packed.map(|g| (g.x, g.z)), Some((outer.x, outer.z)));
+        assert_eq!(
+            nearest_gate_to_raiders(&[], &ghosts, &[outer, castle]).map(|g| (g.x, g.z)),
+            Some((outer.x, outer.z))
+        );
+        assert!(should_virtualize(&[], 0.0, 0.0));
+        assert!(!should_virtualize(&[(0.0, 0.0)], 10.0, 10.0));
+        assert!(should_virtualize(&[(0.0, 0.0)], 200.0, 0.0));
+        assert_eq!(raid_outcome_reason(3, 0, false, 8, 100, 90), "on_plate");
+        assert_eq!(raid_outcome_reason(0, 4, false, 8, 100, 90), "in_courtyard");
+        assert_eq!(raid_outcome_reason(0, 0, true, 8, 100, 90), "storming");
+        assert_eq!(raid_outcome_reason(0, 0, false, 0, 100, 90), "repelled");
+        assert_eq!(raid_outcome_reason(0, 0, false, 8, 400, 100), "stuck");
+        assert_eq!(raid_outcome_reason(0, 0, false, 8, 150, 100), "marching");
+    }
+
+    #[test]
+    fn capturing_defenders_hold_the_gate_not_the_mast() {
         let keep = PostTarget {
             x: 11,
             y: 64,
@@ -7626,7 +8384,7 @@ mod tests {
         assert_eq!(
             (dest.x, dest.z),
             (march.x, march.z),
-            "capturing guards hold the gate; overlay rushes those near the plate"
+            "capturing guards hold the gate instead of piling the mast"
         );
         let dest = dest_for(
             &Faction::Kingdom(KingdomId::new("alder")),
@@ -7646,7 +8404,11 @@ mod tests {
             patrol,
             6_000,
         );
-        assert_eq!((dest.x, dest.z), (keep.x, keep.z));
+        assert_eq!(
+            (dest.x, dest.z),
+            (work.x, work.z),
+            "capturing civilians stay at work, not the mast"
+        );
         let inner = Rect::new(0, 8, 40, 40);
         let gatehouse = Rect::new(16, 0, 24, 8);
         let dest = overlay_flag_dest(
@@ -7662,9 +8424,10 @@ mod tests {
             true,
             keep,
         );
-        assert!(
-            inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
-            "defenders walk the gatehouse to the plate dest={dest:?}"
+        assert_eq!(
+            (dest.x, dest.z),
+            (march.x, march.z),
+            "defenders keep their post instead of rushing the plate dest={dest:?}"
         );
         assert_eq!(chat::line(ShoutKind::Charge), "To the flag!");
         let militia = overlay_civilian_posts(
@@ -7680,9 +8443,8 @@ mod tests {
         assert_eq!(
             (militia.x, militia.z),
             (keep.x, keep.z),
-            "militia leave the inner gate for the plate"
+            "capturing overlay leaves militia dest unchanged"
         );
-        assert!((DEFENDER_RUSH_RANGE - 48.0).abs() < f64::EPSILON);
         let dest = overlay_flag_dest(
             march,
             &Faction::Kingdom(KingdomId::new("alder")),
@@ -7817,7 +8579,6 @@ mod tests {
         assert_eq!(PORTCULLIS_BARS_PER_TICK, 2);
         assert_eq!(engines::ENGINE_PARTS_PER_TICK, 2);
         assert_eq!(crate::ram::RAM_PARTS_PER_TICK, 2);
-        assert!((DEFENDER_RUSH_RANGE - 48.0).abs() < f64::EPSILON);
         assert!((PHASE_WARN_MS - 20.0).abs() < f64::EPSILON);
         assert_eq!(resolve_stand_y(117, None, 63), 117);
     }
