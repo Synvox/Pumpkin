@@ -150,6 +150,10 @@ pub enum CellKind {
     FlagPlinth,
     /// Dry fosse outside the lower-city curtain.
     CityDitch,
+    /// Menhir in a hinterland stone circle.
+    StandingStone,
+    /// Crossroads gallows post.
+    Gallows,
 }
 
 impl CellKind {

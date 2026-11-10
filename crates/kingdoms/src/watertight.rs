@@ -1088,6 +1088,7 @@ fn is_roof_block(state: &BlockState) -> bool {
         || id == Block::SMOOTH_SANDSTONE.id
         || id == Block::GOLD_BLOCK.id
         || id == Block::YELLOW_TERRACOTTA.id
+        || id == Block::ORANGE_TERRACOTTA.id
         || id == Block::CUT_SANDSTONE.id
         || id == Block::SNOW.id
         || id == Block::SNOW_BLOCK.id
