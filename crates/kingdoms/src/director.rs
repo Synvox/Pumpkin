@@ -433,6 +433,10 @@ struct TownWar {
     repair_scan_cursor: usize,
     named_npcs: bool,
     live_age: u32,
+    /// Entity ids collected across join-snapshot strips so the first live
+    /// tick does not walk the whole capital AABB.
+    snapshot_ids: HashSet<i32>,
+    snapshot_cursor: u32,
     flag_paused: bool,
     flag_attackers: u32,
     flag_defenders: u32,
@@ -1205,6 +1209,8 @@ impl TownWar {
             repair_scan_cursor: 0,
             named_npcs: false,
             live_age: 0,
+            snapshot_ids: HashSet::new(),
+            snapshot_cursor: 0,
             flag_paused: false,
             flag_attackers: 0,
             flag_defenders: 0,
@@ -1999,6 +2005,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     if materialized {
         tick_raid_warmup(world, town_id, tick);
         if tickets_pending(town_id) || raid_still_warming(town_id, tick) {
+            prewarm_town_snapshot(world, town_id);
             return;
         }
     } else {
@@ -2007,6 +2014,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         // was the 200–470 ms first-contact hitch (209 tickets at join).
         tick_raid_warmup(world, town_id, tick);
         if !near || tickets_pending(town_id) {
+            prewarm_town_snapshot(world, town_id);
             return;
         }
     }
@@ -2034,26 +2042,15 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     };
     let amortizing = live_age < JOIN_AMORTIZE_TICKS;
     let mut drop_ids: Vec<i32> = Vec::new();
-    let mut entities = if materialized {
-        raid_snapshot_entities(world, town_id)
-    } else {
-        let pad = if amortizing { 16 } else { 48 };
-        let mut min_x = bounds.min_x - pad;
-        let mut min_z = bounds.min_z - pad;
-        let mut max_x = bounds.max_x + pad;
-        let mut max_z = bounds.max_z + pad;
-        for p in camps.iter().chain(gates.iter()) {
-            min_x = min_x.min(p.x - pad);
-            min_z = min_z.min(p.z - pad);
-            max_x = max_x.max(p.x + pad);
-            max_z = max_z.max(p.z + pad);
-        }
-        let aabb = BoundingBox::new(
-            Vector3::new(f64::from(min_x), -64.0, f64::from(min_z)),
-            Vector3::new(f64::from(max_x), 320.0, f64::from(max_z)),
-        );
-        world.get_all_at_box(&aabb)
-    };
+    let mut entities = gather_town_entities(
+        world,
+        town_id,
+        bounds,
+        &camps,
+        &gates,
+        materialized,
+        if amortizing { 16 } else { 48 },
+    );
     entities = take_combat_entities(entities, &mut drop_ids);
     if !amortizing && tick.is_multiple_of(20) && drop_ids.len() < DROPS_PER_TICK {
         sweep_nearby_drops(world, bounds, &mut drop_ids);
@@ -2576,12 +2573,14 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
         if offscreen && idle_villager && !is_builder {
             mob.get_mob_entity().set_no_ai(true);
+            mob.get_mob_entity().set_director_driven(true);
             n_sleep += 1;
             n_no_ai += 1;
             continue;
         }
         if far_from_player && !is_builder {
             mob.get_mob_entity().set_no_ai(true);
+            mob.get_mob_entity().set_director_driven(true);
             n_no_ai += 1;
             n_sleep += 1;
             let far_tier = if alarm || capturing || breached {
@@ -2646,6 +2645,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             !tier.should_tick(id, tick)
         };
         mob.get_mob_entity().set_no_ai(true);
+        mob.get_mob_entity().set_director_driven(true);
         n_no_ai += 1;
         if skip {
             continue;
@@ -3481,6 +3481,114 @@ fn raid_snapshot_entities(world: &World, town_id: &str) -> Vec<Arc<dyn EntityBas
         ids.extend(war.wired.keys().copied());
         ids
     };
+    entities_from_ids(world, ids)
+}
+
+fn gather_town_entities(
+    world: &World,
+    town_id: &str,
+    bounds: crate::geom::Rect,
+    camps: &[ScenePost],
+    gates: &[ScenePost],
+    materialized: bool,
+    pad: i32,
+) -> Vec<Arc<dyn EntityBase>> {
+    if materialized {
+        return raid_snapshot_entities(world, town_id);
+    }
+    let aabb = town_search_aabb(bounds, camps, gates, pad);
+    let cursor = take_snapshot_cursor(town_id);
+    // One X-strip per tick so the capital's first live query is a slice, not
+    // the whole town AABB. Accumulated ids cover the town after one cycle.
+    let strip = aabb_x_strip(&aabb, cursor, JOIN_AMORTIZE_TICKS);
+    let batch = world.get_all_at_box(&strip);
+    let ids = merge_snapshot_ids(town_id, &batch);
+    entities_from_ids(world, ids)
+}
+
+fn prewarm_town_snapshot(world: &World, town_id: &str) {
+    let (bounds, camps, gates) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        (
+            inhabited_bounds(&war.scene),
+            war.scene.raid_camps().to_vec(),
+            war.scene
+                .gates()
+                .iter()
+                .map(|g| ScenePost::new(g.x, g.z))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let aabb = town_search_aabb(bounds, &camps, &gates, 16);
+    let cursor = take_snapshot_cursor(town_id);
+    let strip = aabb_x_strip(&aabb, cursor, JOIN_AMORTIZE_TICKS);
+    let batch = world.get_all_at_box(&strip);
+    let _ = merge_snapshot_ids(town_id, &batch);
+}
+
+fn take_snapshot_cursor(town_id: &str) -> u32 {
+    let mut dir = lock();
+    let Some(war) = dir.towns.get_mut(town_id) else {
+        return 0;
+    };
+    let cursor = war.snapshot_cursor;
+    war.snapshot_cursor = war.snapshot_cursor.wrapping_add(1);
+    cursor
+}
+
+fn town_search_aabb(
+    bounds: crate::geom::Rect,
+    camps: &[ScenePost],
+    gates: &[ScenePost],
+    pad: i32,
+) -> BoundingBox {
+    let mut min_x = bounds.min_x - pad;
+    let mut min_z = bounds.min_z - pad;
+    let mut max_x = bounds.max_x + pad;
+    let mut max_z = bounds.max_z + pad;
+    for p in camps.iter().chain(gates.iter()) {
+        min_x = min_x.min(p.x - pad);
+        min_z = min_z.min(p.z - pad);
+        max_x = max_x.max(p.x + pad);
+        max_z = max_z.max(p.z + pad);
+    }
+    BoundingBox::new(
+        Vector3::new(f64::from(min_x), -64.0, f64::from(min_z)),
+        Vector3::new(f64::from(max_x), 320.0, f64::from(max_z)),
+    )
+}
+
+fn aabb_x_strip(aabb: &BoundingBox, age: u32, n: u32) -> BoundingBox {
+    let n = n.max(1);
+    let width = (aabb.max.x - aabb.min.x).max(1.0);
+    let i = f64::from(age % n);
+    let strips = f64::from(n);
+    let x0 = aabb.min.x + width * i / strips;
+    let x1 = aabb.min.x + width * (i + 1.0) / strips;
+    BoundingBox::new(
+        Vector3::new(x0, aabb.min.y, aabb.min.z),
+        Vector3::new(x1, aabb.max.y, aabb.max.z),
+    )
+}
+
+fn merge_snapshot_ids(town_id: &str, batch: &[Arc<dyn EntityBase>]) -> Vec<i32> {
+    let mut dir = lock();
+    let Some(war) = dir.towns.get_mut(town_id) else {
+        return Vec::new();
+    };
+    for entity in batch {
+        war.snapshot_ids.insert(entity.get_entity().entity_id);
+    }
+    war.snapshot_ids.iter().copied().collect()
+}
+
+fn entities_from_ids(
+    world: &World,
+    ids: impl IntoIterator<Item = i32>,
+) -> Vec<Arc<dyn EntityBase>> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for id in ids {
@@ -6854,6 +6962,23 @@ mod tests {
         assert!(in_join_ai_window(0, 0, 480));
         assert!(!in_join_ai_window(64, 0, 480));
         assert!(in_join_ai_window(64, 1, 480));
+        let aabb = BoundingBox::new(
+            Vector3::new(0.0, -64.0, 0.0),
+            Vector3::new(400.0, 320.0, 400.0),
+        );
+        let mut min_x = f64::MAX;
+        let mut max_x = f64::MIN;
+        for i in 0..JOIN_AMORTIZE_TICKS {
+            let strip = aabb_x_strip(&aabb, i, JOIN_AMORTIZE_TICKS);
+            assert_eq!(strip.min.z, aabb.min.z);
+            assert_eq!(strip.max.z, aabb.max.z);
+            min_x = min_x.min(strip.min.x);
+            max_x = max_x.max(strip.max.x);
+            assert!(strip.max.x > strip.min.x);
+            assert!(strip.max.x - strip.min.x < (aabb.max.x - aabb.min.x) * 0.5);
+        }
+        assert!((min_x - aabb.min.x).abs() < 1.0e-9);
+        assert!((max_x - aabb.max.x).abs() < 1.0e-9);
         assert_eq!(DROPS_PER_TICK, 8);
         assert_eq!(HEAVY_TOWNS_PER_TICK, 1);
         assert_eq!(STORMING_COUNT, 8);

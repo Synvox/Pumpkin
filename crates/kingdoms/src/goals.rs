@@ -665,6 +665,7 @@ pub fn bind_citizen(
     mob.get_mob_entity()
         .persistence_required
         .store(true, Ordering::Relaxed);
+    mob.get_mob_entity().set_director_driven(true);
     tag(entity, TAG_CITIZEN);
     tag(entity, TAG_WIRED);
     tag(entity, &town_tag(town_id));
@@ -740,6 +741,7 @@ pub fn bind_golem(mob: &dyn Mob, town_id: &str, kingdom: &crate::faction::Kingdo
     mob.get_mob_entity()
         .persistence_required
         .store(true, Ordering::Relaxed);
+    mob.get_mob_entity().set_director_driven(true);
     tag(entity, TAG_GOLEM);
     tag(entity, TAG_WIRED);
     tag(entity, TAG_CITIZEN);
@@ -771,6 +773,7 @@ pub fn bind_raider(
     mob.get_mob_entity()
         .persistence_required
         .store(true, Ordering::Relaxed);
+    mob.get_mob_entity().set_director_driven(true);
     tag(entity, TAG_RAIDER);
     tag(entity, TAG_WIRED);
     tag(entity, &town_tag(town_id));

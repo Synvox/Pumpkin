@@ -141,6 +141,8 @@ pub struct MobEntity {
     pub persistence_required: AtomicBool,
     pending_riders: std::sync::Mutex<Vec<Arc<dyn EntityBase>>>,
     mob_flags: AtomicU8,
+    /// Kingdoms raid bodies skip living movement. `/summon` `NoAI` does not.
+    director_driven: AtomicBool,
 }
 impl MobEntity {
     /// Vanilla `Mob.getNavigation`/`getMoveControl`: a rider steering a mob drives that mob.
@@ -267,6 +269,7 @@ impl MobEntity {
             persistence_required: AtomicBool::new(false),
             pending_riders: std::sync::Mutex::new(Vec::new()),
             mob_flags: AtomicU8::new(0),
+            director_driven: AtomicBool::new(false),
         }
     }
 
@@ -318,6 +321,16 @@ impl MobEntity {
 
     pub fn is_no_ai(&self) -> bool {
         (self.mob_flags.load(Relaxed) & Self::AI_DISABLED_FLAG) != 0
+    }
+
+    /// Kingdoms raid bodies only. `/summon` `NoAI` stays false.
+    pub fn set_director_driven(&self, director_driven: bool) {
+        self.director_driven.store(director_driven, Relaxed);
+    }
+
+    #[must_use]
+    pub fn is_director_driven(&self) -> bool {
+        self.director_driven.load(Relaxed)
     }
 
     pub(crate) fn on_navigation_block_changed(
