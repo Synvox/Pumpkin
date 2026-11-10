@@ -19,8 +19,8 @@ pub const ACQUIRE_RANGE: f64 = 28.0;
 pub const ALARM_RANGE: f64 = 48.0;
 /// Idle civilians / guards farther than this from every player sleep.
 pub const CIVILIAN_SLEEP_RANGE: f64 = 64.0;
-/// Outside this, combatants skip targeting and run a cheap slide.
-pub const PLAYER_SIM_RANGE: f64 = 48.0;
+/// Outside this, combatants skip targeting, pathing, and collision.
+pub const PLAYER_SIM_RANGE: f64 = 64.0;
 
 /// How often a combatant should run AI this tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,7 +235,7 @@ mod tests {
         assert!(!LodTier::Alert.should_tick(2, 3));
         assert_eq!(LodTier::Far.period(), 40);
         assert_eq!(CIVILIAN_SLEEP_RANGE, 64.0);
-        assert!((PLAYER_SIM_RANGE - 48.0).abs() < f64::EPSILON);
+        assert!((PLAYER_SIM_RANGE - 64.0).abs() < f64::EPSILON);
     }
 
     #[test]

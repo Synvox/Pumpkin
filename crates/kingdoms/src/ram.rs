@@ -16,6 +16,8 @@ use crate::scene::ScenePost;
 
 /// Hit points. Defenders at the gate can wreck it; a clear road lets it land.
 pub const RAM_MAX_HP: f32 = 80.0;
+/// Display parts spawned per town tick (the 6-part dump hitch).
+pub const RAM_PARTS_PER_TICK: usize = 2;
 const RAM_STEP: f64 = 0.16;
 const CREW_RANGE: f64 = 8.0;
 const DEFENDER_RANGE: f64 = 4.5;
@@ -53,34 +55,61 @@ pub fn part_offsets() -> [(f64, f64, f64, &'static Block); 6] {
     ]
 }
 
-/// Spawn the display-entity ram at `origin`.
-pub fn spawn_ram(world: &Arc<World>, origin: Vector3<f64>) -> SiegeRam {
-    let mut parts = Vec::new();
-    for (dx, dy, dz, block) in part_offsets() {
-        let pos = Vector3::new(origin.x + dx, origin.y + dy, origin.z + dz);
-        let entity = Entity::new(world.clone(), pos, &EntityType::BLOCK_DISPLAY);
-        let display = BlockDisplayEntity::new(entity);
-        display.set_block_state(i32::from(block.default_state.id.as_u16()));
-        display.display.set_teleport_duration(2);
-        let id = display.get_entity().entity_id;
-        if world.spawn_entity(display) {
-            parts.push(id);
-        }
-    }
-    tracing::info!(
-        x = origin.x,
-        z = origin.z,
-        parts = parts.len(),
-        "kingdoms ram spawned"
-    );
+/// Empty ram at `origin`; parts are appended a few per tick.
+#[must_use]
+pub fn empty_ram(origin: Vector3<f64>) -> SiegeRam {
     SiegeRam {
-        parts,
+        parts: Vec::new(),
         hp: RAM_MAX_HP,
         x: origin.x,
         y: origin.y,
         z: origin.z,
         destroyed: false,
     }
+}
+
+/// True when every display part has been spawned.
+#[must_use]
+pub fn ram_complete(ram: &SiegeRam) -> bool {
+    ram.parts.len() >= part_offsets().len()
+}
+
+/// Spawn up to `budget` remaining ram displays. Returns how many were added.
+pub fn append_ram_parts(world: &Arc<World>, ram: &mut SiegeRam, budget: usize) -> usize {
+    if budget == 0 {
+        return 0;
+    }
+    let mut added = 0usize;
+    let offsets = part_offsets();
+    while ram.parts.len() < offsets.len() && added < budget {
+        let (dx, dy, dz, block) = offsets[ram.parts.len()];
+        let pos = Vector3::new(ram.x + dx, ram.y + dy, ram.z + dz);
+        let entity = Entity::new(world.clone(), pos, &EntityType::BLOCK_DISPLAY);
+        let display = BlockDisplayEntity::new(entity);
+        display.set_block_state(i32::from(block.default_state.id.as_u16()));
+        display.display.set_teleport_duration(2);
+        let id = display.get_entity().entity_id;
+        if world.spawn_entity(display) {
+            ram.parts.push(id);
+        } else {
+            break;
+        }
+        added += 1;
+    }
+    added
+}
+
+/// Spawn the display-entity ram at `origin`.
+pub fn spawn_ram(world: &Arc<World>, origin: Vector3<f64>) -> SiegeRam {
+    let mut ram = empty_ram(origin);
+    append_ram_parts(world, &mut ram, usize::MAX);
+    tracing::info!(
+        x = origin.x,
+        z = origin.z,
+        parts = ram.parts.len(),
+        "kingdoms ram spawned"
+    );
+    ram
 }
 
 /// Result of one ram tick.
@@ -189,6 +218,10 @@ mod tests {
     #[test]
     fn six_parts_make_a_covered_ram() {
         assert_eq!(part_offsets().len(), 6);
+        assert_eq!(RAM_PARTS_PER_TICK, 2);
+        assert!(part_offsets().len() > RAM_PARTS_PER_TICK);
+        let empty = empty_ram(Vector3::new(0.0, 64.0, 0.0));
+        assert!(!ram_complete(&empty));
         const { assert!(RAM_MAX_HP > 0.0) };
     }
 

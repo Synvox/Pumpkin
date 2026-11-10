@@ -22,6 +22,13 @@ use std::sync::Arc;
 
 /// Ticks raiders (or villagers) must hold the flag plate uncontested.
 pub const HOLD_TICKS: u32 = 200;
+/// Oak-fence mast height above the pedestal (banner sits on top).
+pub const FLAG_MAST_FENCES: i32 = 8;
+/// Wool panel beside the banner: 3 wide, 2 tall.
+pub const FLAG_PANEL_WIDTH: i32 = 3;
+pub const FLAG_PANEL_HEIGHT: i32 = 2;
+/// Brazier offset from the mast (court corners of a 5×5).
+pub const FLAG_BRAZIER_OFFSET: i32 = 2;
 /// Standing on the 3×3 plate ring (blocks from the mast).
 pub const FLAG_PLATE_RANGE: f64 = 2.25;
 /// Defenders this close pause the clock without occupying the plate.
@@ -399,10 +406,10 @@ pub fn near_flag(flag: (i32, i32), x: f64, z: f64) -> bool {
     flag_dist(flag, x, z) <= FLAG_PAUSE_RANGE
 }
 
-/// The 3×3 plinth, mast, and plate columns.
+/// The 3×3 plinth, mast, plates, wool panel, and brazier columns.
 #[must_use]
 pub fn is_flag_column(flag: (i32, i32), x: i32, z: i32) -> bool {
-    (x - flag.0).abs() <= 1 && (z - flag.1).abs() <= 1
+    (x - flag.0).abs() <= FLAG_BRAZIER_OFFSET && (z - flag.1).abs() <= FLAG_BRAZIER_OFFSET
 }
 
 /// Banner colour for the current owner.
@@ -412,6 +419,16 @@ pub fn owner_banner(owner: &TownOwner) -> &'static Block {
         TownOwner::Kingdom(name) if name == "raven" => &Block::BLUE_BANNER,
         TownOwner::Pillager => &Block::BLACK_BANNER,
         TownOwner::Kingdom(_) => &Block::GREEN_BANNER,
+    }
+}
+
+/// Wool panel colour for the current owner (readable at a distance).
+#[must_use]
+pub fn owner_wool(owner: &TownOwner) -> &'static Block {
+    match owner {
+        TownOwner::Kingdom(name) if name == "raven" => &Block::BLUE_WOOL,
+        TownOwner::Pillager => &Block::BLACK_WOOL,
+        TownOwner::Kingdom(_) => &Block::GREEN_WOOL,
     }
 }
 
@@ -596,13 +613,38 @@ pub fn place_portcullis_bar(world: &Arc<World>, pos: BlockPos) -> bool {
     true
 }
 
-/// Ram a threatened gate: iron bars become air so the courtyard is open.
-pub fn breach_gate(world: &Arc<World>, gate: GateInfo, floor_y: i32) -> u32 {
-    let mut cleared = 0u32;
+/// Iron-bar cells in a gate opening, for amortised ram writes.
+#[must_use]
+pub fn gate_bar_cells(world: &World, gate: GateInfo, floor_y: i32) -> Vec<BlockPos> {
+    let mut out = Vec::new();
     for pos in gate_cells(&gate, floor_y) {
+        if !world.is_loaded(&pos) {
+            continue;
+        }
         let (block, _) = world.get_block_and_state(&pos);
         if block.id == Block::IRON_BARS.id {
-            world.set_block_state(&pos, Block::AIR.default_state.id, SIEGE_PLACE_FLAGS);
+            out.push(pos);
+        }
+    }
+    out
+}
+
+/// Clear one iron-bar portcullis cell. Returns whether the world changed.
+pub fn clear_gate_bar(world: &Arc<World>, pos: BlockPos) -> bool {
+    let (block, _) = world.get_block_and_state(&pos);
+    if block.id != Block::IRON_BARS.id {
+        return false;
+    }
+    world.set_block_state(&pos, Block::AIR.default_state.id, SIEGE_PLACE_FLAGS);
+    true
+}
+
+/// Ram a threatened gate: iron bars become air so the courtyard is open.
+pub fn breach_gate(world: &Arc<World>, gate: GateInfo, floor_y: i32) -> u32 {
+    let cells = gate_bar_cells(world, gate, floor_y);
+    let mut cleared = 0u32;
+    for pos in cells {
+        if clear_gate_bar(world, pos) {
             cleared += 1;
         }
     }
@@ -1063,7 +1105,12 @@ mod tests {
         assert!(near_flag(flag, 13.5, 10.5));
         assert!(!near_flag(flag, 16.5, 10.5));
         assert!(is_flag_column(flag, 11, 11));
-        assert!(!is_flag_column(flag, 12, 10));
+        assert!(is_flag_column(flag, 12, 12));
+        assert!(!is_flag_column(flag, 13, 10));
+        assert_eq!(FLAG_MAST_FENCES, 8);
+        assert_eq!(FLAG_PANEL_WIDTH, 3);
+        assert_eq!(FLAG_PANEL_HEIGHT, 2);
+        assert_eq!(owner_wool(&TownOwner::Pillager).id, Block::BLACK_WOOL.id);
     }
 
     #[test]

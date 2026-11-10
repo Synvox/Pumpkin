@@ -31,6 +31,8 @@ const IMPACT_RADIUS: i32 = 1;
 const IMPACT_DEPTH: i32 = 4;
 const LADDER_HEIGHT: i32 = WALL_WALK_LIFT;
 const TOWER_STEP: f64 = 0.12;
+/// Block-display parts spawned per town tick (the 8-part dump was a 200 ms hitch).
+pub const ENGINE_PARTS_PER_TICK: usize = 2;
 
 /// One wall block the cobble cleared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,33 +310,60 @@ fn tower_offsets() -> [(f64, f64, f64, &'static Block); 8] {
     ]
 }
 
-/// Spawn a walking siege tower at `origin`.
-pub fn spawn_tower(world: &Arc<World>, origin: Vector3<f64>) -> SiegeTower {
-    let mut parts = Vec::new();
-    for (dx, dy, dz, block) in tower_offsets() {
-        let pos = Vector3::new(origin.x + dx, origin.y + dy, origin.z + dz);
+/// Empty tower at `origin`; parts are appended a few per tick.
+#[must_use]
+pub fn empty_tower(origin: Vector3<f64>) -> SiegeTower {
+    SiegeTower {
+        parts: Vec::new(),
+        x: origin.x,
+        y: origin.y,
+        z: origin.z,
+        arrived: false,
+    }
+}
+
+/// True when every display part has been spawned.
+#[must_use]
+pub fn tower_complete(tower: &SiegeTower) -> bool {
+    tower.parts.len() >= tower_offsets().len()
+}
+
+/// Spawn up to `budget` remaining tower displays. Returns how many were added.
+pub fn append_tower_parts(world: &Arc<World>, tower: &mut SiegeTower, budget: usize) -> usize {
+    if budget == 0 {
+        return 0;
+    }
+    let mut added = 0usize;
+    let offsets = tower_offsets();
+    while tower.parts.len() < offsets.len() && added < budget {
+        let (dx, dy, dz, block) = offsets[tower.parts.len()];
+        let pos = Vector3::new(tower.x + dx, tower.y + dy, tower.z + dz);
         let entity = Entity::new(world.clone(), pos, &EntityType::BLOCK_DISPLAY);
         let display = BlockDisplayEntity::new(entity);
         display.set_block_state(i32::from(block.default_state.id.as_u16()));
         display.display.set_teleport_duration(2);
         let id = display.get_entity().entity_id;
         if world.spawn_entity(display) {
-            parts.push(id);
+            tower.parts.push(id);
+        } else {
+            break;
         }
+        added += 1;
     }
+    added
+}
+
+/// Spawn a walking siege tower at `origin`.
+pub fn spawn_tower(world: &Arc<World>, origin: Vector3<f64>) -> SiegeTower {
+    let mut tower = empty_tower(origin);
+    append_tower_parts(world, &mut tower, usize::MAX);
     tracing::info!(
         x = origin.x,
         z = origin.z,
-        parts = parts.len(),
+        parts = tower.parts.len(),
         "kingdoms siege tower spawned"
     );
-    SiegeTower {
-        parts,
-        x: origin.x,
-        y: origin.y,
-        z: origin.z,
-        arrived: false,
-    }
+    tower
 }
 
 /// Push the tower toward `dest`. Returns true once it is against the wall.
@@ -420,6 +449,10 @@ mod tests {
                 .iter()
                 .any(|(_, _, _, b)| b.id == Block::LADDER.id)
         );
+        assert_eq!(ENGINE_PARTS_PER_TICK, 2);
+        assert!(tower_offsets().len() > ENGINE_PARTS_PER_TICK);
+        let empty = empty_tower(Vector3::new(0.0, 64.0, 0.0));
+        assert!(!tower_complete(&empty));
     }
 
     #[test]

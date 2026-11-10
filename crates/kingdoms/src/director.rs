@@ -49,7 +49,7 @@ use crate::goals::{
     PostTarget, already_wired, bind_citizen, bind_golem, bind_raider, drive_live, equip,
     shoot_arrow,
 };
-use crate::info::TownInfo;
+use crate::info::{GateInfo, TownInfo};
 use crate::lod::{
     ACQUIRE_RANGE, ALARM_RANGE, CIVILIAN_SLEEP_RANGE, DEFAULT_PATH_CAP, LodTier, PLAYER_SIM_RANGE,
     PathBudget, SpatialBuckets,
@@ -63,8 +63,9 @@ use crate::roles::{PopulationSpec, VillagerRole, citizen_slots};
 use crate::scene::{ScenePost, TownInfoScene, TownScene};
 use crate::schedule::{self, CivilianPost};
 use crate::siege::{
-    self, FlagPresence, HOLD_TICKS, MarchJob, TownOwner, WALL_WALK_LIFT, capture_need, hold_ticks,
-    in_capture_zone, in_courtyard, near_flag, on_flag_plate, owner_banner, tick_flag_hold,
+    self, FLAG_MAST_FENCES, FLAG_PANEL_HEIGHT, FLAG_PANEL_WIDTH, FlagPresence, HOLD_TICKS,
+    MarchJob, TownOwner, WALL_WALK_LIFT, capture_need, hold_ticks, in_capture_zone, in_courtyard,
+    near_flag, on_flag_plate, owner_banner, owner_wool, tick_flag_hold,
 };
 use crate::sim::{SimSnapshot, write_named_snapshots_with_kills};
 use crate::town::town_containing;
@@ -135,6 +136,8 @@ const SQUAD_RANGE: f64 = 48.0;
 const HORN_COOLDOWN_TICKS: u32 = 40;
 /// First live ticks skip engines so join does not dump 200 ms of town work.
 const JOIN_AMORTIZE_TICKS: u32 = 40;
+/// AI bodies per amortised town tick (plate counts still cover everyone).
+const JOIN_ENTITY_BUDGET: usize = 64;
 /// Item / XP orbs despawned per town tick during a live raid.
 const DROPS_PER_TICK: usize = 8;
 /// Engines / punch / repair-scan towns per world tick.
@@ -143,6 +146,8 @@ const HEAVY_TOWNS_PER_TICK: u32 = 1;
 const STORMING_RANGE: f64 = 8.0;
 /// This many pillagers at the portcullis count as a breach even without the ram.
 const STORMING_COUNT: usize = 8;
+/// Allied bodies this close to the plate rush it once capture starts.
+const DEFENDER_RUSH_RANGE: f64 = 48.0;
 
 static WORST_MSPT_CENTS: AtomicU32 = AtomicU32::new(0);
 static WORST_DIRECTOR_CENTS: AtomicU32 = AtomicU32::new(0);
@@ -416,6 +421,7 @@ struct TownWar {
     punch_repair_at: u32,
     punch_break: Vec<engines::PunchHit>,
     pending_bars: Vec<BlockPos>,
+    pending_breach: Vec<BlockPos>,
     crossed_curtain: bool,
     logged_archer: bool,
     logged_sally: bool,
@@ -430,6 +436,10 @@ struct TownWar {
     repair_scan_cursor: usize,
     named_npcs: bool,
     live_age: u32,
+    /// Entity ids collected across join-snapshot strips so the first live
+    /// tick does not walk the whole capital AABB.
+    snapshot_ids: HashSet<i32>,
+    snapshot_cursor: u32,
     flag_paused: bool,
     flag_attackers: u32,
     flag_defenders: u32,
@@ -717,6 +727,7 @@ impl Director {
             war.punch_repair_at = 0;
             war.punch_break.clear();
             war.pending_bars.clear();
+            war.pending_breach.clear();
             war.crossed_curtain = false;
             war.logged_archer = false;
             war.logged_sally = false;
@@ -1188,6 +1199,7 @@ impl TownWar {
             punch_repair_at: 0,
             punch_break: Vec::new(),
             pending_bars: Vec::new(),
+            pending_breach: Vec::new(),
             crossed_curtain: false,
             logged_archer: false,
             logged_sally: false,
@@ -1202,6 +1214,8 @@ impl TownWar {
             repair_scan_cursor: 0,
             named_npcs: false,
             live_age: 0,
+            snapshot_ids: HashSet::new(),
+            snapshot_cursor: 0,
             flag_paused: false,
             flag_attackers: 0,
             flag_defenders: 0,
@@ -1262,7 +1276,8 @@ pub fn post_for_role(mob: &dyn Mob, town_id: &str, role: VillagerRole) -> Option
     let dir = lock();
     let war = dir.towns.get(town_id)?;
     let post = match role {
-        VillagerRole::Guard if war.alarm && war.gate_breached => war.scene.keep(),
+        VillagerRole::Guard if war.alarm && war.occupy_hold > 0 => war.scene.flag(),
+        VillagerRole::Guard if war.alarm && war.gate_breached => war.scene.flag(),
         VillagerRole::Guard if war.alarm => war.threatened.unwrap_or_else(|| war.scene.keep()),
         VillagerRole::Guard => {
             let wall = war.scene.wall();
@@ -1274,6 +1289,7 @@ pub fn post_for_role(mob: &dyn Mob, town_id: &str, role: VillagerRole) -> Option
             }
         }
         VillagerRole::Archer => pick_home(mob, war.scene.archer_posts(), war.scene.keep()),
+        VillagerRole::Civilian if war.alarm && war.occupy_hold > 0 => war.scene.flag(),
         VillagerRole::Civilian if war.alarm => war.scene.keep(),
         VillagerRole::Civilian => match schedule::civilian_post(false, world_time_for(mob)) {
             CivilianPost::Keep => war.scene.keep(),
@@ -1994,6 +2010,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     if materialized {
         tick_raid_warmup(world, town_id, tick);
         if tickets_pending(town_id) || raid_still_warming(town_id, tick) {
+            prewarm_town_fields(town_id);
             return;
         }
     } else {
@@ -2001,7 +2018,12 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         // Tickets only for a scheduled raid. Warming idle towns on approach
         // was the 200–470 ms first-contact hitch (209 tickets at join).
         tick_raid_warmup(world, town_id, tick);
-        if !near || tickets_pending(town_id) {
+        if tickets_pending(town_id) {
+            prewarm_town_fields(town_id);
+            return;
+        }
+        if !near {
+            prewarm_town_fields(town_id);
             return;
         }
     }
@@ -2029,26 +2051,15 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     };
     let amortizing = live_age < JOIN_AMORTIZE_TICKS;
     let mut drop_ids: Vec<i32> = Vec::new();
-    let mut entities = if materialized {
-        raid_snapshot_entities(world, town_id)
-    } else {
-        let pad = if amortizing { 16 } else { 48 };
-        let mut min_x = bounds.min_x - pad;
-        let mut min_z = bounds.min_z - pad;
-        let mut max_x = bounds.max_x + pad;
-        let mut max_z = bounds.max_z + pad;
-        for p in camps.iter().chain(gates.iter()) {
-            min_x = min_x.min(p.x - pad);
-            min_z = min_z.min(p.z - pad);
-            max_x = max_x.max(p.x + pad);
-            max_z = max_z.max(p.z + pad);
-        }
-        let aabb = BoundingBox::new(
-            Vector3::new(f64::from(min_x), -64.0, f64::from(min_z)),
-            Vector3::new(f64::from(max_x), 320.0, f64::from(max_z)),
-        );
-        world.get_all_at_box(&aabb)
-    };
+    let mut entities = gather_town_entities(
+        world,
+        town_id,
+        bounds,
+        &camps,
+        &gates,
+        materialized,
+        if amortizing { 16 } else { 48 },
+    );
     entities = take_combat_entities(entities, &mut drop_ids);
     if !amortizing && tick.is_multiple_of(20) && drop_ids.len() < DROPS_PER_TICK {
         sweep_nearby_drops(world, bounds, &mut drop_ids);
@@ -2366,7 +2377,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             });
         }
     }
-    apply_pending_bars(world, town_id);
+    if !amortizing {
+        apply_pending_bars(world, town_id);
+        apply_pending_breach(world, town_id);
+    }
 
     // Director-owned combat: NoAI + flow-field slide. Vanilla melee/bow/path
     // goals stay off during a raid so 200 vs 200 does not A* or shove.
@@ -2392,6 +2406,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         ladders_placed,
         inner_gate_dest,
         well_dest,
+        siege_gates,
+        capturing,
     ) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
@@ -2457,6 +2473,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             war.ladders_placed,
             PostTarget::from_post(inner, standing_y(world, inner)),
             PostTarget::from_post(well, standing_y(world, well)),
+            war.scene.gates().to_vec(),
+            war.occupy_hold > 0,
         )
     };
     if !amortizing {
@@ -2509,7 +2527,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     });
-    for (entity, faction) in &snapshots {
+    for (snap_i, (entity, faction)) in snapshots.iter().enumerate() {
         let base = entity.get_entity();
         let chunk = base.chunk_pos.load();
         if count_chunks {
@@ -2549,23 +2567,38 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 }
             }
         }
+        if amortizing && !in_join_ai_window(snap_i, live_age, snapshots.len()) {
+            continue;
+        }
         let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
         let is_builder = role == Some(VillagerRole::Builder);
         let offscreen = !player_near_list(&player_xz, pos.x, pos.z, CIVILIAN_SLEEP_RANGE);
         let far_from_player = !player_near_list(&player_xz, pos.x, pos.z, PLAYER_SIM_RANGE);
         let idle_villager = matches!(role, Some(VillagerRole::Civilian | VillagerRole::Guard))
             || (matches!(faction, Faction::Kingdom(_)) && role.is_none());
+        if (far_from_player || (offscreen && idle_villager)) && !is_builder {
+            base.no_physics.store(true, Ordering::Relaxed);
+        } else {
+            base.no_physics.store(false, Ordering::Relaxed);
+        }
         if offscreen && idle_villager && !is_builder {
             mob.get_mob_entity().set_no_ai(true);
+            mob.get_mob_entity().set_director_driven(true);
             n_sleep += 1;
             n_no_ai += 1;
             continue;
         }
         if far_from_player && !is_builder {
             mob.get_mob_entity().set_no_ai(true);
+            mob.get_mob_entity().set_director_driven(true);
             n_no_ai += 1;
             n_sleep += 1;
-            if LodTier::Alert.should_tick(base.entity_id, tick) {
+            let far_tier = if alarm || capturing || breached {
+                LodTier::Alert
+            } else {
+                LodTier::Far
+            };
+            if far_tier.should_tick(base.entity_id, tick) {
                 let dest = match faction {
                     Faction::Pillager if breached => overlay_flag_dest(
                         keep_dest,
@@ -2575,13 +2608,32 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                         pos.z,
                         keep_rect,
                         gatehouse_rect,
+                        &siege_gates,
                         true,
+                        capturing,
                         keep_dest,
                     ),
                     Faction::Pillager => march_dest,
+                    _ if capturing => overlay_flag_dest(
+                        keep_dest,
+                        faction,
+                        false,
+                        pos.x,
+                        pos.z,
+                        keep_rect,
+                        gatehouse_rect,
+                        &siege_gates,
+                        breached,
+                        true,
+                        keep_dest,
+                    ),
                     _ => keep_dest,
                 };
-                slide_direct(base, dest);
+                if amortizing {
+                    slide_direct(base, dest);
+                } else {
+                    slide_along_field(base, town_id, dest);
+                }
                 n_slid += 1;
             }
             continue;
@@ -2607,6 +2659,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             !tier.should_tick(id, tick)
         };
         mob.get_mob_entity().set_no_ai(true);
+        mob.get_mob_entity().set_director_driven(true);
         n_no_ai += 1;
         if skip {
             continue;
@@ -2673,6 +2726,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 alarm,
                 in_combat,
                 breached,
+                capturing,
                 repair_dest,
                 if owner_pillager {
                     keep_dest
@@ -2696,13 +2750,16 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             pos.z,
             keep_rect,
             gatehouse_rect,
+            &siege_gates,
             breached,
+            capturing,
             keep_dest,
         );
         let dest = overlay_civilian_posts(
             dest,
             role,
             alarm,
+            capturing,
             inner_gate_dest,
             well_dest,
             keep_dest,
@@ -2752,7 +2809,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             dist > DIRECT_RANGE || base.tick_count.load(Ordering::Relaxed) == 0
         };
         if due {
-            if follower {
+            if amortizing || (follower && dist < DIRECT_RANGE) {
                 slide_direct(base, dest);
             } else {
                 slide_along_field(base, town_id, dest);
@@ -2829,6 +2886,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
     }
     tick_moving_ram(world, town_id, tick, &snapshots, breached, &mut ram_at_gate);
+    if amortizing {
+        prewarm_siege_columns(world, town_id);
+        continue_engine_spawns(world, town_id);
+    }
     let run_heavy = !amortizing && take_heavy_town();
     if run_heavy {
         let engines_started = Instant::now();
@@ -2855,21 +2916,28 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     .zip(w.scene.gates().first().copied())
             })
         };
+        let cells = if let Some((post, gate)) = gate {
+            siege::gate_bar_cells(world, gate, standing_y(world, post))
+        } else {
+            Vec::new()
+        };
+        let n = cells.len();
         {
             let mut dir = lock();
             if let Some(war) = dir.towns.get_mut(town_id) {
                 war.gate_breached = true;
+                if war.pending_breach.is_empty() {
+                    war.pending_breach = cells;
+                }
             }
-        }
-        if let Some((post, gate)) = gate {
-            let cleared = siege::breach_gate(world, gate, standing_y(world, post));
-            let mut dir = lock();
-            if cleared > 0 || storming {
+            if let Some((_, gate)) = gate
+                && (n > 0 || storming)
+            {
                 dir.push_event(CombatEvent {
                     tick,
                     kind: CombatKind::Breach,
                     actor: 0,
-                    other: Some(cleared as i32),
+                    other: Some(n as i32),
                     x: f64::from(gate.x),
                     z: f64::from(gate.z),
                     note: if ram_at_gate {
@@ -3083,10 +3151,12 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         }
         let origin = ladders.first().copied().unwrap_or(camp);
         let y = f64::from(standing_y(world, origin));
-        let tower = engines::spawn_tower(
-            world,
-            Vector3::new(f64::from(origin.x) + 0.5, y, f64::from(origin.z) + 0.5),
-        );
+        let mut tower = engines::empty_tower(Vector3::new(
+            f64::from(origin.x) + 0.5,
+            y,
+            f64::from(origin.z) + 0.5,
+        ));
+        engines::append_tower_parts(world, &mut tower, engines::ENGINE_PARTS_PER_TICK);
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
             war.siege_tower = Some(tower);
@@ -3110,10 +3180,12 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         }
         let origin = rams[0];
         let y = f64::from(standing_y(world, origin));
-        let ram = crate::ram::spawn_ram(
-            world,
-            Vector3::new(f64::from(origin.x) + 0.5, y, f64::from(origin.z) + 0.5),
-        );
+        let mut ram = crate::ram::empty_ram(Vector3::new(
+            f64::from(origin.x) + 0.5,
+            y,
+            f64::from(origin.z) + 0.5,
+        ));
+        crate::ram::append_ram_parts(world, &mut ram, crate::ram::RAM_PARTS_PER_TICK);
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
             war.ram = Some(ram);
@@ -3438,6 +3510,103 @@ fn raid_snapshot_entities(world: &World, town_id: &str) -> Vec<Arc<dyn EntityBas
         ids.extend(war.wired.keys().copied());
         ids
     };
+    entities_from_ids(world, ids)
+}
+
+fn gather_town_entities(
+    world: &World,
+    town_id: &str,
+    bounds: crate::geom::Rect,
+    camps: &[ScenePost],
+    gates: &[ScenePost],
+    materialized: bool,
+    pad: i32,
+) -> Vec<Arc<dyn EntityBase>> {
+    if materialized {
+        return raid_snapshot_entities(world, town_id);
+    }
+    let aabb = town_search_aabb(bounds, camps, gates, pad);
+    let cursor = take_snapshot_cursor(town_id);
+    // One X-strip per tick so the capital's first live query is a slice, not
+    // the whole town AABB. Accumulated ids cover the town after one cycle.
+    let strip = aabb_x_strip(&aabb, cursor, JOIN_AMORTIZE_TICKS);
+    let batch = world.get_all_at_box(&strip);
+    let ids = merge_snapshot_ids(town_id, &batch);
+    entities_from_ids(world, ids)
+}
+
+fn prewarm_town_fields(town_id: &str) {
+    let mut dir = lock();
+    let Some(war) = dir.towns.get_mut(town_id) else {
+        return;
+    };
+    if !war.fields.is_empty() {
+        return;
+    }
+    let dest = war.scene.flag();
+    let _ = war.field_toward(dest);
+}
+
+fn take_snapshot_cursor(town_id: &str) -> u32 {
+    let mut dir = lock();
+    let Some(war) = dir.towns.get_mut(town_id) else {
+        return 0;
+    };
+    let cursor = war.snapshot_cursor;
+    war.snapshot_cursor = war.snapshot_cursor.wrapping_add(1);
+    cursor
+}
+
+fn town_search_aabb(
+    bounds: crate::geom::Rect,
+    camps: &[ScenePost],
+    gates: &[ScenePost],
+    pad: i32,
+) -> BoundingBox {
+    let mut min_x = bounds.min_x - pad;
+    let mut min_z = bounds.min_z - pad;
+    let mut max_x = bounds.max_x + pad;
+    let mut max_z = bounds.max_z + pad;
+    for p in camps.iter().chain(gates.iter()) {
+        min_x = min_x.min(p.x - pad);
+        min_z = min_z.min(p.z - pad);
+        max_x = max_x.max(p.x + pad);
+        max_z = max_z.max(p.z + pad);
+    }
+    BoundingBox::new(
+        Vector3::new(f64::from(min_x), -64.0, f64::from(min_z)),
+        Vector3::new(f64::from(max_x), 320.0, f64::from(max_z)),
+    )
+}
+
+fn aabb_x_strip(aabb: &BoundingBox, age: u32, n: u32) -> BoundingBox {
+    let n = n.max(1);
+    let width = (aabb.max.x - aabb.min.x).max(1.0);
+    let i = f64::from(age % n);
+    let strips = f64::from(n);
+    let x0 = aabb.min.x + width * i / strips;
+    let x1 = aabb.min.x + width * (i + 1.0) / strips;
+    BoundingBox::new(
+        Vector3::new(x0, aabb.min.y, aabb.min.z),
+        Vector3::new(x1, aabb.max.y, aabb.max.z),
+    )
+}
+
+fn merge_snapshot_ids(town_id: &str, batch: &[Arc<dyn EntityBase>]) -> Vec<i32> {
+    let mut dir = lock();
+    let Some(war) = dir.towns.get_mut(town_id) else {
+        return Vec::new();
+    };
+    for entity in batch {
+        war.snapshot_ids.insert(entity.get_entity().entity_id);
+    }
+    war.snapshot_ids.iter().copied().collect()
+}
+
+fn entities_from_ids(
+    world: &World,
+    ids: impl IntoIterator<Item = i32>,
+) -> Vec<Arc<dyn EntityBase>> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for id in ids {
@@ -4190,7 +4359,125 @@ fn tick_moving_ram(
     }
 }
 
+fn continue_engine_spawns(world: &Arc<World>, town_id: &str) -> bool {
+    let mut tower = {
+        let mut dir = lock();
+        dir.towns
+            .get_mut(town_id)
+            .and_then(|w| w.siege_tower.take())
+    };
+    if let Some(t) = tower.as_mut()
+        && !engines::tower_complete(t)
+    {
+        let n = engines::append_tower_parts(world, t, engines::ENGINE_PARTS_PER_TICK);
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.siege_tower = tower;
+        }
+        return n > 0;
+    }
+    if tower.is_some() {
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.siege_tower = tower;
+        }
+    }
+    let mut ram = {
+        let mut dir = lock();
+        dir.towns.get_mut(town_id).and_then(|w| w.ram.take())
+    };
+    if let Some(r) = ram.as_mut()
+        && !r.destroyed
+        && !crate::ram::ram_complete(r)
+    {
+        let n = crate::ram::append_ram_parts(world, r, crate::ram::RAM_PARTS_PER_TICK);
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.ram = ram;
+        }
+        return n > 0;
+    }
+    if ram.is_some() {
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.ram = ram;
+        }
+    }
+    false
+}
+
+fn prewarm_siege_columns(world: &World, town_id: &str) {
+    let posts = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        let camp = war
+            .raid
+            .as_ref()
+            .map_or_else(|| war.scene.keep(), |r| r.camp);
+        let wall = treb_wall_target(&war.scene, war.threatened, camp);
+        let mut posts = vec![camp, wall];
+        posts.extend(war.scene.trebuchet_posts().iter().copied());
+        posts.extend(war.scene.ram_posts().iter().copied());
+        posts.extend(war.scene.ladder_posts().iter().copied());
+        posts
+    };
+    for post in posts {
+        let y = standing_y(world, post);
+        let pos = BlockPos::new(post.x, y, post.z);
+        if world.is_loaded(&pos) {
+            let _ = world.get_block_and_state(&pos);
+        }
+    }
+}
+
 fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool) {
+    if continue_engine_spawns(world, town_id) {
+        return;
+    }
+    let spawn_missing_tower = {
+        let dir = lock();
+        dir.towns.get(town_id).is_some_and(|w| {
+            alarm && w.raid.as_ref().is_some_and(|r| !r.tower_spawned) && w.siege_tower.is_none()
+        })
+    };
+    if spawn_missing_tower {
+        let origin = {
+            let dir = lock();
+            dir.towns.get(town_id).map_or_else(
+                || ScenePost::new(0, 0),
+                |w| {
+                    w.scene
+                        .ladder_posts()
+                        .first()
+                        .copied()
+                        .or_else(|| w.scene.raid_camps().first().copied())
+                        .unwrap_or_else(|| w.scene.keep())
+                },
+            )
+        };
+        let y = f64::from(standing_y(world, origin));
+        let mut tower = engines::empty_tower(Vector3::new(
+            f64::from(origin.x) + 0.5,
+            y,
+            f64::from(origin.z) + 0.5,
+        ));
+        engines::append_tower_parts(world, &mut tower, engines::ENGINE_PARTS_PER_TICK);
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.siege_tower = Some(tower);
+            if let Some(raid) = &mut war.raid {
+                raid.tower_spawned = true;
+            }
+        }
+        return;
+    }
+    if apply_punch_break(world, town_id) {
+        apply_punch_repair(world, town_id, tick);
+        return;
+    }
+
     let (camp, wall, origin, should_fire, mut shot, tower, ladders_done, keep) = {
         let mut dir = lock();
         let Some(war) = dir.towns.get_mut(town_id) else {
@@ -4223,39 +4510,9 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
             war.scene.keep_rect(),
         )
     };
-    let spawn_missing_tower = {
-        let dir = lock();
-        dir.towns.get(town_id).is_some_and(|w| {
-            alarm && w.raid.as_ref().is_some_and(|r| !r.tower_spawned) && w.siege_tower.is_none()
-        })
-    };
-    if spawn_missing_tower {
-        let origin = {
-            let dir = lock();
-            dir.towns.get(town_id).map_or(camp, |w| {
-                w.scene
-                    .ladder_posts()
-                    .first()
-                    .copied()
-                    .or_else(|| w.scene.raid_camps().first().copied())
-                    .unwrap_or(camp)
-            })
-        };
-        let y = f64::from(standing_y(world, origin));
-        let tower = engines::spawn_tower(
-            world,
-            Vector3::new(f64::from(origin.x) + 0.5, y, f64::from(origin.z) + 0.5),
-        );
-        let mut dir = lock();
-        if let Some(war) = dir.towns.get_mut(town_id) {
-            war.siege_tower = Some(tower);
-            if let Some(raid) = &mut war.raid {
-                raid.tower_spawned = true;
-            }
-        }
-    }
     let wall_top = standing_y(world, wall);
     let ladder_floor = wall_top.saturating_sub(WALL_WALK_LIFT);
+    let mut wrote = should_fire;
 
     if should_fire {
         let oy = f64::from(standing_y(world, origin) + 8);
@@ -4308,7 +4565,7 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
 
     if let Some(mut moving) = tower {
         let arrived = engines::tick_tower(world, &mut moving, wall);
-        if arrived && !ladders_done {
+        if arrived && !ladders_done && !wrote {
             let n = raise_ladders(world, wall, camp, ladder_floor);
             let mut dir = lock();
             if let Some(war) = dir.towns.get_mut(town_id) {
@@ -4316,6 +4573,7 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
                 war.siege_tower = Some(moving);
             }
             note_ladders_raised(&mut dir, town_id, tick, wall, n);
+            wrote = true;
         } else {
             let mut dir = lock();
             if let Some(war) = dir.towns.get_mut(town_id) {
@@ -4324,7 +4582,7 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
         }
     }
 
-    if alarm && !ladders_done {
+    if alarm && !ladders_done && !wrote {
         let crew_at_wall = {
             let dir = lock();
             dir.towns.get(town_id).is_some_and(|w| {
@@ -4339,11 +4597,13 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
                     war.ladders_placed = true;
                 }
                 note_ladders_raised(&mut dir, town_id, tick, wall, n);
+                wrote = true;
             }
         }
     }
-    apply_punch_break(world, town_id);
-    apply_punch_repair(world, town_id, tick);
+    if !wrote {
+        apply_punch_repair(world, town_id, tick);
+    }
 }
 
 fn treb_wall_target(
@@ -4421,14 +4681,14 @@ fn enqueue_punch_break(town_id: &str, hits: Vec<engines::PunchHit>, tick: u32) {
     }
 }
 
-fn apply_punch_break(world: &Arc<World>, town_id: &str) {
+fn apply_punch_break(world: &Arc<World>, town_id: &str) -> bool {
     let hits = {
         let mut dir = lock();
         let Some(war) = dir.towns.get_mut(town_id) else {
-            return;
+            return false;
         };
         if war.punch_break.is_empty() {
-            return;
+            return false;
         }
         let n = war.punch_break.len().min(PUNCH_BREAK_PER_TICK);
         war.punch_break.drain(..n).collect::<Vec<_>>()
@@ -4442,6 +4702,7 @@ fn apply_punch_break(world: &Arc<World>, town_id: &str) {
     if placed > 0 {
         tracing::info!("kingdoms trebuchet punched wall holes={placed} town={town_id}");
     }
+    placed > 0
 }
 
 fn enqueue_punch_repair(town_id: &str, hits: &[engines::PunchHit], tick: u32) {
@@ -4499,6 +4760,29 @@ fn apply_punch_repair(world: &Arc<World>, town_id: &str, tick: u32) {
         tracing::info!(
             "kingdoms repair-by-diff refilled trebuchet hole placed={placed} town={town_id}"
         );
+    }
+}
+
+fn apply_pending_breach(world: &Arc<World>, town_id: &str) {
+    let cells = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        if war.pending_breach.is_empty() {
+            return;
+        }
+        let n = war.pending_breach.len().min(PUNCH_BREAK_PER_TICK);
+        war.pending_breach.drain(..n).collect::<Vec<_>>()
+    };
+    let mut cleared = 0u32;
+    for pos in cells {
+        if siege::clear_gate_bar(world, pos) {
+            cleared += 1;
+        }
+    }
+    if cleared > 0 {
+        tracing::info!(town = town_id, cleared, "kingdoms ram cleared gate bars");
     }
 }
 
@@ -4745,11 +5029,15 @@ fn overlay_civilian_posts(
     dest: PostTarget,
     role: Option<VillagerRole>,
     alarm: bool,
+    capturing: bool,
     inner_gate: PostTarget,
     well: PostTarget,
     keep: PostTarget,
     duty: CivilianDuty,
 ) -> PostTarget {
+    if capturing && role == Some(VillagerRole::Civilian) {
+        return dest;
+    }
     match duty {
         CivilianDuty::Priest => keep,
         CivilianDuty::Blacksmith => dest,
@@ -5303,6 +5591,10 @@ fn ensure_border_towns(world: &Arc<World>) {
     }
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "mirrors the director tick flags (alarm/combat/breach/capture)"
+)]
 fn dest_for(
     faction: &Faction,
     job: MarchJob,
@@ -5310,6 +5602,7 @@ fn dest_for(
     alarm: bool,
     in_combat: bool,
     breached: bool,
+    capturing: bool,
     repair_dest: Option<PostTarget>,
     march_dest: PostTarget,
     keep_dest: PostTarget,
@@ -5324,6 +5617,9 @@ fn dest_for(
         return repair_dest.unwrap_or(keep_dest);
     }
     if role == Some(VillagerRole::Civilian) {
+        if capturing && alarm {
+            return keep_dest;
+        }
         return match schedule::civilian_post(alarm, world_time) {
             CivilianPost::Keep => keep_dest,
             CivilianPost::Work => work_dest,
@@ -5337,7 +5633,9 @@ fn dest_for(
             patrol_dest
         }
         Faction::Kingdom(_) if alarm || in_combat => {
-            if breached {
+            if capturing {
+                march_dest
+            } else if breached {
                 keep_dest
             } else {
                 march_dest
@@ -5347,7 +5645,7 @@ fn dest_for(
         Faction::Pillager => {
             if job == MarchJob::Ladder && !breached {
                 ladder_dest
-            } else if breached {
+            } else if capturing || breached {
                 keep_dest
             } else {
                 march_dest
@@ -5364,23 +5662,85 @@ fn overlay_flag_dest(
     z: f64,
     inner: Rect,
     gatehouse: Rect,
+    gates: &[GateInfo],
     breached: bool,
+    capturing: bool,
     flag_dest: PostTarget,
 ) -> PostTarget {
     let raider = bearer || matches!(faction, Faction::Pillager);
     if in_capture_zone(inner, gatehouse, x, z) {
-        return if raider || breached { flag_dest } else { dest };
+        return if raider || breached || capturing {
+            flag_dest
+        } else {
+            dest
+        };
+    }
+    if capturing && !raider {
+        let dist = (x - f64::from(flag_dest.x)).hypot(z - f64::from(flag_dest.z));
+        if dist <= DEFENDER_RUSH_RANGE {
+            return inward_siege_dest(x, z, gates, gatehouse, inner, flag_dest);
+        }
+        return dest;
     }
     if !raider {
         return dest;
     }
-    if in_courtyard(gatehouse, x, z) && breached {
+    if in_courtyard(gatehouse, x, z) && (breached || capturing) {
         return flag_dest;
     }
-    if breached {
-        return gatehouse_inner_dest(gatehouse, inner, flag_dest);
+    if breached || capturing {
+        return inward_siege_dest(x, z, gates, gatehouse, inner, flag_dest);
     }
     dest
+}
+
+/// Next ring toward the keep-court plate: outer town, civic, castle, then
+/// the inner-bailey side of the gatehouse.
+fn inward_siege_dest(
+    x: f64,
+    z: f64,
+    gates: &[GateInfo],
+    gatehouse: Rect,
+    inner: Rect,
+    flag: PostTarget,
+) -> PostTarget {
+    if in_capture_zone(inner, gatehouse, x, z) || in_courtyard(gatehouse, x, z) {
+        return flag;
+    }
+    let fx = f64::from(flag.x);
+    let fz = f64::from(flag.z);
+    let me = (x - fx).hypot(z - fz);
+    let mut ordered: Vec<&GateInfo> = gates.iter().collect();
+    ordered.sort_by(|a, b| {
+        let da = (f64::from(a.x) - fx).hypot(f64::from(a.z) - fz);
+        let db = (f64::from(b.x) - fx).hypot(f64::from(b.z) - fz);
+        db.total_cmp(&da)
+    });
+    for gate in ordered {
+        let gd = (f64::from(gate.x) - fx).hypot(f64::from(gate.z) - fz);
+        if me > gd + 10.0 {
+            return PostTarget {
+                x: gate.x,
+                y: flag.y,
+                z: gate.z,
+            };
+        }
+    }
+    gatehouse_inner_dest(gatehouse, inner, flag)
+}
+
+fn in_join_ai_window(index: usize, live_age: u32, n: usize) -> bool {
+    if n == 0 {
+        return false;
+    }
+    let budget = JOIN_ENTITY_BUDGET.min(n);
+    let start = (live_age as usize).wrapping_mul(budget) % n;
+    let pos = if index >= start {
+        index - start
+    } else {
+        index + n - start
+    };
+    pos < budget
 }
 
 /// First waypoint past the portcullis, on the inner-bailey side of the gatehouse.
@@ -5401,7 +5761,7 @@ fn gatehouse_inner_dest(gatehouse: Rect, inner: Rect, flag: PostTarget) -> PostT
 }
 
 fn swap_flag_banner(town_id: &str, owner: &TownOwner) {
-    let (world, fx, fy, fz) = {
+    let (world, fx, fy, fz, kx, kz) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
             return;
@@ -5410,14 +5770,38 @@ fn swap_flag_banner(town_id: &str, owner: &TownOwner) {
         let Some(world) = dir.attached_worlds().into_iter().next() else {
             return;
         };
-        (world, flag.x, flag.height_or(64), flag.z)
+        let keep = war.scene.keep();
+        (world, flag.x, flag.height_or(64), flag.z, keep.x, keep.z)
     };
-    let banner_y = fy + 4;
+    let banner_y = fy + FLAG_MAST_FENCES + 1;
     world.set_block_state(
         &BlockPos::new(fx, banner_y, fz),
         owner_banner(owner).default_state.id,
         siege::SIEGE_PLACE_FLAGS,
     );
+    let wool = owner_wool(owner).default_state.id;
+    let (dx, dz, px, pz) = flag_panel_axes((kx, kz), (fx, fz));
+    let base_y = fy + FLAG_MAST_FENCES;
+    let half = FLAG_PANEL_WIDTH / 2;
+    for row in 0..FLAG_PANEL_HEIGHT {
+        for col in -half..=half {
+            world.set_block_state(
+                &BlockPos::new(fx + dx + col * px, base_y + row, fz + dz + col * pz),
+                wool,
+                siege::SIEGE_PLACE_FLAGS,
+            );
+        }
+    }
+}
+
+fn flag_panel_axes(keep: (i32, i32), flag: (i32, i32)) -> (i32, i32, i32, i32) {
+    let dx = (flag.0 - keep.0).signum();
+    let dz = (flag.1 - keep.1).signum();
+    if dx.abs() >= dz.abs() {
+        (if dx == 0 { 1 } else { dx }, 0, 0, 1)
+    } else {
+        (0, dz, 1, 0)
+    }
 }
 
 /// True when `(x, z)` is the town flag plinth (pedestal, mast, or plates).
@@ -6713,11 +7097,32 @@ mod tests {
         assert_eq!(CAPTURES_PER_TICK, 1);
         assert_eq!(PORTCULLIS_BARS_PER_TICK, 2);
         assert_eq!(JOIN_AMORTIZE_TICKS, 40);
+        assert_eq!(JOIN_ENTITY_BUDGET, 64);
+        assert!(in_join_ai_window(0, 0, 480));
+        assert!(!in_join_ai_window(64, 0, 480));
+        assert!(in_join_ai_window(64, 1, 480));
+        let aabb = BoundingBox::new(
+            Vector3::new(0.0, -64.0, 0.0),
+            Vector3::new(400.0, 320.0, 400.0),
+        );
+        let mut min_x = f64::MAX;
+        let mut max_x = f64::MIN;
+        for i in 0..JOIN_AMORTIZE_TICKS {
+            let strip = aabb_x_strip(&aabb, i, JOIN_AMORTIZE_TICKS);
+            assert_eq!(strip.min.z, aabb.min.z);
+            assert_eq!(strip.max.z, aabb.max.z);
+            min_x = min_x.min(strip.min.x);
+            max_x = max_x.max(strip.max.x);
+            assert!(strip.max.x > strip.min.x);
+            assert!(strip.max.x - strip.min.x < (aabb.max.x - aabb.min.x) * 0.5);
+        }
+        assert!((min_x - aabb.min.x).abs() < 1.0e-9);
+        assert!((max_x - aabb.max.x).abs() < 1.0e-9);
         assert_eq!(DROPS_PER_TICK, 8);
         assert_eq!(HEAVY_TOWNS_PER_TICK, 1);
         assert_eq!(STORMING_COUNT, 8);
         assert!((STORMING_RANGE - 8.0).abs() < f64::EPSILON);
-        assert!((PLAYER_SIM_RANGE - 48.0).abs() < f64::EPSILON);
+        assert!((PLAYER_SIM_RANGE - 64.0).abs() < f64::EPSILON);
         assert_eq!(resolve_stand_y(80, Some(70), 63), 80);
         assert_eq!(resolve_stand_y(0, Some(70), 63), 70);
         assert_eq!(resolve_stand_y(0, None, 63), 64);
@@ -6768,6 +7173,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             None,
             march,
             keep,
@@ -6783,6 +7189,7 @@ mod tests {
             &Faction::Kingdom(KingdomId::new("alder")),
             MarchJob::Assault,
             Some(VillagerRole::Civilian),
+            false,
             false,
             false,
             false,
@@ -6804,6 +7211,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
             march,
             keep,
@@ -6822,6 +7230,7 @@ mod tests {
             true,
             true,
             false,
+            false,
             None,
             march,
             keep,
@@ -6838,6 +7247,7 @@ mod tests {
             MarchJob::Assault,
             Some(VillagerRole::Archer),
             true,
+            false,
             false,
             false,
             None,
@@ -6863,6 +7273,7 @@ mod tests {
             true,
             false,
             true,
+            false,
             None,
             march,
             flag,
@@ -6883,7 +7294,9 @@ mod tests {
             22.5,
             inner,
             gatehouse,
+            &[],
             true,
+            false,
             flag,
         );
         assert_eq!((dest.x, dest.z), (flag.x, flag.z));
@@ -6895,6 +7308,8 @@ mod tests {
             -3.5,
             inner,
             gatehouse,
+            &[],
+            false,
             false,
             flag,
         );
@@ -6911,7 +7326,9 @@ mod tests {
             22.5,
             inner,
             gatehouse,
+            &[],
             true,
+            false,
             flag,
         );
         assert_eq!(
@@ -6927,7 +7344,9 @@ mod tests {
             -3.5,
             inner,
             gatehouse,
+            &[],
             true,
+            false,
             flag,
         );
         assert!(
@@ -6959,7 +7378,9 @@ mod tests {
                 z,
                 inner,
                 gatehouse,
+                &[],
                 true,
+                false,
                 flag,
             );
             assert!(
@@ -6975,7 +7396,9 @@ mod tests {
                 f64::from(dest.z) + 0.5,
                 inner,
                 gatehouse,
+                &[],
                 true,
+                false,
                 flag,
             );
             assert_eq!(
@@ -7038,7 +7461,9 @@ mod tests {
             40.5,
             inner,
             gatehouse,
+            &[],
             true,
+            false,
             flag,
         );
         assert_eq!(
@@ -7057,6 +7482,224 @@ mod tests {
         assert_eq!(
             owner_banner(&TownOwner::Pillager),
             owner_banner(&TownOwner::parse("pillager"))
+        );
+    }
+
+    #[test]
+    fn capital_raid_walks_outer_then_civic_then_castle_to_the_plate() {
+        use crate::geom::Dir;
+        use crate::info::GateKind;
+        let flag = PostTarget {
+            x: 11,
+            y: 64,
+            z: 22,
+        };
+        let march = PostTarget {
+            x: 20,
+            y: 64,
+            z: -80,
+        };
+        let inner = Rect::new(0, 8, 40, 40);
+        let gatehouse = Rect::new(16, 0, 24, 8);
+        let gates = [
+            GateInfo {
+                kind: GateKind::Town,
+                x: 20,
+                z: -80,
+                facing: Dir::North,
+            },
+            GateInfo {
+                kind: GateKind::Town,
+                x: 20,
+                z: -20,
+                facing: Dir::North,
+            },
+            GateInfo {
+                kind: GateKind::Castle,
+                x: 20,
+                z: 4,
+                facing: Dir::North,
+            },
+        ];
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Pillager,
+            false,
+            20.5,
+            -96.0,
+            inner,
+            gatehouse,
+            &gates,
+            true,
+            false,
+            flag,
+        );
+        assert_eq!(
+            (dest.x, dest.z),
+            (gates[0].x, gates[0].z),
+            "outside the outer wall, dest is the town gate"
+        );
+        let dest = overlay_flag_dest(
+            dest,
+            &Faction::Pillager,
+            false,
+            20.5,
+            -80.0,
+            inner,
+            gatehouse,
+            &gates,
+            true,
+            false,
+            flag,
+        );
+        assert_eq!(
+            (dest.x, dest.z),
+            (gates[1].x, gates[1].z),
+            "at the town gate, dest is the civic ring"
+        );
+        let dest = overlay_flag_dest(
+            dest,
+            &Faction::Pillager,
+            false,
+            20.5,
+            -20.0,
+            inner,
+            gatehouse,
+            &gates,
+            true,
+            false,
+            flag,
+        );
+        assert_eq!(
+            (dest.x, dest.z),
+            (gates[2].x, gates[2].z),
+            "at the civic gate, dest is the castle gate"
+        );
+        let dest = overlay_flag_dest(
+            dest,
+            &Faction::Pillager,
+            false,
+            20.5,
+            4.0,
+            inner,
+            gatehouse,
+            &gates,
+            true,
+            false,
+            flag,
+        );
+        assert!(
+            inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
+            "past the castle gate the column walks the gatehouse dest={dest:?}"
+        );
+    }
+
+    #[test]
+    fn defenders_rush_the_plate_once_capture_starts() {
+        let keep = PostTarget {
+            x: 11,
+            y: 64,
+            z: 22,
+        };
+        let march = PostTarget { x: 20, y: 64, z: 4 };
+        let work = PostTarget { x: 9, y: 64, z: 9 };
+        let home = PostTarget { x: 3, y: 64, z: 3 };
+        let patrol = PostTarget { x: 5, y: 70, z: 5 };
+        let dest = dest_for(
+            &Faction::Kingdom(KingdomId::new("alder")),
+            MarchJob::Assault,
+            Some(VillagerRole::Guard),
+            true,
+            true,
+            true,
+            true,
+            None,
+            march,
+            keep,
+            march,
+            patrol,
+            work,
+            home,
+            patrol,
+            6_000,
+        );
+        assert_eq!(
+            (dest.x, dest.z),
+            (march.x, march.z),
+            "capturing guards hold the gate; overlay rushes those near the plate"
+        );
+        let dest = dest_for(
+            &Faction::Kingdom(KingdomId::new("alder")),
+            MarchJob::Assault,
+            Some(VillagerRole::Civilian),
+            true,
+            false,
+            true,
+            true,
+            None,
+            march,
+            keep,
+            march,
+            patrol,
+            work,
+            home,
+            patrol,
+            6_000,
+        );
+        assert_eq!((dest.x, dest.z), (keep.x, keep.z));
+        let inner = Rect::new(0, 8, 40, 40);
+        let gatehouse = Rect::new(16, 0, 24, 8);
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Kingdom(KingdomId::new("alder")),
+            false,
+            20.5,
+            -3.5,
+            inner,
+            gatehouse,
+            &[],
+            true,
+            true,
+            keep,
+        );
+        assert!(
+            inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
+            "defenders walk the gatehouse to the plate dest={dest:?}"
+        );
+        assert_eq!(chat::line(ShoutKind::Charge), "To the flag!");
+        let militia = overlay_civilian_posts(
+            keep,
+            Some(VillagerRole::Civilian),
+            true,
+            true,
+            march,
+            work,
+            keep,
+            CivilianDuty::Militia,
+        );
+        assert_eq!(
+            (militia.x, militia.z),
+            (keep.x, keep.z),
+            "militia leave the inner gate for the plate"
+        );
+        assert!((DEFENDER_RUSH_RANGE - 48.0).abs() < f64::EPSILON);
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Kingdom(KingdomId::new("alder")),
+            false,
+            f64::from(keep.x) + 0.5,
+            f64::from(keep.z) + 60.5,
+            inner,
+            gatehouse,
+            &[],
+            true,
+            true,
+            keep,
+        );
+        assert_eq!(
+            (dest.x, dest.z),
+            (march.x, march.z),
+            "defenders beyond 48 blocks of the plate keep their post"
         );
     }
 
@@ -7105,6 +7748,7 @@ mod tests {
             home,
             Some(VillagerRole::Civilian),
             true,
+            false,
             inner,
             well,
             keep,
@@ -7114,6 +7758,7 @@ mod tests {
         let water = overlay_civilian_posts(
             home,
             Some(VillagerRole::Civilian),
+            false,
             false,
             inner,
             well,
@@ -7125,6 +7770,7 @@ mod tests {
             home,
             Some(VillagerRole::Civilian),
             true,
+            false,
             inner,
             well,
             keep,
@@ -7169,6 +7815,9 @@ mod tests {
         assert_eq!(PUNCH_REPAIR_PER_TICK, 2);
         assert_eq!(PUNCH_BREAK_PER_TICK, 2);
         assert_eq!(PORTCULLIS_BARS_PER_TICK, 2);
+        assert_eq!(engines::ENGINE_PARTS_PER_TICK, 2);
+        assert_eq!(crate::ram::RAM_PARTS_PER_TICK, 2);
+        assert!((DEFENDER_RUSH_RANGE - 48.0).abs() < f64::EPSILON);
         assert!((PHASE_WARN_MS - 20.0).abs() < f64::EPSILON);
         assert_eq!(resolve_stand_y(117, None, 63), 117);
     }

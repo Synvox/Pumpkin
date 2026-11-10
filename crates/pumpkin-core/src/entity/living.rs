@@ -1482,10 +1482,11 @@ impl LivingEntity {
 
         let touching_water = self.entity.touching_water.load(SeqCst);
 
-        // Vanilla Mob.isEffectiveAi: NoAI mobs don't travel, so they neither move nor fall.
+        // Vanilla NoAI still travels (fall, push, suffocate). Kingdoms raid
+        // bodies set `director_driven` and skip this work; `/summon` does not.
         let effective_ai = caller
             .get_mob()
-            .is_none_or(|mob| !mob.get_mob_entity().is_no_ai());
+            .is_none_or(|mob| !mob.get_mob_entity().is_director_driven());
 
         // Strider is the only entity that has canWalkOnFluid = false
 
@@ -3622,7 +3623,13 @@ impl EntityBase for LivingEntity {
         let in_death_animation = self.health.load() <= 0.0 && self.death_time.load(Relaxed) < 20;
         let is_player = self.entity.entity_type == &EntityType::PLAYER;
         if (is_alive || in_death_animation) && !is_player {
-            self.tick_movement(caller);
+            let director_driven = caller
+                .get_mob()
+                .is_some_and(|mob| mob.get_mob_entity().is_director_driven());
+            // Kingdoms raid bodies skip living movement; `/summon` `NoAI` does not.
+            if !director_driven {
+                self.tick_movement(caller);
+            }
             // Vanilla-like order: freeze logic runs after movement/collisions.
             self.entity.tick_frozen(caller);
         } else if is_alive {
@@ -4612,12 +4619,81 @@ mod ai_step_tests {
     }
 
     #[tokio::test]
-    async fn no_ai_skips_controller_and_travel() -> TestResult {
+    async fn no_ai_skips_controller() -> TestResult {
         let folder = tempfile::tempdir()?;
         let world = world(&folder);
         let calls = Arc::new(AtomicUsize::new(0));
         let mob = probe(world.clone(), calls.clone());
         mob.mob.set_no_ai(true);
+        let living = &mob.mob.living_entity;
+        living.entity.velocity.store(Vector3::new(0.1, 0.0, 0.0));
+
+        living.tick_movement(&mob);
+        world.level.shutdown().await;
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn no_ai_without_director_driven_still_applies_gravity_and_collisions() -> TestResult {
+        use pumpkin_data::Block;
+        use pumpkin_util::math::vector2::Vector2;
+        use pumpkin_world::{chunk::ChunkData, world::BlockFlags};
+        let folder = tempfile::tempdir()?;
+        let world = world(&folder);
+        world
+            .level
+            .loaded_chunks
+            .insert(Vector2::new(0, 0), ChunkData::empty_sync(0, 0));
+        let mob = probe(world.clone(), Arc::new(AtomicUsize::new(0)));
+        mob.mob.set_no_ai(true);
+        let living = &mob.mob.living_entity;
+        living.entity.set_pos(Vector3::new(0.5, 68.0, 0.5));
+        living.entity.on_ground.store(false, Ordering::Relaxed);
+        living.entity.velocity.store(Vector3::new(0.0, 0.0, 0.0));
+        let start_y = living.entity.pos.load().y;
+
+        living.tick_movement(&mob);
+        let fallen_y = living.entity.pos.load().y;
+        let fallen_vy = living.entity.velocity.load().y;
+
+        let flags = BlockFlags::SKIP_BLOCK_ADDED_CALLBACK | BlockFlags::UPDATE_KNOWN_SHAPE;
+        world.set_block_state(
+            &BlockPos::new(0, 63, 0),
+            Block::STONE.default_state.id,
+            flags,
+        );
+        world.set_block_state(
+            &BlockPos::new(1, 64, 0),
+            Block::STONE.default_state.id,
+            flags,
+        );
+        living.entity.set_pos(Vector3::new(0.5, 64.0, 0.5));
+        living.entity.on_ground.store(true, Ordering::Relaxed);
+        living.set_attribute_base(&Attributes::MOVEMENT_SPEED, 1.0);
+        living.movement_input.store(Vector3::new(1.0, 0.0, 0.0));
+        living.entity.velocity.store(Vector3::new(0.4, 0.0, 0.0));
+        living.tick_movement(&mob);
+        let hit_wall = living.entity.horizontal_collision.load(Ordering::Relaxed);
+        world.level.shutdown().await;
+
+        assert!(
+            fallen_y < start_y || fallen_vy < 0.0,
+            "plain NoAI must still fall start_y={start_y} fallen_y={fallen_y} vy={fallen_vy}"
+        );
+        assert!(hit_wall, "plain NoAI must still collide with blocks");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn director_driven_skips_travel() -> TestResult {
+        let folder = tempfile::tempdir()?;
+        let world = world(&folder);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mob = probe(world.clone(), calls.clone());
+        mob.mob.set_no_ai(true);
+        mob.mob.set_director_driven(true);
         let living = &mob.mob.living_entity;
         let position = living.entity.pos.load();
         living.entity.velocity.store(Vector3::new(0.1, 0.0, 0.0));

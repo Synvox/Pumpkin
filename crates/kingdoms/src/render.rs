@@ -12,6 +12,7 @@ use crate::interior::keep_storey_label;
 use crate::palette::PaletteKind;
 use crate::plan::TownPlan;
 use crate::scenes::SceneKind;
+use crate::siege::FLAG_MAST_FENCES;
 use crate::stamp::{BlockSink, VolumeSink, fill_volume, ridge_floor};
 
 /// Planner-only renders (no chunk generation).
@@ -124,25 +125,26 @@ fn write_flag_renders(
             && !castle.chapel.contains(x, z)
             && !castle.kitchen.contains(x, z)
     };
+    let mast_col = |x: i32, z: i32| plinth_col(x, z) && (x - fx).abs() <= 1 && (z - fz).abs() <= 1;
     let mut owned = clone_volume(volume);
     paint_flag_cloth(&mut owned, fx, fz, None);
     let crop = render_iso_view(
         &owned,
-        fx - 3,
-        fz - 3,
-        fx + 3,
-        fz + 3,
-        24,
+        fx - 4,
+        fz - 4,
+        fx + 4,
+        fz + 4,
+        28,
         1,
-        |x, _, z| plinth_col(x, z),
-        Some("Keep flag plinth · pedestal, mast, plates"),
+        |x, _, z| mast_col(x, z),
+        Some("Flag plinth"),
         false,
         0,
     );
     save(&out_dir.join(format!("{stem}-flag-se.png")), &crop)?;
     let (kx, kz) = castle.keep.center();
     let mast_top = owned.top(fx, fz).map_or(80, |(y, _)| y);
-    let slab_y = mast_top - 4;
+    let court_floor = mast_top - FLAG_MAST_FENCES - 1;
     let mut rot = 0u8;
     let mut best = i32::MIN;
     for candidate in 0u8..4 {
@@ -163,20 +165,25 @@ fn write_flag_renders(
     }
     let court = render_iso_view(
         &owned,
-        fx - 8,
-        fz - 8,
-        fx + 8,
-        fz + 8,
-        16,
+        fx.min(kx) - 6,
+        fz.min(kz) - 6,
+        fx.max(kx) + 6,
+        fz.max(kz) + 6,
+        20,
         1,
         |x, y, z| {
             if castle.keep_mass_at(x, z).is_some() || castle.hall.contains(x, z) {
-                y <= slab_y
+                y <= mast_top
+            } else if plinth_col(x, z) {
+                true
             } else {
-                plinth_col(x, z) || y <= slab_y
+                matches!(
+                    plan.occ.kind(x, z),
+                    CellKind::CastleCourt | CellKind::Plaza | CellKind::FlagPlinth
+                ) && y <= court_floor + 1
             }
         },
-        Some("Inner bailey · flag in courtyard context"),
+        Some("Flag, keep behind"),
         false,
         rot,
     );
@@ -185,14 +192,14 @@ fn write_flag_renders(
     paint_flag_cloth(&mut flipped, fx, fz, Some(Block::BLACK_WOOL.default_state));
     let after = render_iso_view(
         &flipped,
-        fx - 3,
-        fz - 3,
-        fx + 3,
-        fz + 3,
-        24,
+        fx - 4,
+        fz - 4,
+        fx + 4,
+        fz + 4,
+        28,
         1,
-        |x, _, z| plinth_col(x, z),
-        Some("Keep flag plinth · after capture"),
+        |x, _, z| mast_col(x, z),
+        Some("Flag after capture"),
         false,
         0,
     );
@@ -213,6 +220,7 @@ fn clone_volume(volume: &VolumeSink) -> VolumeSink {
 }
 
 fn paint_flag_cloth(volume: &mut VolumeSink, fx: i32, fz: i32, cloth: Option<&BlockState>) {
+    let mut painted_banner = false;
     for y in volume.min_y..volume.min_y + volume.sy {
         let Some(state) = volume.get(fx, y, fz) else {
             continue;
@@ -228,15 +236,41 @@ fn paint_flag_cloth(volume: &mut VolumeSink, fx: i32, fz: i32, cloth: Option<&Bl
             continue;
         };
         volume.put(fx, y, fz, cloth.unwrap_or(mapped));
-        return;
+        painted_banner = true;
+        break;
     }
-    if let Some((top, _)) = volume.top(fx, fz) {
+    if !painted_banner && let Some((top, _)) = volume.top(fx, fz) {
         volume.put(
             fx,
             top + 1,
             fz,
             cloth.unwrap_or(Block::GREEN_WOOL.default_state),
         );
+    }
+    let Some(recolor) = cloth else {
+        return;
+    };
+    for dz in -2..=2 {
+        for dx in -2..=2 {
+            if dx == 0 && dz == 0 {
+                continue;
+            }
+            for y in volume.min_y..volume.min_y + volume.sy {
+                let Some(state) = volume.get(fx + dx, y, fz + dz) else {
+                    continue;
+                };
+                let id = Block::from_state_id(state.id).id;
+                if id == Block::GREEN_WOOL.id
+                    || id == Block::BLUE_WOOL.id
+                    || id == Block::BLACK_WOOL.id
+                    || id == Block::GREEN_BANNER.id
+                    || id == Block::BLUE_BANNER.id
+                    || id == Block::BLACK_BANNER.id
+                {
+                    volume.put(fx + dx, y, fz + dz, recolor);
+                }
+            }
+        }
     }
 }
 
