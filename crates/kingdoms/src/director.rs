@@ -2005,7 +2005,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     if materialized {
         tick_raid_warmup(world, town_id, tick);
         if tickets_pending(town_id) || raid_still_warming(town_id, tick) {
-            prewarm_town_snapshot(world, town_id);
+            prewarm_town_fields(town_id);
             return;
         }
     } else {
@@ -2013,8 +2013,12 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         // Tickets only for a scheduled raid. Warming idle towns on approach
         // was the 200–470 ms first-contact hitch (209 tickets at join).
         tick_raid_warmup(world, town_id, tick);
-        if !near || tickets_pending(town_id) {
-            prewarm_town_snapshot(world, town_id);
+        if tickets_pending(town_id) {
+            prewarm_town_fields(town_id);
+            return;
+        }
+        if !near {
+            prewarm_town_fields(town_id);
             return;
         }
     }
@@ -2619,7 +2623,11 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     ),
                     _ => keep_dest,
                 };
-                slide_along_field(base, town_id, dest);
+                if amortizing {
+                    slide_direct(base, dest);
+                } else {
+                    slide_along_field(base, town_id, dest);
+                }
                 n_slid += 1;
             }
             continue;
@@ -2795,7 +2803,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             dist > DIRECT_RANGE || base.tick_count.load(Ordering::Relaxed) == 0
         };
         if due {
-            if follower && dist < DIRECT_RANGE {
+            if amortizing || (follower && dist < DIRECT_RANGE) {
                 slide_direct(base, dest);
             } else {
                 slide_along_field(base, town_id, dest);
@@ -3506,27 +3514,16 @@ fn gather_town_entities(
     entities_from_ids(world, ids)
 }
 
-fn prewarm_town_snapshot(world: &World, town_id: &str) {
-    let (bounds, camps, gates) = {
-        let dir = lock();
-        let Some(war) = dir.towns.get(town_id) else {
-            return;
-        };
-        (
-            inhabited_bounds(&war.scene),
-            war.scene.raid_camps().to_vec(),
-            war.scene
-                .gates()
-                .iter()
-                .map(|g| ScenePost::new(g.x, g.z))
-                .collect::<Vec<_>>(),
-        )
+fn prewarm_town_fields(town_id: &str) {
+    let mut dir = lock();
+    let Some(war) = dir.towns.get_mut(town_id) else {
+        return;
     };
-    let aabb = town_search_aabb(bounds, &camps, &gates, 16);
-    let cursor = take_snapshot_cursor(town_id);
-    let strip = aabb_x_strip(&aabb, cursor, JOIN_AMORTIZE_TICKS);
-    let batch = world.get_all_at_box(&strip);
-    let _ = merge_snapshot_ids(town_id, &batch);
+    if !war.fields.is_empty() {
+        return;
+    }
+    let dest = war.scene.flag();
+    let _ = war.field_toward(dest);
 }
 
 fn take_snapshot_cursor(town_id: &str) -> u32 {
