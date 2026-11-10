@@ -314,7 +314,8 @@ fn write_scene_renders(
             | SceneKind::CraftsmenRow
             | SceneKind::NobleQuarter
             | SceneKind::DocksQuarter
-            | SceneKind::LumberCamp => 6,
+            | SceneKind::LumberCamp
+            | SceneKind::CathedralClose => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -410,6 +411,12 @@ fn write_scene_renders(
                 "Royal capital · inner and outer bailey",
             ),
         )?;
+        if let Some(walk) = wall_walk_rect(plan) {
+            save(
+                &out_dir.join(format!("{stem}-scene-wall-walk.png")),
+                &render_exterior(volume, walk, 2, "City wall-walk · crenellated curtain"),
+            )?;
+        }
     }
     if let Some(hull) = largest_blob(plan, CellKind::Ship) {
         save(
@@ -492,6 +499,37 @@ fn blob_kind(plan: &TownPlan, x: i32, z: i32, kind: CellKind) -> Rect {
         }
     }
     Rect::new(min_x, min_z, max_x, max_z)
+}
+
+fn wall_walk_rect(plan: &TownPlan) -> Option<Rect> {
+    let wall = plan.town.inflate(2);
+    let (cx, _) = wall.center();
+    let candidates = [
+        Rect::new(cx - 12, wall.max_z - 8, cx + 12, wall.max_z + 4),
+        Rect::new(cx - 12, wall.min_z - 4, cx + 12, wall.min_z + 8),
+        Rect::new(
+            wall.max_x - 8,
+            wall.center().1 - 12,
+            wall.max_x + 4,
+            wall.center().1 + 12,
+        ),
+        Rect::new(
+            wall.min_x - 4,
+            wall.center().1 - 12,
+            wall.min_x + 8,
+            wall.center().1 + 12,
+        ),
+    ];
+    candidates.into_iter().find(|rect| {
+        (rect.min_z..=rect.max_z).any(|z| {
+            (rect.min_x..=rect.max_x).any(|x| {
+                matches!(
+                    plan.occ.kind(x, z),
+                    CellKind::TownWall | CellKind::TownTower | CellKind::TownGate
+                )
+            })
+        })
+    })
 }
 
 /// Crop used for aerials and Features-chunk rerenders.

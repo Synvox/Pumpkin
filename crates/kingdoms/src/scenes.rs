@@ -70,6 +70,8 @@ pub enum SceneKind {
     DocksQuarter,
     /// Logging camp with cottages and stacked timber.
     LumberCamp,
+    /// Graveyard, cloister and bishop's house beside the cathedral.
+    CathedralClose,
 }
 
 impl SceneKind {
@@ -104,6 +106,7 @@ impl SceneKind {
             Self::NobleQuarter => "Noble quarter",
             Self::DocksQuarter => "Docks quarter",
             Self::LumberCamp => "Lumber camp",
+            Self::CathedralClose => "Cathedral close",
         }
     }
 }
@@ -191,7 +194,17 @@ pub fn place_scenes(
         rng,
         &mut scenes,
     );
-    place_hero(occ, grid, castle, town, search, rng, &mut scenes);
+    place_hero(
+        occ,
+        grid,
+        castle,
+        town,
+        search,
+        lots,
+        seed,
+        rng,
+        &mut scenes,
+    );
     place_mine(occ, grid, search, town, keep_out, rng, &mut scenes);
     place_tourney(occ, grid, castle, town, search, rng, &mut scenes);
     place_frontier(occ, grid, search, town, keep_out, origin, rng, &mut scenes);
@@ -2068,6 +2081,7 @@ fn landmark_blocked(scenes: &[Scene], rect: Rect) -> bool {
         matches!(
             scene.kind,
             SceneKind::Cathedral
+                | SceneKind::CathedralClose
                 | SceneKind::Monastery
                 | SceneKind::Manor
                 | SceneKind::Vineyard
@@ -2375,6 +2389,7 @@ fn find_gorge_site(
                         | SceneKind::Vineyard
                         | SceneKind::Frontier
                         | SceneKind::Cathedral
+                        | SceneKind::CathedralClose
                 ) && scene.rect.deflate(4).intersects(rect)
             }) {
                 continue;
@@ -3434,6 +3449,7 @@ fn find_vineyard_site(
                     SceneKind::Manor
                         | SceneKind::Monastery
                         | SceneKind::Cathedral
+                        | SceneKind::CathedralClose
                         | SceneKind::MountainFortress
                         | SceneKind::Frontier
                         | SceneKind::PillagerCamp
@@ -4787,11 +4803,13 @@ fn place_hero(
     castle: Rect,
     town: Rect,
     search: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
     let keep = castle.inflate(10);
-    place_cathedral_district(occ, grid, town, keep, search, rng, scenes);
+    place_cathedral_district(occ, grid, town, keep, search, lots, seed, rng, scenes);
     if let Some(yard) = find_peak_site(occ, grid, search, town, keep, 28, 24, 0, rng) {
         paint_mountain_fortress(occ, yard, scenes);
     }
@@ -4803,6 +4821,8 @@ fn place_cathedral_district(
     town: Rect,
     keep_out: Rect,
     search: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
@@ -4815,6 +4835,207 @@ fn place_cathedral_district(
         kind: SceneKind::Cathedral,
         rect: yard,
     });
+    paint_cathedral_close(occ, grid, lots, seed, yard, keep_out, scenes);
+}
+
+fn paint_cathedral_close(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    yard: Rect,
+    keep_out: Rect,
+    scenes: &mut Vec<Scene>,
+) {
+    let grave = [
+        Rect::new(
+            yard.max_x + 1,
+            yard.min_z + 2,
+            yard.max_x + 16,
+            yard.min_z + 15,
+        ),
+        Rect::new(
+            yard.min_x + 2,
+            yard.max_z + 1,
+            yard.min_x + 17,
+            yard.max_z + 14,
+        ),
+        Rect::new(
+            yard.min_x - 16,
+            yard.min_z + 2,
+            yard.min_x - 1,
+            yard.min_z + 15,
+        ),
+    ];
+    let cloister = [
+        Rect::new(
+            yard.min_x + 4,
+            yard.max_z + 1,
+            yard.min_x + 17,
+            yard.max_z + 14,
+        ),
+        Rect::new(
+            yard.min_x + 4,
+            yard.min_z - 14,
+            yard.min_x + 17,
+            yard.min_z - 1,
+        ),
+        Rect::new(
+            yard.max_x + 1,
+            yard.min_z + 8,
+            yard.max_x + 14,
+            yard.min_z + 21,
+        ),
+    ];
+    let bishop = [
+        Rect::new(
+            yard.min_x - 11,
+            yard.min_z + 4,
+            yard.min_x - 2,
+            yard.min_z + 12,
+        ),
+        Rect::new(
+            yard.min_x + 2,
+            yard.min_z - 10,
+            yard.min_x + 11,
+            yard.min_z - 2,
+        ),
+        Rect::new(
+            yard.max_x + 2,
+            yard.max_z - 12,
+            yard.max_x + 11,
+            yard.max_z - 3,
+        ),
+    ];
+    let mut close = yard;
+    let mut painted = false;
+    let mut used: Vec<Rect> = Vec::new();
+    for rect in grave {
+        if used.iter().any(|u| u.intersects(rect)) {
+            continue;
+        }
+        if !close_site_ok(occ, grid, rect, keep_out) {
+            continue;
+        }
+        paint_graveyard(occ, rect);
+        used.push(rect);
+        close = union_scene(close, rect);
+        painted = true;
+        break;
+    }
+    for rect in cloister {
+        if used.iter().any(|u| u.intersects(rect)) {
+            continue;
+        }
+        if !close_site_ok(occ, grid, rect, keep_out) {
+            continue;
+        }
+        occ.fill(rect, CellKind::Arcade, false);
+        occ.fill(rect.deflate(2), CellKind::Green, true);
+        used.push(rect);
+        close = union_scene(close, rect);
+        painted = true;
+        break;
+    }
+    for rect in bishop {
+        if used.iter().any(|u| u.intersects(rect)) {
+            continue;
+        }
+        if !close_site_ok(occ, grid, rect, keep_out) {
+            continue;
+        }
+        if try_lot(
+            occ,
+            grid,
+            lots,
+            seed,
+            BuildingKind::Townhouse,
+            rect,
+            Dir::East,
+        )
+        .is_none()
+        {
+            let _ = force_lot(
+                occ,
+                grid,
+                lots,
+                seed,
+                BuildingKind::Townhouse,
+                rect,
+                Dir::East,
+            );
+        }
+        used.push(rect);
+        close = union_scene(close, rect);
+        painted = true;
+        break;
+    }
+    if painted {
+        scenes.push(Scene {
+            kind: SceneKind::CathedralClose,
+            rect: close,
+        });
+    }
+}
+
+fn union_scene(a: Rect, b: Rect) -> Rect {
+    Rect::new(
+        a.min_x.min(b.min_x),
+        a.min_z.min(b.min_z),
+        a.max_x.max(b.max_x),
+        a.max_z.max(b.max_z),
+    )
+}
+
+fn close_site_ok(occ: &Occupancy, grid: &HeightGrid, rect: Rect, keep_out: Rect) -> bool {
+    if !occ.bounds.contains(rect.min_x, rect.min_z) || !occ.bounds.contains(rect.max_x, rect.max_z)
+    {
+        return false;
+    }
+    if keep_out.intersects(rect) {
+        return false;
+    }
+    if !grid.rect_is_dry(rect) {
+        return false;
+    }
+    let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+    if hi - lo > 16 || lo <= grid.sea_level + 1 {
+        return false;
+    }
+    let mut n = 0;
+    let mut blocked = 0;
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            n += 1;
+            let kind = occ.kind(x, z);
+            if kind.is_castle()
+                || matches!(
+                    kind,
+                    CellKind::Building
+                        | CellKind::TownWall
+                        | CellKind::TownTower
+                        | CellKind::TownGate
+                        | CellKind::Road
+                        | CellKind::RoadStairN
+                        | CellKind::RoadStairS
+                        | CellKind::RoadStairE
+                        | CellKind::RoadStairW
+                        | CellKind::Bridge
+                        | CellKind::CathedralNave
+                        | CellKind::CathedralTransept
+                        | CellKind::CathedralChoir
+                        | CellKind::CathedralTower
+                        | CellKind::CathedralButtress
+                        | CellKind::Ship
+                        | CellKind::Harbor
+                        | CellKind::Quay
+                )
+            {
+                blocked += 1;
+            }
+        }
+    }
+    n > 0 && blocked * 4 < n
 }
 
 fn paint_gothic_cathedral(occ: &mut Occupancy, yard: Rect) {
@@ -7437,5 +7658,132 @@ mod tests {
                 .any(|s| s.kind == SceneKind::MarketQuarter),
             "districts are capital-only"
         );
+    }
+
+    #[test]
+    fn round22_city_curtain_dense_pack_and_cathedral_close() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let oak = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        assert!(oak.capital);
+        let wall = oak.town.inflate(2);
+        let mut ring = 0;
+        let mut walled = 0;
+        let mut towers = 0;
+        for z in wall.min_z - 6..=wall.max_z + 6 {
+            for x in wall.min_x - 6..=wall.max_x + 6 {
+                let dx = (x - wall.min_x).abs().min((x - wall.max_x).abs());
+                let dz = (z - wall.min_z).abs().min((z - wall.max_z).abs());
+                if dx > 6 && dz > 6 {
+                    continue;
+                }
+                ring += 1;
+                match oak.occ.kind(x, z) {
+                    CellKind::TownWall | CellKind::TownGate => walled += 1,
+                    CellKind::TownTower => {
+                        walled += 1;
+                        towers += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            walled * 100 / ring.max(1) >= 18,
+            "outer curtain too gappy walled={walled} ring={ring}"
+        );
+        assert!(towers >= 40, "interval towers on the city curtain {towers}");
+        let town_gates = oak
+            .gates
+            .iter()
+            .filter(|g| g.kind == crate::info::GateKind::Town)
+            .count();
+        assert!(town_gates >= 3, "road gatehouses {town_gates}");
+        let mut n = 0;
+        let mut built = 0;
+        for z in oak.town.min_z..=oak.town.max_z {
+            for x in oak.town.min_x..=oak.town.max_x {
+                n += 1;
+                if !matches!(
+                    oak.occ.kind(x, z),
+                    CellKind::Empty
+                        | CellKind::Green
+                        | CellKind::Farm
+                        | CellKind::FarmEdge
+                        | CellKind::Pasture
+                        | CellKind::Orchard
+                ) {
+                    built += 1;
+                }
+            }
+        }
+        let pct = built * 100 / n.max(1);
+        assert!(pct >= 60, "built coverage inside lower wall {pct}%");
+        let close = oak
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::CathedralClose);
+        if let Some(close) = close {
+            let mut grave = 0;
+            let mut arcade = 0;
+            let mut house = 0;
+            for z in close.rect.min_z..=close.rect.max_z {
+                for x in close.rect.min_x..=close.rect.max_x {
+                    match oak.occ.kind(x, z) {
+                        CellKind::Grave | CellKind::Lychgate => grave += 1,
+                        CellKind::Arcade => arcade += 1,
+                        CellKind::Building => house += 1,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(
+                grave >= 8 || arcade >= 8,
+                "cathedral close grave={grave} cloister={arcade}"
+            );
+            let _ = house;
+        } else {
+            let cat = oak
+                .scenes
+                .iter()
+                .find(|s| s.kind == SceneKind::Cathedral)
+                .map(|s| s.rect.inflate(18));
+            if let Some(around) = cat {
+                let mut grave = 0;
+                let mut arcade = 0;
+                for z in around.min_z..=around.max_z {
+                    for x in around.min_x..=around.max_x {
+                        match oak.occ.kind(x, z) {
+                            CellKind::Grave | CellKind::Lychgate => grave += 1,
+                            CellKind::Arcade => arcade += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                assert!(
+                    grave >= 8 || arcade >= 8,
+                    "cathedral precinct grave={grave} cloister={arcade}"
+                );
+            }
+        }
+        let mut court_buildings = 0;
+        let search = oak.castle.inner.inflate(8);
+        for z in search.min_z..=search.max_z {
+            for x in search.min_x..=search.max_x {
+                if oak.occ.kind(x, z) == CellKind::CastleCourt && oak.occ.lot(x, z) != 0 {
+                    court_buildings += 1;
+                }
+            }
+        }
+        assert_eq!(court_buildings, 0, "lots overwrote keep court");
     }
 }

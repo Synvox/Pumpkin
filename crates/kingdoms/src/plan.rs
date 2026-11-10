@@ -36,7 +36,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 13;
+pub const PLAN_CACHE_VERSION: u32 = 14;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -636,7 +636,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         paint_town_wall(&mut occ, &grid, inner_town, castle_rect, gate);
     if capital {
         let (outer_wall, outer_towers) =
-            paint_town_wall(&mut occ, &grid, town_rect, castle_rect, gate);
+            paint_city_curtain(&mut occ, &grid, town_rect, castle_rect, gate);
         town_wall.extend(outer_wall);
         town_towers.extend(outer_towers);
     }
@@ -652,7 +652,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
             kind: GateKind::Town,
             x: gate_pts[0].0,
             z: gate_pts[0].1,
-            facing: gate,
+            facing: gate_facing_out(town_rect, gate_pts[0].0, gate_pts[0].1),
         },
         GateInfo {
             kind: GateKind::Castle,
@@ -662,18 +662,28 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         },
     ];
     for &pt in &extra_gates {
+        let inner = pt == wall_gate(inner_town, gate);
+        let facing = if inner {
+            gate_facing_out(inner_town, pt.0, pt.1)
+        } else {
+            gate_facing_out(town_rect, pt.0, pt.1)
+        };
         gates.push(GateInfo {
             kind: GateKind::Town,
             x: pt.0,
             z: pt.1,
-            facing: gate,
+            facing,
         });
     }
     for gate_info in &gates {
-        for dz in -2..=2 {
-            for dx in -2..=2 {
-                occ.set(gate_info.x + dx, gate_info.z + dz, CellKind::TownGate, true);
+        if gate_info.kind == GateKind::Castle {
+            for dz in -2..=2 {
+                for dx in -2..=2 {
+                    occ.set(gate_info.x + dx, gate_info.z + dz, CellKind::TownGate, true);
+                }
             }
+        } else {
+            punch_gatehouse(&mut occ, gate_info.x, gate_info.z, gate_info.facing);
         }
     }
     paint_gate_plazas(&mut occ, &gates);
@@ -696,6 +706,9 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &gates,
         &mut roads,
     );
+    if capital {
+        punch_road_gates(&mut occ, town_rect, &mut gates);
+    }
 
     let mut lots = place_lots(
         &mut occ, &grid, inner_town, market, &mut rng, seed, palette, false,
@@ -783,6 +796,17 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
             castle_rect,
             &mut TownRng::salted(seed, 21, 3),
             &mut roads,
+        );
+        punch_road_gates(&mut occ, town_rect, &mut gates);
+        pack_jettied_city(
+            &mut occ,
+            &grid,
+            &mut lots,
+            seed,
+            town_rect,
+            market,
+            palette,
+            &mut TownRng::salted(seed, 22, 4),
         );
     }
     thicken_water_bridges(&mut occ, &grid);
@@ -1455,6 +1479,9 @@ fn flattest_dry(grid: &HeightGrid, within: Rect, w: i32, d: i32) -> Rect {
     best
 }
 
+/// Spacing between interval towers on the lower-city curtain.
+const CITY_TOWER_SPACING: usize = 24;
+
 fn paint_town_wall(
     occ: &mut Occupancy,
     grid: &HeightGrid,
@@ -1501,6 +1528,181 @@ fn paint_town_wall(
         }
     }
     (verts.to_vec(), towers)
+}
+
+/// Continuous lower-city curtain: thick, contour-following, no dry-filter gaps,
+/// interval towers every ~24 blocks. Castle-facing side stays open so the keep
+/// attaches to the civic town.
+fn paint_city_curtain(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    town: Rect,
+    castle: Rect,
+    gate: Dir,
+) -> (Vec<(i32, i32)>, Vec<Rect>) {
+    let wall = town.inflate(2);
+    let verts = [
+        (wall.min_x, wall.min_z),
+        (wall.max_x, wall.min_z),
+        (wall.max_x, wall.max_z),
+        (wall.min_x, wall.max_z),
+    ];
+    let mut ring = Vec::new();
+    for i in 0..4 {
+        let a = verts[i];
+        let b = verts[(i + 1) % 4];
+        let skip = match gate {
+            Dir::South => a.1 == wall.min_z && b.1 == wall.min_z,
+            Dir::North => a.1 == wall.max_z && b.1 == wall.max_z,
+            Dir::East => a.0 == wall.min_x && b.0 == wall.min_x,
+            Dir::West => a.0 == wall.max_x && b.0 == wall.max_x,
+        };
+        if skip {
+            continue;
+        }
+        let line = contour_edge(grid, a, b);
+        occ.stroke(&line, 2, CellKind::TownWall, false);
+        ring.extend(line);
+    }
+    let mut towers = Vec::new();
+    let mut i = 0;
+    while i < ring.len() {
+        let (x, z) = ring[i];
+        if !castle.contains(x, z) && !occ.kind(x, z).is_castle() {
+            let tower = Rect::new(x - 2, z - 2, x + 2, z + 2);
+            towers.push(tower);
+            for dz in -2..=2 {
+                for dx in -2..=2 {
+                    if occ.kind(x + dx, z + dz).is_castle() {
+                        continue;
+                    }
+                    occ.set(x + dx, z + dz, CellKind::TownTower, true);
+                }
+            }
+        }
+        i += CITY_TOWER_SPACING;
+    }
+    (verts.to_vec(), towers)
+}
+
+fn contour_edge(grid: &HeightGrid, a: (i32, i32), b: (i32, i32)) -> Vec<(i32, i32)> {
+    let dx = b.0 - a.0;
+    let dz = b.1 - a.1;
+    let len = dx.abs().max(dz.abs()).max(1);
+    let along_x = dx.abs() >= dz.abs();
+    let n = (len / 8).max(1);
+    let mut samples = Vec::with_capacity((n as usize) + 1);
+    for i in 0..=n {
+        let x = a.0 + dx * i / n;
+        let z = a.1 + dz * i / n;
+        samples.push(contour_sample(grid, x, z, along_x));
+    }
+    let mut line = Vec::new();
+    for window in samples.windows(2) {
+        let mut seg = bresenham(window[0].0, window[0].1, window[1].0, window[1].1);
+        if !line.is_empty() && !seg.is_empty() {
+            seg.remove(0);
+        }
+        line.extend(seg);
+    }
+    line
+}
+
+fn contour_sample(grid: &HeightGrid, x: i32, z: i32, along_x: bool) -> (i32, i32) {
+    let mut best = (x, z);
+    let mut best_s = i32::MIN;
+    for k in -5..=5 {
+        let (nx, nz) = if along_x { (x, z + k) } else { (x + k, z) };
+        let dry = i32::from(grid.is_dry(nx, nz)) * 24;
+        let score = grid.height(nx, nz) + dry - k.abs();
+        if score > best_s {
+            best_s = score;
+            best = (nx, nz);
+        }
+    }
+    best
+}
+
+fn gate_facing_out(town: Rect, x: i32, z: i32) -> Dir {
+    let wall = town.inflate(2);
+    let dn = (z - wall.min_z).abs();
+    let ds = (z - wall.max_z).abs();
+    let dw = (x - wall.min_x).abs();
+    let de = (x - wall.max_x).abs();
+    let m = dn.min(ds).min(dw).min(de);
+    if m == ds {
+        Dir::South
+    } else if m == dn {
+        Dir::North
+    } else if m == de {
+        Dir::East
+    } else {
+        Dir::West
+    }
+}
+
+fn punch_gatehouse(occ: &mut Occupancy, x: i32, z: i32, facing: Dir) {
+    let (along_x, along_z) = match facing {
+        Dir::North | Dir::South => (3, 2),
+        Dir::East | Dir::West => (2, 3),
+    };
+    for dz in -along_z..=along_z {
+        for dx in -along_x..=along_x {
+            if occ.kind(x + dx, z + dz).is_castle() {
+                continue;
+            }
+            occ.set(x + dx, z + dz, CellKind::TownGate, true);
+        }
+    }
+    let (tx, tz) = match facing {
+        Dir::North | Dir::South => (6, 0),
+        Dir::East | Dir::West => (0, 6),
+    };
+    for &(ox, oz) in &[(tx, tz), (-tx, -tz)] {
+        for dz in -2..=2 {
+            for dx in -2..=2 {
+                if occ.kind(x + ox + dx, z + oz + dz).is_castle() {
+                    continue;
+                }
+                occ.set(x + ox + dx, z + oz + dz, CellKind::TownTower, true);
+            }
+        }
+    }
+}
+
+fn punch_road_gates(occ: &mut Occupancy, town: Rect, gates: &mut Vec<GateInfo>) {
+    let wall = town.inflate(2);
+    let band = wall.inflate(6);
+    let mut hits = Vec::new();
+    for z in band.min_z..=band.max_z {
+        for x in band.min_x..=band.max_x {
+            if !matches!(occ.kind(x, z), CellKind::TownWall | CellKind::TownTower) {
+                continue;
+            }
+            let facing = gate_facing_out(town, x, z);
+            let crosses = (1..=4)
+                .any(|dist| is_road_kind(occ.kind(x + facing.dx() * dist, z + facing.dz() * dist)));
+            if crosses {
+                hits.push((x, z));
+            }
+        }
+    }
+    for &(x, z) in &hits {
+        if gates
+            .iter()
+            .any(|g| (g.x - x).abs().max((g.z - z).abs()) < 16)
+        {
+            continue;
+        }
+        let facing = gate_facing_out(town, x, z);
+        punch_gatehouse(occ, x, z, facing);
+        gates.push(GateInfo {
+            kind: GateKind::Town,
+            x,
+            z,
+            facing,
+        });
+    }
 }
 
 fn town_gates(town: Rect, castle_gate: (i32, i32), dir: Dir) -> Vec<(i32, i32)> {
@@ -2492,6 +2694,184 @@ fn paint_capital_districts(
     }
 }
 
+fn is_road_kind(kind: CellKind) -> bool {
+    matches!(
+        kind,
+        CellKind::Road
+            | CellKind::RoadStairN
+            | CellKind::RoadStairS
+            | CellKind::RoadStairE
+            | CellKind::RoadStairW
+            | CellKind::Bridge
+    )
+}
+
+fn packable_city_lot(
+    occ: &Occupancy,
+    grid: &HeightGrid,
+    town: Rect,
+    market: Rect,
+    rect: Rect,
+) -> bool {
+    if !town.contains(rect.min_x, rect.min_z) || !town.contains(rect.max_x, rect.max_z) {
+        return false;
+    }
+    if market.inflate(2).intersects(rect) {
+        return false;
+    }
+    if rect_hits_keep_court(occ, rect) {
+        return false;
+    }
+    if !grid.rect_is_dry(rect) {
+        return false;
+    }
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            if !matches!(
+                occ.kind(x, z),
+                CellKind::Empty
+                    | CellKind::Green
+                    | CellKind::Hedge
+                    | CellKind::Farm
+                    | CellKind::FarmEdge
+            ) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Wall-to-wall 2–3 storey jettied houses along lanes, then leftover gardens
+/// and a few small squares. Aimed at well over 60% built cover inside the wall.
+fn pack_jettied_city(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    town: Rect,
+    market: Rect,
+    palette: PaletteKind,
+    rng: &mut TownRng,
+) {
+    let kinds: &[BuildingKind] = match palette {
+        PaletteKind::Sandstone => &[
+            BuildingKind::Townhouse,
+            BuildingKind::Townhouse,
+            BuildingKind::Townhouse,
+        ],
+        PaletteKind::Spruce => &[
+            BuildingKind::Timber,
+            BuildingKind::Townhouse,
+            BuildingKind::Timber,
+        ],
+        PaletteKind::Oak => &[
+            BuildingKind::Townhouse,
+            BuildingKind::Townhouse,
+            BuildingKind::Timber,
+        ],
+    };
+    let cap = lots.len() + 280;
+    let mut z = town.min_z + 2;
+    while z <= town.max_z - 2 && lots.len() < cap {
+        let mut x = town.min_x + 2;
+        while x <= town.max_x - 2 && lots.len() < cap {
+            if !is_road_kind(occ.kind(x, z)) {
+                x += 1;
+                continue;
+            }
+            let Some(&kind) = rng.choose(kinds) else {
+                x += 1;
+                continue;
+            };
+            let (w, d) = kind.size();
+            for dir in Dir::ALL {
+                let ox = x + dir.dx() * (w / 2 + 1);
+                let oz = z + dir.dz() * (d / 2 + 1);
+                let rect = Rect::new(
+                    ox - w / 2,
+                    oz - d / 2,
+                    ox - w / 2 + w - 1,
+                    oz - d / 2 + d - 1,
+                );
+                if !packable_city_lot(occ, grid, town, market, rect) {
+                    continue;
+                }
+                if try_lot(occ, grid, lots, seed, kind, rect, dir.opposite()).is_some() {
+                    break;
+                }
+            }
+            x += 4;
+        }
+        z += 3;
+    }
+    let mut z = town.min_z + 3;
+    while z + 8 <= town.max_z - 2 && lots.len() < cap {
+        let mut x = town.min_x + 3;
+        while x + 9 <= town.max_x - 2 && lots.len() < cap {
+            let Some(&kind) = rng.choose(kinds) else {
+                x += 9;
+                continue;
+            };
+            let (mut w, mut d) = kind.size();
+            if rng.chance(1, 3) {
+                std::mem::swap(&mut w, &mut d);
+            }
+            let rect = Rect::new(x, z, x + w - 1, z + d - 1);
+            if packable_city_lot(occ, grid, town, market, rect) {
+                let facing = facing_toward_road(occ, rect).unwrap_or(Dir::South);
+                let _ = try_lot(occ, grid, lots, seed, kind, rect, facing);
+            }
+            x += w.max(8);
+        }
+        z += 8;
+    }
+    paint_small_squares(occ, town, market);
+    paint_hedges_and_gardens(occ, town);
+}
+
+fn paint_small_squares(occ: &mut Occupancy, town: Rect, market: Rect) {
+    let mut painted = 0;
+    let mut z = town.min_z + 4;
+    while z + 5 <= town.max_z - 4 && painted < 8 {
+        let mut x = town.min_x + 4;
+        while x + 5 <= town.max_x - 4 && painted < 8 {
+            let rect = Rect::new(x, z, x + 5, z + 5);
+            x += 11;
+            if market.inflate(4).intersects(rect) {
+                continue;
+            }
+            let mut empty = 0;
+            let mut n = 0;
+            let mut road = false;
+            for zz in rect.min_z..=rect.max_z {
+                for xx in rect.min_x..=rect.max_x {
+                    n += 1;
+                    let kind = occ.kind(xx, zz);
+                    if kind == CellKind::Empty {
+                        empty += 1;
+                    }
+                    if is_road_kind(kind) {
+                        road = true;
+                    }
+                }
+            }
+            if road || empty * 5 < n * 4 {
+                continue;
+            }
+            for zz in rect.min_z..=rect.max_z {
+                for xx in rect.min_x..=rect.max_x {
+                    if occ.kind(xx, zz) == CellKind::Empty {
+                        occ.set(xx, zz, CellKind::Plaza, true);
+                    }
+                }
+            }
+            painted += 1;
+        }
+        z += 11;
+    }
+}
+
 fn facing_toward_road(occ: &Occupancy, rect: Rect) -> Option<Dir> {
     let (cx, cz) = rect.center();
     for dist in 2..=8 {
@@ -2575,9 +2955,7 @@ fn paint_water_uses(occ: &mut Occupancy, grid: &HeightGrid, bounds: Rect, castle
                 | CellKind::Pasture
                 | CellKind::Grave
                 | CellKind::Plaza
-                | CellKind::Fountain
-                | CellKind::TownWall
-                | CellKind::TownTower => {
+                | CellKind::Fountain => {
                     let dock = Dir::ALL.iter().any(|dir| {
                         let n = occ.kind(x + dir.dx(), z + dir.dz());
                         matches!(
@@ -2814,7 +3192,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 13);
+        assert_eq!(PLAN_CACHE_VERSION, 14);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -2852,8 +3230,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 13;
-    const PLAN_LAYOUT_HASH: u64 = 0x2926_19fb_feff_05bc;
+    const PLAN_LAYOUT_VERSION: u32 = 14;
+    const PLAN_LAYOUT_HASH: u64 = 0x4ee7_5435_ae80_3db6;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

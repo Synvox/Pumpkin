@@ -359,7 +359,8 @@ pub fn stamp_column(
             if in_frontier(plan, x, z) {
                 place_scarred_curtain(sink, plan, x, floor, ground, z, &palette);
             } else {
-                place_curtain(sink, plan, x, floor, ground, z, &palette, 6, false);
+                let height = if plan.capital { 10 } else { 6 };
+                place_curtain(sink, plan, x, floor, ground, z, &palette, height, false);
             }
         }
         CellKind::TownTower => {
@@ -368,10 +369,14 @@ pub fn stamp_column(
             } else if in_caravanserai(plan, x, z) {
                 place_minaret(sink, plan, x, floor, ground, z, &palette);
             } else {
-                place_tower(sink, plan, x, floor, ground, z, &palette, 5, 14);
+                let height = if plan.capital { 16 } else { 14 };
+                place_tower(sink, plan, x, floor, ground, z, &palette, 5, height);
             }
         }
-        CellKind::TownGate => place_gate(sink, plan, x, floor, ground, z, &palette, 8),
+        CellKind::TownGate => {
+            let height = if plan.capital { 12 } else { 8 };
+            place_gate(sink, plan, x, floor, ground, z, &palette, height);
+        }
         CellKind::Building => {
             if let Some(lot) = plan.lots.iter().find(|l| l.id == plan.occ.lot(x, z)) {
                 place_building(sink, plan, lot, x, ground, z, &palette);
@@ -1707,7 +1712,7 @@ fn place_curtain(
             x,
             y,
             z,
-            if castle {
+            if castle || height >= 8 {
                 palette.masonry(v)
             } else {
                 palette.foundation(v % 5 == 0)
@@ -1743,7 +1748,11 @@ fn place_curtain(
     if outer {
         if ((x + z) & 1) == 0 {
             sink.put(x, top + 1, z, palette.masonry(1));
-            sink.put(x, top + 2, z, palette.brick_wall);
+            if height >= 8 {
+                sink.put(x, top + 2, z, palette.masonry(2));
+            } else {
+                sink.put(x, top + 2, z, palette.brick_wall);
+            }
         } else if castle {
             // Same-column corbel: an outward stair standing in for a machicolation.
             if let Some(face) = outer_facing(plan, x, z) {
@@ -1751,6 +1760,8 @@ fn place_curtain(
             }
             sink.put(x, top + 1, z, palette.fence);
             sink.put(x, top + 2, z, palette.slab);
+        } else if height >= 8 {
+            sink.put(x, top + 1, z, palette.slab);
         }
         if castle && r_banner(x, z) {
             sink.put(
