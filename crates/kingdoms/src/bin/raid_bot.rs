@@ -311,15 +311,19 @@ impl Bot {
                     ]);
                     println!("SELF id={}", bot.self_id);
                 }
+                // Do not wait for CPlayerPosition: the server may hold that
+                // packet until SPlayerLoaded, which deadlocks a second client.
+                let _ = bot.send_packet(&SPlayerLoaded).await;
             }
             // Keep-alives and the spawn teleport can arrive before CLogin.
-            // Dropping the teleport meant the bot never sent SPlayerLoaded,
-            // so a second client never finished joining.
             if pkt.id == keep_id || pkt.id == player_pos_id || saw_play_login {
                 bot.handle_play_packet(&pkt).await?;
             }
             if pkt.id == player_pos_id {
-                let _ = bot.send_packet(&SPlayerLoaded).await;
+                saw_initial_pos = true;
+            }
+            if saw_play_login && !saw_initial_pos && bot.self_id >= 0 {
+                // Position never arrived; enter play anyway so /tp can run.
                 saw_initial_pos = true;
             }
         }
