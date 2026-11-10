@@ -167,7 +167,14 @@ pub fn tick_shot(world: &Arc<World>, shot: &mut TrebShot, keep: Rect) -> Option<
     if !shot_done(shot.age, shot.y, shot.target_y, TREB_FLIGHT) {
         return None;
     }
-    let hits = collect_punch_hits(world, shot.x.floor() as i32, shot.z.floor() as i32, keep);
+    let top = shot.target_y.floor() as i32;
+    let hits = collect_punch_hits(
+        world,
+        shot.x.floor() as i32,
+        shot.z.floor() as i32,
+        keep,
+        top,
+    );
     despawn_shot(world, shot);
     tracing::info!(
         x = shot.x,
@@ -187,8 +194,9 @@ fn despawn_shot(world: &World, shot: &TrebShot) {
 }
 
 /// Blocks the cobble would clear. Writes happen later, a few per tick.
+/// `top_y` is the aimed wall height; do not noise-sample the column here.
 #[must_use]
-pub fn collect_punch_hits(world: &World, x: i32, z: i32, keep: Rect) -> Vec<PunchHit> {
+pub fn collect_punch_hits(world: &World, x: i32, z: i32, keep: Rect, top_y: i32) -> Vec<PunchHit> {
     let mut hits = Vec::new();
     for dz in -IMPACT_RADIUS..=IMPACT_RADIUS {
         for dx in -IMPACT_RADIUS..=IMPACT_RADIUS {
@@ -197,9 +205,11 @@ pub fn collect_punch_hits(world: &World, x: i32, z: i32, keep: Rect) -> Vec<Punc
             if !punch_column_allowed(cx, cz, keep) {
                 continue;
             }
-            let top = solid_surface_y(world, cx, cz);
             for dy in -IMPACT_DEPTH..=0 {
-                let pos = BlockPos::new(cx, top + dy, cz);
+                let pos = BlockPos::new(cx, top_y + dy, cz);
+                if !world.is_loaded(&pos) {
+                    continue;
+                }
                 let (block, state) = world.get_block_and_state(&pos);
                 if is_protected_block(block) || !state.is_solid() {
                     continue;
@@ -229,23 +239,6 @@ pub fn apply_punch_hit(world: &Arc<World>, hit: PunchHit) -> bool {
         crate::siege::SIEGE_PLACE_FLAGS,
     );
     true
-}
-
-fn shot_floor_y(world: &World, x: i32, z: i32) -> i32 {
-    world.sample_surface_height(x, z).unwrap_or(world.sea_level)
-}
-
-/// Highest solid block, walking down if the sampled surface is already air.
-fn solid_surface_y(world: &World, x: i32, z: i32) -> i32 {
-    let mut y = shot_floor_y(world, x, z);
-    let min_y = y - 24;
-    while y >= min_y {
-        if world.get_block_state(&BlockPos::new(x, y, z)).is_solid() {
-            return y;
-        }
-        y -= 1;
-    }
-    shot_floor_y(world, x, z)
 }
 
 /// Put ladders on the outer face of a wall column, camp-side.

@@ -23,8 +23,9 @@ use std::sync::Arc;
 pub const HOLD_TICKS: u32 = 200;
 /// Extra Y so ladder crews and archers stand on the wall walk, not the dirt.
 pub const WALL_WALK_LIFT: i32 = 6;
-/// Cheap place/break: skip neighbour shape, added, and drop callbacks. Clients
-/// still get `NOTIFY_LISTENERS` so the hole is visible.
+/// Cheap place/break: skip neighbour shape, added, and drop callbacks.
+/// `NOTIFY_LISTENERS` still sends the hole to clients; callers amortise those
+/// writes (2 punch/repair/portcullis cells per town tick).
 pub const SIEGE_PLACE_FLAGS: BlockFlags = BlockFlags::NOTIFY_LISTENERS
     .union(BlockFlags::SKIP_DROPS)
     .union(BlockFlags::SKIP_BLOCK_ADDED_CALLBACK)

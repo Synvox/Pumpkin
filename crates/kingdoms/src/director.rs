@@ -1282,10 +1282,11 @@ fn standing_y(world: &World, post: ScenePost) -> i32 {
             return *y;
         }
     }
-    let y = world
-        .sample_surface_height(post.x, post.z)
-        .unwrap_or(world.sea_level)
-        + 1;
+    let seed = world.level.seed.0;
+    let town = town_containing(seed, post.x, post.z);
+    let plan_y = crate::plan::cached_plan(seed, town.cell_x, town.cell_z)
+        .map(|p| p.heights.height(post.x, post.z) + 1);
+    let y = resolve_stand_y(0, plan_y, world.sea_level);
     post_y_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1489,18 +1490,17 @@ fn maybe_give_banner(player: &Player, kingdom: &KingdomId, stats: Option<&mut si
     }
 }
 
-fn world_column_solid(world: &World, x: i32, y: i32, z: i32) -> bool {
-    world.get_block_state(&BlockPos::new(x, y, z)).is_solid()
-}
-
-fn world_stand_y(world: &World, x: i32, z: i32) -> i32 {
-    world.sample_surface_height(x, z).unwrap_or(world.sea_level) + 1
+/// Planner / post Y only. Live `sample_surface_height` / `get_block_state` on
+/// join was a 7–21 s hitch that blocked other players from logging in.
+fn resolve_stand_y(post_y: i32, plan_y: Option<i32>, sea_level: i32) -> i32 {
+    if post_y != 0 {
+        return post_y;
+    }
+    plan_y.unwrap_or(sea_level + 1)
 }
 
 struct KeepStandPlan {
     keep: siege::StandCandidate,
-    court: crate::geom::Rect,
-    fallbacks: Vec<siege::StandCandidate>,
     skip: Vec<crate::geom::Rect>,
     town_id: String,
 }
@@ -1516,34 +1516,6 @@ fn keep_stand_plan(kingdom: &KingdomId, towns: &HashMap<String, TownWar>) -> Opt
     let home = homes.first()?;
     let keep = home.scene.keep();
     let castle = &home.scene.info().castle;
-    let court = if castle.bounds.width() > 8 && castle.bounds.depth() > 8 {
-        castle.bounds
-    } else {
-        home.scene.keep_rect()
-    };
-    let mut fallbacks = Vec::new();
-    let pad = 4;
-    if court.width() > pad * 2 && court.depth() > pad * 2 {
-        let mut z = court.min_z + pad;
-        while z <= court.max_z - pad {
-            let mut x = court.min_x + pad;
-            while x <= court.max_x - pad {
-                fallbacks.push(siege::StandCandidate { x, z });
-                x += 3;
-            }
-            z += 3;
-        }
-    }
-    for g in home.scene.gates() {
-        fallbacks.push(siege::StandCandidate { x: g.x, z: g.z });
-    }
-    for p in home.scene.rally_points() {
-        fallbacks.push(siege::StandCandidate { x: p.x, z: p.z });
-    }
-    for w in homes.iter().skip(1) {
-        let k = w.scene.keep();
-        fallbacks.push(siege::StandCandidate { x: k.x, z: k.z });
-    }
     let mut skip = vec![
         castle.keep,
         castle.hall,
@@ -1560,8 +1532,6 @@ fn keep_stand_plan(kingdom: &KingdomId, towns: &HashMap<String, TownWar>) -> Opt
             x: keep.x,
             z: keep.z,
         },
-        court,
-        fallbacks,
         skip,
         town_id: home.info_id.clone(),
     })
@@ -1602,17 +1572,14 @@ fn pick_keep_stand(
             );
             return Some(stand);
         }
-        // Plan heights only. Sampling the live world here was a 7–15 s hitch
-        // that blocked other players from logging in.
         let y = town_plan.heights.height(plan.keep.x, plan.keep.z) + 1;
         return Some((plan.keep.x, y, plan.keep.z));
     }
-    Some(siege::pick_safe_stand(
-        plan.keep,
-        plan.court,
-        &plan.fallbacks,
-        |x, z| world_stand_y(world, x, z),
-        |x, y, z| world_column_solid(world, x, y, z),
+    let scene_y = towns.get(&plan.town_id).map_or(0, |w| w.scene.keep().y);
+    Some((
+        plan.keep.x,
+        resolve_stand_y(scene_y, None, world.sea_level),
+        plan.keep.z,
     ))
 }
 
@@ -2155,23 +2122,11 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 war.gates_closed = true;
             }
 
-            // Refresh living raid ids from snapshots.
+            // Living ids come from spawn + [`Director::note_death`]. A spatial
+            // snapshot misses brand-new bodies (not yet in the entity index)
+            // and was wiping the wave, ending the raid before it marched.
             let mut finished = false;
             if let Some(raid) = &mut war.raid {
-                if raid.spec.side.is_kingdom_army() {
-                    let alive: std::collections::HashSet<i32> = snapshots
-                        .iter()
-                        .map(|(e, _)| e.get_entity().entity_id)
-                        .collect();
-                    raid.living.retain(|id| alive.contains(id));
-                } else {
-                    let living: Vec<i32> = snapshots
-                        .iter()
-                        .filter(|(_, f)| matches!(f, Faction::Pillager))
-                        .map(|(e, _)| e.get_entity().entity_id)
-                        .collect();
-                    raid.living = living;
-                }
                 let tickets_done = war.pending_tickets.is_empty()
                     || war.ticket_cursor >= war.pending_tickets.len();
                 let warmed = tick >= raid.warm_until && tickets_done;
@@ -2844,6 +2799,9 @@ fn spawn_soldiers_this_tick(world: &Arc<World>, town_id: &str, tick: u32) {
     if lock().live_body_count() >= body_budget() {
         return;
     }
+    // Raiders first so extras cannot spend the whole world spawn budget and
+    // leave the wave empty (which used to trip "raid defeated").
+    spawn_wave_batch(world, town_id, tick);
     let extra = lock()
         .towns
         .get(town_id)
@@ -2855,7 +2813,6 @@ fn spawn_soldiers_this_tick(world: &Arc<World>, town_id: &str, tick: u32) {
             spawn_extra_defenders(world, town_id, n as u16);
         }
     }
-    spawn_wave_batch(world, town_id, tick);
 }
 
 fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
@@ -5369,7 +5326,14 @@ fn sync_front_lod(world: &Arc<World>, town_id: &str, tick: u32) {
     let want = near && (was_live || under_budget);
     if want && !was_live {
         materialize_raid(world, town_id, tick);
-    } else if !want && was_live {
+        return;
+    }
+    if tickets_pending(town_id) || raid_still_warming(town_id, tick) {
+        // Keep the front live while tickets flush so a first-contact hitch
+        // cannot fold the raid back to abstract and drop the body count.
+        return;
+    }
+    if !want && was_live {
         dematerialize_raid(world, town_id);
     }
 }
@@ -5726,17 +5690,22 @@ fn spawn_extra_defenders(world: &Arc<World>, town_id: &str, max: u16) {
         }
     }
     if spawned > 0 {
-        let mut dir = lock();
-        if let Some(war) = dir.towns.get_mut(town_id)
-            && let Some(raid) = &mut war.raid
-        {
-            raid.temps.extend(extras.iter().copied());
-            raid.extra_left = raid.extra_left.saturating_sub(spawned as u16);
-        }
+        let remaining = {
+            let mut dir = lock();
+            if let Some(war) = dir.towns.get_mut(town_id)
+                && let Some(raid) = &mut war.raid
+            {
+                raid.temps.extend(extras.iter().copied());
+                raid.extra_left = raid.extra_left.saturating_sub(spawned as u16);
+                raid.extra_left
+            } else {
+                0
+            }
+        };
         tracing::info!(
             town = town_id,
             spawned,
-            remaining = extra.saturating_sub(spawned as u16),
+            remaining,
             "spawned extra defenders for raid"
         );
     }
@@ -5927,13 +5896,7 @@ pub fn deploy_player(player: &Player, town_arg: Option<&str>) -> Result<String, 
         let tick = lock().tick;
         materialize_raid(&world, &town_id, tick);
     }
-    let mut y = standing_y(&world, post);
-    if let Some(surface) = world.sample_surface_height(post.x, post.z) {
-        let floor = surface + 1;
-        if y > floor + 6 {
-            y = floor;
-        }
-    }
+    let y = standing_y(&world, post);
     let dest = Vector3::new(
         f64::from(post.x) + 0.5,
         f64::from(y),
@@ -6245,6 +6208,9 @@ mod tests {
         assert_eq!(TICKETS_PER_WORLD_TICK, 3);
         assert_eq!(CAPTURES_PER_TICK, 1);
         assert_eq!(PORTCULLIS_BARS_PER_TICK, 2);
+        assert_eq!(resolve_stand_y(80, Some(70), 63), 80);
+        assert_eq!(resolve_stand_y(0, Some(70), 63), 70);
+        assert_eq!(resolve_stand_y(0, None, 63), 64);
     }
 
     #[test]
@@ -6481,5 +6447,6 @@ mod tests {
         assert_eq!(PUNCH_BREAK_PER_TICK, 2);
         assert_eq!(PORTCULLIS_BARS_PER_TICK, 2);
         assert!((PHASE_WARN_MS - 20.0).abs() < f64::EPSILON);
+        assert_eq!(resolve_stand_y(117, None, 63), 117);
     }
 }
