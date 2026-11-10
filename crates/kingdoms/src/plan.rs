@@ -780,6 +780,21 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     thicken_water_bridges(&mut occ, &grid);
     paint_scene_yards(&mut occ, &grid, &scenes);
     crate::scenes::paint_tree_keepout(&mut occ, &grid, &lots, market, town_rect);
+    // Courtyard scenes and tree keepout run after `paint_castle`, so re-site
+    // the plinth on leftover inner-bailey court, never on a keep spire.
+    let mut castle = castle;
+    castle.flag = crate::castle::site_flag_plinth(
+        &mut occ,
+        castle.inner,
+        &castle.inner_ring.verts,
+        castle.keep,
+        castle.hall,
+        castle.chapel,
+        castle.kitchen,
+        castle.gatehouse,
+        castle.palace,
+        &castle.keep_masses,
+    );
 
     debug_assert!(castle.bounds.width() >= CASTLE_MIN);
     debug_assert!(castle.bounds.depth() >= CASTLE_MIN);
@@ -2911,6 +2926,38 @@ mod tests {
                 .gatehouse
                 .contains(plan.castle.flag.0, plan.castle.flag.1),
             "flag must not sit in the gatehouse"
+        );
+        let keep = plan.castle.keep;
+        let keep_edge = {
+            let x = plan.castle.flag.0;
+            let z = plan.castle.flag.1;
+            let dx = if x < keep.min_x {
+                keep.min_x - x
+            } else if x > keep.max_x {
+                x - keep.max_x
+            } else {
+                0
+            };
+            let dz = if z < keep.min_z {
+                keep.min_z - z
+            } else if z > keep.max_z {
+                z - keep.max_z
+            } else {
+                0
+            };
+            dx.max(dz)
+        };
+        assert!(
+            keep_edge >= 3,
+            "flag must sit clear of the keep spire keep_edge={keep_edge} flag={:?} keep={keep:?}",
+            plan.castle.flag,
+        );
+        assert!(
+            plan.castle
+                .keep_mass_at(plan.castle.flag.0, plan.castle.flag.1)
+                .is_none(),
+            "flag must not sit inside a keep mass flag={:?}",
+            plan.castle.flag
         );
         let hash = plan.layout_fingerprint();
         assert_eq!(

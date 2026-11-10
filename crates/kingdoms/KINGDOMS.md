@@ -635,7 +635,7 @@ The 629 ms repair dump is gone from the CSV (director max 8 ms). Remaining hitch
 
 Plots: `/opt/cursor/artifacts/soak-r11-branch-summary.json`, `soak-r11-branch2-summary.json`, `soak-r11-master-summary.json`.
 
-Round 12 (this PR) captures at the keep flag plinth, not by clearing the whole inner bailey. Attackers stand on the plate; defenders within 4 blocks pause; hiders in walls do not. Distant combatants skip targeting outside 48 blocks of a player; materialized raids snapshot by entity id; item/XP orbs despawn 8/tick; engines run on one town per tick. The first 40 live ticks of a town skip engines and repair scan. `/kingdom rank set` is permission level 2+. `KINGDOMS.md` has a Sails quickstart (token, cloudflared, HMAC, director loop).
+Round 12 (this PR) captures at the keep flag plinth, not by clearing the whole inner bailey. Attackers stand on the plate; defenders within 4 blocks pause; hiders in walls do not. After the ram breaches or eight raiders storm the portcullis, the column paths through the gatehouse to the plate. Distant combatants skip targeting outside 48 blocks of a player; materialized raids snapshot by entity id; item/XP orbs despawn 8/tick; engines run on one town per tick. The first 40 live ticks of a town skip engines and repair scan. `/kingdom rank set` is permission level 2+. `PLAN_CACHE_VERSION` is 10. `KINGDOMS.md` has a Sails quickstart (token, cloudflared, HMAC, director loop).
 
 10-min identical-load soak (seed `20261025`, 3 fronts, `/raid start` 120 40, `KINGDOMS_BODY_BUDGET=600`, plan cache v7) vs master `c5dbd267`:
 

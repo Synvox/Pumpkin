@@ -12,7 +12,7 @@ use crate::interior::keep_storey_label;
 use crate::palette::PaletteKind;
 use crate::plan::TownPlan;
 use crate::scenes::SceneKind;
-use crate::stamp::{VolumeSink, fill_volume, ridge_floor};
+use crate::stamp::{BlockSink, VolumeSink, fill_volume, ridge_floor};
 
 /// Planner-only renders (no chunk generation).
 pub fn write_planner_renders(
@@ -104,7 +104,104 @@ pub fn write_renders(
     }
     write_cutaways(plan, volume, out_dir, stem)?;
     write_scene_renders(plan, volume, out_dir, stem)?;
+    write_flag_renders(plan, volume, out_dir, stem)?;
     Ok(())
+}
+
+fn write_flag_renders(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<()> {
+    let (fx, fz) = plan.castle.flag;
+    let mut owned = clone_volume(volume);
+    paint_flag_cloth(&mut owned, fx, fz, None);
+    let crop = render_iso_view(
+        &owned,
+        fx - 3,
+        fz - 3,
+        fx + 3,
+        fz + 3,
+        24,
+        1,
+        |x, _, z| (x - fx).abs() <= 2 && (z - fz).abs() <= 2,
+        Some("Keep flag plinth · pedestal, mast, plates"),
+        false,
+        0,
+    );
+    save(&out_dir.join(format!("{stem}-flag-se.png")), &crop)?;
+    let court = render_iso_view(
+        volume,
+        fx - 18,
+        fz - 18,
+        fx + 18,
+        fz + 18,
+        10,
+        1,
+        |_, _, _| true,
+        Some("Inner bailey · flag in courtyard context"),
+        false,
+        0,
+    );
+    save(&out_dir.join(format!("{stem}-flag-court-se.png")), &court)?;
+    let mut flipped = clone_volume(volume);
+    paint_flag_cloth(&mut flipped, fx, fz, Some(Block::BLACK_WOOL.default_state));
+    let after = render_iso_view(
+        &flipped,
+        fx - 3,
+        fz - 3,
+        fx + 3,
+        fz + 3,
+        24,
+        1,
+        |x, _, z| (x - fx).abs() <= 2 && (z - fz).abs() <= 2,
+        Some("Keep flag plinth · after capture"),
+        false,
+        0,
+    );
+    save(&out_dir.join(format!("{stem}-flag-se-flipped.png")), &after)?;
+    Ok(())
+}
+
+fn clone_volume(volume: &VolumeSink) -> VolumeSink {
+    VolumeSink {
+        min_x: volume.min_x,
+        min_y: volume.min_y,
+        min_z: volume.min_z,
+        sx: volume.sx,
+        sy: volume.sy,
+        sz: volume.sz,
+        voxels: volume.voxels.clone(),
+    }
+}
+
+fn paint_flag_cloth(volume: &mut VolumeSink, fx: i32, fz: i32, cloth: Option<&BlockState>) {
+    for y in volume.min_y..volume.min_y + volume.sy {
+        let Some(state) = volume.get(fx, y, fz) else {
+            continue;
+        };
+        let id = Block::from_state_id(state.id).id;
+        let mapped = if id == Block::GREEN_BANNER.id {
+            Block::GREEN_WOOL.default_state
+        } else if id == Block::BLUE_BANNER.id {
+            Block::BLUE_WOOL.default_state
+        } else if id == Block::BLACK_BANNER.id {
+            Block::BLACK_WOOL.default_state
+        } else {
+            continue;
+        };
+        volume.put(fx, y, fz, cloth.unwrap_or(mapped));
+        return;
+    }
+    if let Some((top, _)) = volume.top(fx, fz) {
+        volume.put(
+            fx,
+            top + 1,
+            fz,
+            cloth.unwrap_or(Block::GREEN_WOOL.default_state),
+        );
+    }
 }
 
 fn write_scene_renders(

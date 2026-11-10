@@ -337,6 +337,7 @@ pub fn paint_castle(
         kitchen,
         gatehouse,
         palace,
+        &keep_masses,
     );
 
     CastlePlan {
@@ -363,7 +364,25 @@ pub fn paint_castle(
     }
 }
 
-fn site_flag_plinth(
+fn chebyshev_outside(rect: Rect, x: i32, z: i32) -> i32 {
+    let dx = if x < rect.min_x {
+        rect.min_x - x
+    } else if x > rect.max_x {
+        x - rect.max_x
+    } else {
+        0
+    };
+    let dz = if z < rect.min_z {
+        rect.min_z - z
+    } else if z > rect.max_z {
+        z - rect.max_z
+    } else {
+        0
+    };
+    dx.max(dz)
+}
+
+pub(crate) fn site_flag_plinth(
     occ: &mut Occupancy,
     inner: Rect,
     inner_ring: &[(i32, i32)],
@@ -373,27 +392,34 @@ fn site_flag_plinth(
     kitchen: Rect,
     gatehouse: Rect,
     palace: Rect,
+    keep_masses: &[KeepMass],
 ) -> (i32, i32) {
     let (cx, cz) = inner.center();
-    let blocked = |x: i32, z: i32| {
-        keep.contains(x, z)
-            || hall.contains(x, z)
-            || chapel.contains(x, z)
-            || kitchen.contains(x, z)
-            || gatehouse.contains(x, z)
-            || palace.contains(x, z)
+    let on_keep_mass = |x: i32, z: i32| {
+        keep_masses
+            .iter()
+            .any(|mass| mass.spec.contains(x, z) || mass.spec.bounds().inflate(3).contains(x, z))
+    };
+    let roofed = |kind: CellKind| {
+        kind.is_shell()
             || matches!(
-                occ.kind(x, z),
-                CellKind::CastleKeep
-                    | CellKind::CastleHall
-                    | CellKind::CastleChapel
-                    | CellKind::CastleKitchen
-                    | CellKind::CastleGate
-                    | CellKind::CastleBarbican
-                    | CellKind::CastleTower
-                    | CellKind::CastleWall
-                    | CellKind::CastleInnerWall
+                kind,
+                CellKind::CastleKitchen
+                    | CellKind::CastleStables
+                    | CellKind::CastleBarracks
+                    | CellKind::Building
+                    | CellKind::Eave
             )
+    };
+    let blocked = |x: i32, z: i32| {
+        keep.inflate(3).contains(x, z)
+            || hall.inflate(2).contains(x, z)
+            || chapel.inflate(1).contains(x, z)
+            || kitchen.inflate(1).contains(x, z)
+            || gatehouse.contains(x, z)
+            || palace.inflate(2).contains(x, z)
+            || on_keep_mass(x, z)
+            || roofed(occ.kind(x, z))
     };
     let in_ward = |x: i32, z: i32| point_in_poly(x, z, inner_ring) && !gatehouse.contains(x, z);
     let open = |x: i32, z: i32| {
@@ -401,7 +427,11 @@ fn site_flag_plinth(
             && !blocked(x, z)
             && matches!(
                 occ.kind(x, z),
-                CellKind::CastleCourt | CellKind::Green | CellKind::Plaza | CellKind::Empty
+                CellKind::CastleCourt
+                    | CellKind::Green
+                    | CellKind::Plaza
+                    | CellKind::Empty
+                    | CellKind::FlagPlinth
             )
     };
     let ring_open = |x: i32, z: i32| {
@@ -415,52 +445,67 @@ fn site_flag_plinth(
         true
     };
     let mut ring = None;
-    let mut ring_d = i32::MAX;
+    let mut ring_score = (i32::MIN, i32::MAX);
     let mut single = None;
-    let mut single_d = i32::MAX;
+    let mut single_score = (i32::MIN, i32::MAX);
     for z in inner.min_z..=inner.max_z {
         for x in inner.min_x..=inner.max_x {
             if !open(x, z) {
                 continue;
             }
             let d = (x - cx).abs() + (z - cz).abs();
-            if d < single_d {
-                single_d = d;
+            let keep_d = chebyshev_outside(keep, x, z).min(chebyshev_outside(hall, x, z));
+            let score = (keep_d.min(12), -d);
+            if score > single_score {
+                single_score = score;
                 single = Some((x, z));
             }
-            if ring_open(x, z) && d < ring_d {
-                ring_d = d;
+            if ring_open(x, z) && score > ring_score {
+                ring_score = score;
                 ring = Some((x, z));
             }
         }
     }
     let flag = ring.or(single).unwrap_or_else(|| {
-        let mut found = (cx, cz);
-        let mut found_d = i32::MAX;
-        for z in occ.bounds.min_z..=occ.bounds.max_z {
-            for x in occ.bounds.min_x..=occ.bounds.max_x {
-                if gatehouse.contains(x, z) {
+        let mut found = None;
+        let mut found_score = (i32::MIN, i32::MIN);
+        for z in inner.min_z..=inner.max_z {
+            for x in inner.min_x..=inner.max_x {
+                if gatehouse.contains(x, z) || on_keep_mass(x, z) || roofed(occ.kind(x, z)) {
                     continue;
                 }
-                if !matches!(occ.kind(x, z), CellKind::CastleCourt | CellKind::Green) {
+                if !matches!(
+                    occ.kind(x, z),
+                    CellKind::CastleCourt
+                        | CellKind::Green
+                        | CellKind::Plaza
+                        | CellKind::Empty
+                        | CellKind::FlagPlinth
+                ) {
                     continue;
                 }
                 let d = (x - cx).abs() + (z - cz).abs();
-                let inner_bonus = if inner.contains(x, z) { 0 } else { 1_000 };
-                let score = d + inner_bonus;
-                if score < found_d {
-                    found_d = score;
-                    found = (x, z);
+                let keep_d = chebyshev_outside(keep, x, z);
+                let score = (keep_d.min(12), -d);
+                if score > found_score {
+                    found_score = score;
+                    found = Some((x, z));
                 }
             }
         }
-        found
+        found.unwrap_or_else(|| {
+            let (gx, gz) = gatehouse.center();
+            let dx = (cx - gx).signum();
+            let dz = (cz - gz).signum();
+            (gx + dx * 8, gz + dz * 8)
+        })
     });
     for dz in -1..=1 {
         for dx in -1..=1 {
             let x = flag.0 + dx;
             let z = flag.1 + dz;
             if !gatehouse.contains(x, z)
+                && !roofed(occ.kind(x, z))
                 && matches!(
                     occ.kind(x, z),
                     CellKind::CastleCourt
@@ -474,7 +519,9 @@ fn site_flag_plinth(
             }
         }
     }
-    occ.set(flag.0, flag.1, CellKind::FlagPlinth, true);
+    if !roofed(occ.kind(flag.0, flag.1)) {
+        occ.set(flag.0, flag.1, CellKind::FlagPlinth, true);
+    }
     flag
 }
 

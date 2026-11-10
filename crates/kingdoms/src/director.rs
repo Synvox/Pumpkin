@@ -44,6 +44,7 @@ use crate::faction::{
     is_hostile, is_kingdoms_tagged, kingdom_color_rgb, kingdom_tag, role_from_tags,
 };
 use crate::flow::{DIRECT_RANGE, FlowField, is_squad_leader, should_refresh_path};
+use crate::geom::Rect;
 use crate::goals::{
     PostTarget, already_wired, bind_citizen, bind_golem, bind_raider, drive_live, equip,
     shoot_arrow,
@@ -63,7 +64,7 @@ use crate::scene::{ScenePost, TownInfoScene, TownScene};
 use crate::schedule::{self, CivilianPost};
 use crate::siege::{
     self, FlagPresence, HOLD_TICKS, MarchJob, TownOwner, WALL_WALK_LIFT, capture_need, hold_ticks,
-    in_courtyard, near_flag, on_flag_plate, owner_banner, tick_flag_hold,
+    in_capture_zone, in_courtyard, near_flag, on_flag_plate, owner_banner, tick_flag_hold,
 };
 use crate::sim::{SimSnapshot, write_named_snapshots_with_kills};
 use crate::town::town_containing;
@@ -138,6 +139,10 @@ const JOIN_AMORTIZE_TICKS: u32 = 40;
 const DROPS_PER_TICK: usize = 8;
 /// Engines / punch / repair-scan towns per world tick.
 const HEAVY_TOWNS_PER_TICK: u32 = 1;
+/// Raiders within this range of the threatened gate count as storming it.
+const STORMING_RANGE: f64 = 8.0;
+/// This many pillagers at the portcullis count as a breach even without the ram.
+const STORMING_COUNT: usize = 8;
 
 static WORST_MSPT_CENTS: AtomicU32 = AtomicU32::new(0);
 static WORST_DIRECTOR_CENTS: AtomicU32 = AtomicU32::new(0);
@@ -1320,7 +1325,7 @@ pub fn raid_march_post(mob: &dyn Mob, town_id: &str) -> Option<PostTarget> {
     let dir = lock();
     let war = dir.towns.get(town_id)?;
     let dest = if war.gate_breached {
-        war.scene.keep()
+        war.scene.flag()
     } else {
         war.threatened.unwrap_or_else(|| war.scene.keep())
     };
@@ -2374,7 +2379,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         ram_dest,
         ladder_dest,
         keep_rect,
-        _gatehouse_rect,
+        gatehouse_rect,
         breached,
         owner_pillager,
         owner_faction,
@@ -2562,6 +2567,17 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             n_sleep += 1;
             if LodTier::Alert.should_tick(base.entity_id, tick) {
                 let dest = match faction {
+                    Faction::Pillager if breached => overlay_flag_dest(
+                        keep_dest,
+                        faction,
+                        has_tag(base, TAG_BEARER),
+                        pos.x,
+                        pos.z,
+                        keep_rect,
+                        gatehouse_rect,
+                        true,
+                        keep_dest,
+                    ),
                     Faction::Pillager => march_dest,
                     _ => keep_dest,
                 };
@@ -2676,7 +2692,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             dest,
             faction,
             has_tag(base, TAG_BEARER),
-            in_courtyard(keep_rect, pos.x, pos.z),
+            pos.x,
+            pos.z,
+            keep_rect,
+            gatehouse_rect,
             breached,
             keep_dest,
         );
@@ -2816,7 +2835,18 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         tick_siege_engines(world, town_id, tick, alarm);
         log_slow_phase(tick, "engines", engines_started);
     }
-    if ram_at_gate && !breached {
+    let storming = snapshots
+        .iter()
+        .filter(|(entity, faction)| {
+            matches!(faction, Faction::Pillager) && {
+                let p = entity.get_entity().pos.load();
+                (p.x - f64::from(march_dest.x) - 0.5).hypot(p.z - f64::from(march_dest.z) - 0.5)
+                    <= STORMING_RANGE
+            }
+        })
+        .count()
+        >= STORMING_COUNT;
+    if (ram_at_gate || storming) && !breached {
         let gate = {
             let dir = lock();
             dir.towns.get(town_id).and_then(|w| {
@@ -2825,13 +2855,16 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     .zip(w.scene.gates().first().copied())
             })
         };
-        if let Some((post, gate)) = gate {
-            let cleared = siege::breach_gate(world, gate, standing_y(world, post));
+        {
             let mut dir = lock();
             if let Some(war) = dir.towns.get_mut(town_id) {
                 war.gate_breached = true;
             }
-            if cleared > 0 {
+        }
+        if let Some((post, gate)) = gate {
+            let cleared = siege::breach_gate(world, gate, standing_y(world, post));
+            let mut dir = lock();
+            if cleared > 0 || storming {
                 dir.push_event(CombatEvent {
                     tick,
                     kind: CombatKind::Breach,
@@ -2839,7 +2872,11 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     other: Some(cleared as i32),
                     x: f64::from(gate.x),
                     z: f64::from(gate.z),
-                    note: format!("{town_id} ram breached gate"),
+                    note: if ram_at_gate {
+                        format!("{town_id} ram breached gate")
+                    } else {
+                        format!("{town_id} raiders stormed the gate")
+                    },
                 });
             }
         }
@@ -5323,15 +5360,44 @@ fn overlay_flag_dest(
     dest: PostTarget,
     faction: &Faction,
     bearer: bool,
-    in_court: bool,
+    x: f64,
+    z: f64,
+    inner: Rect,
+    gatehouse: Rect,
     breached: bool,
     flag_dest: PostTarget,
 ) -> PostTarget {
-    if bearer || in_court || (matches!(faction, Faction::Pillager) && breached) {
-        flag_dest
-    } else {
-        dest
+    let raider = bearer || matches!(faction, Faction::Pillager);
+    if in_capture_zone(inner, gatehouse, x, z) {
+        return if raider || breached { flag_dest } else { dest };
     }
+    if !raider {
+        return dest;
+    }
+    if in_courtyard(gatehouse, x, z) && breached {
+        return flag_dest;
+    }
+    if breached {
+        return gatehouse_inner_dest(gatehouse, inner, flag_dest);
+    }
+    dest
+}
+
+/// First waypoint past the portcullis, on the inner-bailey side of the gatehouse.
+fn gatehouse_inner_dest(gatehouse: Rect, inner: Rect, flag: PostTarget) -> PostTarget {
+    let (gx, gz) = gatehouse.center();
+    let dx = (flag.x - gx).signum();
+    let dz = (flag.z - gz).signum();
+    let mut x = gx;
+    let mut z = gz;
+    for _ in 0..24 {
+        x += dx;
+        z += dz;
+        if inner.contains(x, z) && !gatehouse.contains(x, z) {
+            return PostTarget { x, y: flag.y, z };
+        }
+    }
+    flag
 }
 
 fn swap_flag_banner(town_id: &str, owner: &TownOwner) {
@@ -6649,6 +6715,8 @@ mod tests {
         assert_eq!(JOIN_AMORTIZE_TICKS, 40);
         assert_eq!(DROPS_PER_TICK, 8);
         assert_eq!(HEAVY_TOWNS_PER_TICK, 1);
+        assert_eq!(STORMING_COUNT, 8);
+        assert!((STORMING_RANGE - 8.0).abs() < f64::EPSILON);
         assert!((PLAYER_SIM_RANGE - 48.0).abs() < f64::EPSILON);
         assert_eq!(resolve_stand_y(80, Some(70), 63), 80);
         assert_eq!(resolve_stand_y(0, Some(70), 63), 70);
@@ -6805,20 +6873,150 @@ mod tests {
             patrol,
             6_000,
         );
-        let dest = overlay_flag_dest(dest, &Faction::Pillager, true, false, true, flag);
+        let inner = Rect::new(0, 0, 40, 40);
+        let gatehouse = Rect::new(16, 0, 24, 8);
+        let dest = overlay_flag_dest(
+            dest,
+            &Faction::Pillager,
+            true,
+            20.5,
+            22.5,
+            inner,
+            gatehouse,
+            true,
+            flag,
+        );
         assert_eq!((dest.x, dest.z), (flag.x, flag.z));
-        let dest = overlay_flag_dest(march, &Faction::Pillager, true, false, false, flag);
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Pillager,
+            true,
+            20.5,
+            -3.5,
+            inner,
+            gatehouse,
+            false,
+            flag,
+        );
         assert_eq!(
             (dest.x, dest.z),
-            (flag.x, flag.z),
-            "bearer paths to the flag"
+            (march.x, march.z),
+            "bearer waits at the gate until it falls"
         );
-        let dest = overlay_flag_dest(march, &Faction::Pillager, false, true, false, flag);
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Pillager,
+            false,
+            20.5,
+            22.5,
+            inner,
+            gatehouse,
+            true,
+            flag,
+        );
         assert_eq!(
             (dest.x, dest.z),
             (flag.x, flag.z),
             "courtyard raid paths to the plate"
         );
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Pillager,
+            true,
+            20.5,
+            -3.5,
+            inner,
+            gatehouse,
+            true,
+            flag,
+        );
+        assert!(
+            inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
+            "after the breach the column walks through the gatehouse, dest={dest:?}"
+        );
+    }
+
+    #[test]
+    fn one_hundred_twenty_raiders_path_the_gatehouse_to_the_plate() {
+        let flag = PostTarget {
+            x: 11,
+            y: 64,
+            z: 22,
+        };
+        let march = PostTarget { x: 20, y: 64, z: 4 };
+        let inner = Rect::new(0, 8, 40, 40);
+        let gatehouse = Rect::new(16, 0, 24, 8);
+        let mut through_gate = 0u32;
+        let mut on_plate = 0u32;
+        for i in 0..120 {
+            let x = 16.5 + f64::from(i % 12);
+            let z = -2.5 - f64::from(i / 12) * 0.4;
+            let dest = overlay_flag_dest(
+                march,
+                &Faction::Pillager,
+                i == 0,
+                x,
+                z,
+                inner,
+                gatehouse,
+                true,
+                flag,
+            );
+            assert!(
+                inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
+                "raider {i} at gate must walk through the gatehouse dest={dest:?}"
+            );
+            through_gate += 1;
+            let dest = overlay_flag_dest(
+                dest,
+                &Faction::Pillager,
+                i == 0,
+                f64::from(dest.x) + 0.5,
+                f64::from(dest.z) + 0.5,
+                inner,
+                gatehouse,
+                true,
+                flag,
+            );
+            assert_eq!(
+                (dest.x, dest.z),
+                (flag.x, flag.z),
+                "once inside, raider {i} (bearer={}) marches to the plate",
+                i == 0
+            );
+            on_plate += 1;
+        }
+        assert_eq!(through_gate, 120);
+        assert_eq!(on_plate, 120);
+        let need = capture_need(120);
+        assert!(need >= 3);
+        let owner = TownOwner::Kingdom("alder".to_owned());
+        let mut hold = 0;
+        let mut update = siege::HoldUpdate::default();
+        for _ in 0..HOLD_TICKS {
+            update = tick_flag_hold(
+                &owner,
+                FlagPresence::stacked(120, 0),
+                hold,
+                0,
+                need,
+                need,
+                1,
+            );
+            hold = update.occupy_hold;
+        }
+        assert!(
+            update.captured,
+            "120 raiders on an empty plate flip the town"
+        );
+        let paused = tick_flag_hold(&owner, FlagPresence::stacked(120, 1), 40, 0, need, need, 1);
+        assert!(
+            paused.paused,
+            "a defender on the plate holds the 120-raider push"
+        );
+        assert!(!paused.captured);
+        assert_eq!(STORMING_COUNT, 8);
+        assert!((STORMING_RANGE - 8.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -6830,7 +7028,19 @@ mod tests {
             z: 40,
         };
         let march = PostTarget { x: 1, y: 64, z: 1 };
-        let dest = overlay_flag_dest(march, &Faction::Pillager, true, false, false, flag);
+        let inner = Rect::new(30, 30, 50, 50);
+        let gatehouse = Rect::new(36, 28, 44, 32);
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Pillager,
+            true,
+            40.5,
+            40.5,
+            inner,
+            gatehouse,
+            true,
+            flag,
+        );
         assert_eq!(
             (dest.x, dest.z),
             (flag.x, flag.z),
