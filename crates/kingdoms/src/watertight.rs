@@ -1066,6 +1066,7 @@ fn is_furniture(state: Option<&BlockState>) -> bool {
         || id == Block::RED_STAINED_GLASS_PANE.id
         || id == Block::YELLOW_STAINED_GLASS_PANE.id
         || id == Block::PURPLE_STAINED_GLASS_PANE.id
+        || id == Block::ORANGE_STAINED_GLASS_PANE.id
         || id == Block::IRON_BARS.id
         || id == Block::OAK_TRAPDOOR.id
 }
@@ -1085,6 +1086,9 @@ fn is_roof_block(state: &BlockState) -> bool {
         || id == Block::SANDSTONE_SLAB.id
         || id == Block::SMOOTH_SANDSTONE_SLAB.id
         || id == Block::SMOOTH_SANDSTONE.id
+        || id == Block::GOLD_BLOCK.id
+        || id == Block::YELLOW_TERRACOTTA.id
+        || id == Block::CUT_SANDSTONE.id
         || id == Block::SNOW.id
         || id == Block::SNOW_BLOCK.id
 }
@@ -1129,6 +1133,39 @@ mod tests {
         assert!(
             failed.is_empty(),
             "watertight failures:\n{}",
+            failed.join("\n")
+        );
+    }
+
+    #[test]
+    fn round25_biome_cathedrals_are_watertight() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let mut failed = Vec::new();
+        for palette in [
+            PaletteKind::Oak,
+            PaletteKind::Spruce,
+            PaletteKind::Sandstone,
+        ] {
+            let plan = build_plan(20_261_025, origin, grid.clone(), palette);
+            let volume = fill_volume(&plan);
+            let check = check_town(&plan, &volume);
+            if !check.ok() {
+                failed.push(format!("{palette:?} {}", check.summary()));
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "biome cathedral watertight failures:\n{}",
             failed.join("\n")
         );
     }

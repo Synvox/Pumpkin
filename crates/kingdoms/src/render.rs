@@ -4,7 +4,7 @@ use image::{ImageBuffer, Rgb, RgbImage};
 use pumpkin_data::map_color::MapColor;
 use pumpkin_data::{Block, BlockState};
 
-use crate::buildings::BuildingKind;
+use crate::buildings::{BuildingKind, Lot};
 use crate::castle::RoofKind;
 use crate::cells::CellKind;
 use crate::geom::{Dir, Rect};
@@ -356,6 +356,8 @@ fn write_scene_renders(
         let mut rect = scene.rect;
         if scene.kind == SceneKind::Harbour {
             rect = harbour_scene_rect(plan, rect);
+        } else if scene.kind == SceneKind::Cathedral {
+            rect = cathedral_focus_rect(plan, rect);
         } else if scene.kind == SceneKind::StaveChurch {
             if let Some(lot) = plan.lots.iter().find(|lot| {
                 lot.kind == BuildingKind::StaveChurch && scene.rect.intersects(lot.rect)
@@ -472,9 +474,15 @@ fn write_scene_renders(
                 &out_dir.join(format!("{stem}-scene-cathedral-city.png")),
                 &render_exterior(
                     volume,
-                    cat.rect.inflate(8),
+                    cathedral_focus_rect(plan, cat.rect),
                     3,
-                    "Cathedral · west towers, crossing and buttresses",
+                    match plan.palette {
+                        PaletteKind::Sandstone => {
+                            "Cathedral · sandstone basilica, minaret and gold dome"
+                        }
+                        PaletteKind::Spruce => "Cathedral · Romanesque spruce and stone",
+                        PaletteKind::Oak => "Cathedral · gothic towers and spires",
+                    },
                 ),
             )?;
         }
@@ -507,6 +515,17 @@ fn write_scene_renders(
                 2,
                 "Cog · dark-oak hull, spruce deck, sail",
                 ship_beam_rot(hull),
+            ),
+        )?;
+    }
+    if let Some(market) = fish_market_lot(plan) {
+        save(
+            &out_dir.join(format!("{stem}-scene-fish-market.png")),
+            &render_exterior(
+                volume,
+                market.rect.inflate(10),
+                3,
+                "Harbour · fish market on the quay",
             ),
         )?;
     }
@@ -616,8 +635,19 @@ pub fn overview_bounds(plan: &TownPlan) -> Rect {
     bounds = union_rect(bounds, plan.town.inflate(8));
     for scene in &plan.scenes {
         if scene.kind == SceneKind::Harbour {
-            if let Some(quay) = largest_blob(plan, CellKind::Quay) {
-                bounds = union_rect(bounds, quay.inflate(12));
+            bounds = union_rect(bounds, scene.rect.inflate(8));
+            for kind in [
+                CellKind::Ship,
+                CellKind::Boat,
+                CellKind::Breakwater,
+                CellKind::Lighthouse,
+                CellKind::Quay,
+                CellKind::Crane,
+                CellKind::Dock,
+            ] {
+                if let Some(blob) = largest_blob(plan, kind) {
+                    bounds = union_rect(bounds, blob.inflate(10));
+                }
             }
             continue;
         }
@@ -955,13 +985,59 @@ fn render_room(
     )
 }
 
-fn harbour_scene_rect(plan: &TownPlan, scene: Rect) -> Rect {
-    let quay = largest_blob(plan, CellKind::Quay).unwrap_or(scene);
-    let mut rect = quay.inflate(14);
-    if let Some(hull) = largest_blob(plan, CellKind::Ship) {
-        rect = union_rect(rect, hull.inflate(8));
+fn cathedral_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
+    let Some(nave) = largest_blob(plan, CellKind::CathedralNave) else {
+        return fallback;
+    };
+    let mut rect = nave.inflate(8);
+    for kind in [
+        CellKind::CathedralTower,
+        CellKind::CathedralChoir,
+        CellKind::CathedralTransept,
+        CellKind::CathedralButtress,
+    ] {
+        if let Some(blob) = largest_blob(plan, kind) {
+            rect = union_rect(rect, blob.inflate(4));
+        }
     }
-    let (sx, sz) = quay.center();
+    rect
+}
+
+fn stall_touches(plan: &TownPlan, lot: &Lot, kinds: &[CellKind]) -> bool {
+    (lot.rect.min_z.saturating_sub(6)..=lot.rect.max_z + 6).any(|z| {
+        (lot.rect.min_x.saturating_sub(6)..=lot.rect.max_x + 6)
+            .any(|x| kinds.contains(&plan.occ.kind(x, z)))
+    })
+}
+
+fn fish_market_lot(plan: &TownPlan) -> Option<&Lot> {
+    let fleet = [
+        CellKind::Ship,
+        CellKind::Boat,
+        CellKind::Dock,
+        CellKind::Crane,
+    ];
+    let quay = [CellKind::Quay, CellKind::Harbor];
+    plan.lots
+        .iter()
+        .find(|lot| lot.kind == BuildingKind::Stall && stall_touches(plan, lot, &fleet))
+        .or_else(|| {
+            plan.lots
+                .iter()
+                .find(|lot| lot.kind == BuildingKind::Stall && stall_touches(plan, lot, &quay))
+        })
+}
+
+fn harbour_scene_rect(plan: &TownPlan, scene: Rect) -> Rect {
+    let hull = largest_blob(plan, CellKind::Ship);
+    let crane = largest_blob(plan, CellKind::Crane);
+    let dock = largest_blob(plan, CellKind::Dock);
+    let shore = hull.or(crane).or(dock).unwrap_or(scene);
+    let mut rect = shore.inflate(14);
+    if let Some(h) = hull {
+        rect = union_rect(rect, h.inflate(8));
+    }
+    let (sx, sz) = shore.center();
     if rect.width() > 72 {
         rect = Rect::new(sx - 36, rect.min_z, sx + 35, rect.max_z);
     }

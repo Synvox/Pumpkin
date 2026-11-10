@@ -359,6 +359,20 @@ impl HeightGrid {
             && self.dry_ratio(rect.min_x, rect.min_z, rect.max_x, rect.max_z) >= 85
     }
 
+    /// Dry enough to host a house, and not a cliff-to-water span that would
+    /// sit on a one-block pillar.
+    #[must_use]
+    pub fn rect_is_buildable(&self, rect: crate::geom::Rect) -> bool {
+        if !self.rect_is_dry(rect) {
+            return false;
+        }
+        let (lo, hi) = self.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+        if hi - lo <= 12 {
+            return true;
+        }
+        self.dry_ratio(rect.min_x, rect.min_z, rect.max_x, rect.max_z) >= 98
+    }
+
     /// Highest sample in `rect`.
     #[must_use]
     pub fn peak(&self, min_x: i32, min_z: i32, max_x: i32, max_z: i32) -> (i32, i32, i32) {
