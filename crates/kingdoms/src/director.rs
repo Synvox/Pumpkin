@@ -3596,13 +3596,19 @@ pub fn try_take_path_budget() -> bool {
 /// O(1) flow-field waypoint toward `dest` for this town.
 #[must_use]
 pub fn flow_waypoint(town_id: &str, x: f64, z: f64, dest: PostTarget) -> (f64, f64) {
-    let mut dir = lock();
-    let Some(war) = dir.towns.get_mut(town_id) else {
+    let dir = lock();
+    let Some(war) = dir.towns.get(town_id) else {
         let v = dest.vec();
         return (v.x, v.z);
     };
-    let field = war.field_toward(ScenePost::new(dest.x, dest.z));
-    field.waypoint(x, z)
+    let key = crate::flow::cache_key(ScenePost::new(dest.x, dest.z));
+    if let Some(field) = war.fields.get(&key) {
+        return field.waypoint(x, z);
+    }
+    // Building a capital-sized BFS here was the 1.2 s first-town hitch.
+    // Warmup prewarms the flag and outer-gate fields; otherwise bee-line.
+    let v = dest.vec();
+    (v.x, v.z)
 }
 
 fn queue_raid_warmup(town_id: &str) {
@@ -3747,11 +3753,21 @@ fn prewarm_town_fields(town_id: &str) {
     let Some(war) = dir.towns.get_mut(town_id) else {
         return;
     };
-    if !war.fields.is_empty() {
+    let flag = war.scene.flag();
+    if !war.fields.contains_key(&crate::flow::cache_key(flag)) {
+        let _ = war.field_toward(flag);
         return;
     }
-    let dest = war.scene.flag();
-    let _ = war.field_toward(dest);
+    let flag_dest = PostTarget {
+        x: flag.x,
+        y: flag.height_or(64),
+        z: flag.z,
+    };
+    let gate = outermost_gate_dest(war.scene.gates(), flag_dest);
+    let post = ScenePost::new(gate.x, gate.z);
+    if !war.fields.contains_key(&crate::flow::cache_key(post)) {
+        let _ = war.field_toward(post);
+    }
 }
 
 fn take_snapshot_cursor(town_id: &str) -> u32 {
