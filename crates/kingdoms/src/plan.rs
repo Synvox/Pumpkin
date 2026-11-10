@@ -34,7 +34,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 9;
+pub const PLAN_CACHE_VERSION: u32 = 10;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -2161,7 +2161,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 9);
+        assert_eq!(PLAN_CACHE_VERSION, 10);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -2199,8 +2199,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 9;
-    const PLAN_LAYOUT_HASH: u64 = 0x629f_49c0_a8b9_1ffb;
+    const PLAN_LAYOUT_VERSION: u32 = 10;
+    const PLAN_LAYOUT_HASH: u64 = 0xfd4e_f942_51e5_1e55;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

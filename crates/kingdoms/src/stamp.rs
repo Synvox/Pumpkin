@@ -346,6 +346,8 @@ pub fn stamp_column(
         CellKind::TownTower => {
             if in_frontier(plan, x, z) {
                 place_collapsed_tower(sink, plan, x, floor, ground, z, &palette);
+            } else if in_caravanserai(plan, x, z) {
+                place_minaret(sink, plan, x, floor, ground, z, &palette);
             } else {
                 place_tower(sink, plan, x, floor, ground, z, &palette, 5, 14);
             }
@@ -1235,9 +1237,12 @@ fn place_arcade(
     palette: &Palette,
 ) {
     sink.put(x, ground, z, palette.path);
-    let court = Dir::ALL
-        .iter()
-        .any(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) == CellKind::Green);
+    let court = Dir::ALL.iter().any(|dir| {
+        matches!(
+            plan.occ.kind(x + dir.dx(), z + dir.dz()),
+            CellKind::Green | CellKind::Plaza | CellKind::Fountain | CellKind::Well
+        )
+    });
     let pillar = (x + z) % 2 == 0;
     if court {
         if pillar {
@@ -1986,6 +1991,10 @@ fn mass_roof_y(spec: TowerSpec, x: i32, z: i32, top: i32) -> (i32, Dir) {
     let dx = x - spec.cx;
     let dz = z - spec.cz;
     let dist = isqrt(dx, dz);
+    // Chebyshev keeps the four square-pyramid faces the same height.
+    // Euclidean dist made diagonal eaves sit lower than cardinal ones, so a
+    // SE view showed two tall far faces behind a stepped near half (a V).
+    let cheb = dx.abs().max(dz.abs());
     let out = if dx.abs() >= dz.abs() {
         if dx < 0 { Dir::West } else { Dir::East }
     } else if dz < 0 {
@@ -1996,7 +2005,7 @@ fn mass_roof_y(spec: TowerSpec, x: i32, z: i32, top: i32) -> (i32, Dir) {
     match spec.roof {
         RoofKind::Crenellated => (top, out),
         RoofKind::Cone => (top + 1 + (spec.radius - dist).max(0), out),
-        RoofKind::Spire => (top + 1 + (spec.radius - dist).max(0) * 2, out),
+        RoofKind::Spire => (top + 1 + (spec.radius - cheb).max(0) * 2, out),
         RoofKind::Hip => (top + 1 + (spec.radius - dist).clamp(0, 8), out),
         RoofKind::Gable { along_x } => {
             let ridge = if along_x { spec.cz } else { spec.cx };
@@ -2043,7 +2052,8 @@ fn mass_roof_needs_cap(spec: TowerSpec, x: i32, z: i32) -> bool {
             };
             d <= 2
         }
-        RoofKind::Cone | RoofKind::Spire => dist <= 2,
+        RoofKind::Cone => dist <= 2,
+        RoofKind::Spire => dx.abs().max(dz.abs()) == 0,
     }
 }
 
@@ -2058,9 +2068,8 @@ fn place_mass_roof(
     let (roof_y, dir) = mass_roof_y(spec, x, z, top);
     match spec.roof {
         RoofKind::Crenellated => {}
-        RoofKind::Cone | RoofKind::Hip | RoofKind::Gable { .. } | RoofKind::Spire => {
-            let dx = x - spec.cx;
-            let dz = z - spec.cz;
+        RoofKind::Spire => place_spire_pyramid(sink, spec, x, z, top, roof_y, dir, palette),
+        RoofKind::Cone | RoofKind::Hip | RoofKind::Gable { .. } => {
             let cap = roof_cap_block(palette);
             if on_shell(spec, x, z) {
                 if mass_roof_needs_cap(spec, x, z) {
@@ -2069,19 +2078,45 @@ fn place_mass_roof(
                     sink.put(x, roof_y, z, stair_state(palette.roof, dir));
                 }
             } else {
-                // Fill the pyramid so a spire/hip cannot leave a sky well with
+                // Fill the pyramid so a hip cannot leave a sky well with
                 // oak rafters showing between the two slopes.
                 for y in top + 1..=roof_y {
                     sink.put(x, y, z, cap);
                 }
             }
-            if matches!(spec.roof, RoofKind::Spire) && dx == 0 && dz == 0 {
-                for y in roof_y + 1..=roof_y + 6 {
-                    sink.put(x, y, z, palette.bricks);
-                }
-                sink.put(x, roof_y + 7, z, Block::LANTERN.default_state);
-            }
         }
+    }
+}
+
+/// Square-pyramid keep roof: stairs on every Chebyshev ring, equal faces, a
+/// short apex finial. Interior fill under the stairs so the mass stays sealed.
+fn place_spire_pyramid(
+    sink: &mut impl BlockSink,
+    spec: TowerSpec,
+    x: i32,
+    z: i32,
+    top: i32,
+    roof_y: i32,
+    dir: Dir,
+    palette: &Palette,
+) {
+    let dx = x - spec.cx;
+    let dz = z - spec.cz;
+    let dist = dx.abs().max(dz.abs());
+    if dist > spec.radius {
+        return;
+    }
+    let cap = roof_cap_block(palette);
+    for y in top + 1..roof_y {
+        sink.put(x, y, z, cap);
+    }
+    if dist == 0 {
+        sink.put(x, roof_y, z, cap);
+        sink.put(x, roof_y + 1, z, palette.bricks);
+        sink.put(x, roof_y + 2, z, palette.brick_wall);
+        sink.put(x, roof_y + 3, z, Block::LANTERN.default_state);
+    } else {
+        sink.put(x, roof_y, z, stair_state(palette.roof, dir));
     }
 }
 
@@ -2692,6 +2727,7 @@ fn place_building(
         BuildingKind::Winepress => place_winepress(sink, lot, x, floor, ground, z, palette),
         BuildingKind::Windmill => place_windmill(sink, lot, x, floor, ground, z, palette),
         BuildingKind::Church => place_town_church(sink, lot, x, floor, ground, z, palette),
+        BuildingKind::StaveChurch => place_stave_church(sink, lot, x, floor, ground, z, palette),
         BuildingKind::Monastery => place_monastery(sink, lot, x, floor, ground, z, palette),
         BuildingKind::Watchtower => place_watchtower(sink, lot, x, floor, ground, z, palette),
         BuildingKind::Outpost => place_outpost(sink, lot, x, floor, ground, z, palette),
@@ -2971,6 +3007,78 @@ fn place_town_church(
             sink.put(x, floor + 12, z, Block::GLASS_PANE.default_state);
         }
     }
+}
+
+/// Taiga stave church: dark-oak stave walls, stepped gables, dragon-head peaks.
+fn place_stave_church(
+    sink: &mut impl BlockSink,
+    lot: &Lot,
+    x: i32,
+    floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    foundation(sink, x, floor, ground, z, palette);
+    let r = lot.rect;
+    let along_x = r.width() >= r.depth();
+    let (cx, cz) = r.center();
+    let inner = if along_x {
+        (x - cx).abs() <= r.width() / 4
+    } else {
+        (z - cz).abs() <= r.depth() / 4
+    };
+    let eaves = floor + 7 + if inner { 4 } else { 0 };
+    let (roof_y, _) = gable_roof_y_pitch(r, x, z, eaves, 1, 2);
+    let edge = r.on_edge(x, z);
+    let stave = r.is_corner(x, z)
+        || (along_x && (x - r.min_x) % 2 == 0)
+        || (!along_x && (z - r.min_z) % 2 == 0);
+    if edge {
+        for y in floor..roof_y {
+            sink.put(
+                x,
+                y,
+                z,
+                if stave {
+                    Block::DARK_OAK_LOG.default_state
+                } else {
+                    palette.planks
+                },
+            );
+        }
+        if interior::gable_door_at(r, x, z) {
+            interior::place_door(sink, x, floor + 1, z, interior::outward(r, x, z), true);
+        } else if !r.is_corner(x, z) && (x + z) % 3 == 0 {
+            sink.put(x, floor + 3, z, Block::GLASS_PANE.default_state);
+            sink.put(x, floor + 4, z, Block::GLASS_PANE.default_state);
+        }
+    } else {
+        sink.put(x, floor, z, palette.planks);
+        clear_above(sink, x, floor + 1, roof_y - 1, z);
+        interior::furnish_chapel(sink, r, x, floor, z, roof_y, palette, true);
+    }
+    place_roof_pitched(sink, r, x, eaves, z, palette, 1, 2);
+    // Dragon heads on the outer gable peaks and the stepped inner gable.
+    let on_ridge = if along_x {
+        (z - cz).abs() == 0
+    } else {
+        (x - cx).abs() == 0
+    };
+    let along = if along_x { x - cx } else { z - cz };
+    let span = if along_x { r.width() } else { r.depth() };
+    let outer_end = if along_x {
+        x == r.min_x || x == r.max_x
+    } else {
+        z == r.min_z || z == r.max_z
+    };
+    let inner_end = along.abs() == span / 4;
+    if on_ridge && (outer_end || inner_end) {
+        sink.put(x, roof_y + 1, z, Block::DARK_OAK_LOG.default_state);
+        sink.put(x, roof_y + 2, z, Block::DARK_OAK_LOG.default_state);
+        sink.put(x, roof_y + 3, z, Block::DRAGON_HEAD.default_state);
+    }
+    clear_hill_above_roof(sink, x, roof_y, ground, z, false);
 }
 
 fn place_desert_church(
@@ -3996,6 +4104,55 @@ fn in_frontier(plan: &TownPlan, x: i32, z: i32) -> bool {
     plan.scenes
         .iter()
         .any(|scene| scene.kind == crate::scenes::SceneKind::Frontier && scene.rect.contains(x, z))
+}
+
+fn in_caravanserai(plan: &TownPlan, x: i32, z: i32) -> bool {
+    plan.scenes.iter().any(|scene| {
+        scene.kind == crate::scenes::SceneKind::Caravanserai && scene.rect.contains(x, z)
+    })
+}
+
+fn place_minaret(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    foundation(sink, x, floor, ground, z, palette);
+    let rect = blob_of(plan, x, z, CellKind::TownTower);
+    let (cx, cz) = rect.center();
+    let dist = (x - cx).abs().max((z - cz).abs());
+    let top = floor + 16;
+    if dist == 0 {
+        for y in floor..=top + 4 {
+            sink.put(x, y, z, palette.bricks);
+        }
+        sink.put(x, top + 5, z, palette.brick_wall);
+        sink.put(x, top + 6, z, Block::LANTERN.default_state);
+        return;
+    }
+    for y in floor..=top {
+        sink.put(x, y, z, palette.bricks);
+    }
+    if (x + z) % 2 == 0 {
+        sink.put(x, floor + 8, z, Block::GLASS_PANE.default_state);
+        sink.put(x, floor + 12, z, Block::GLASS_PANE.default_state);
+    }
+    let roof_y = top + 1 + (2 - dist).max(0) * 2;
+    for y in top + 1..roof_y {
+        sink.put(x, y, z, roof_cap_block(palette));
+    }
+    let dir = if (x - cx).abs() >= (z - cz).abs() {
+        if x < cx { Dir::West } else { Dir::East }
+    } else if z < cz {
+        Dir::North
+    } else {
+        Dir::South
+    };
+    sink.put(x, roof_y, z, stair_state(palette.roof, dir));
 }
 
 fn place_scarred_curtain(
@@ -5038,5 +5195,33 @@ impl TownPlan {
     #[must_use]
     pub fn planned_keep_blocks(&self) -> Vec<PlannedBlock> {
         planned_blocks_in(self, self.castle.keep)
+    }
+}
+
+#[cfg(test)]
+mod roof_tests {
+    use super::*;
+    use crate::castle::TowerShape;
+
+    #[test]
+    fn spire_faces_are_equal_height() {
+        let spec = TowerSpec {
+            cx: 0,
+            cz: 0,
+            radius: 10,
+            height: 24,
+            shape: TowerShape::Square,
+            roof: RoofKind::Spire,
+            inner: true,
+        };
+        let top = 80;
+        let (cardinal, _) = mass_roof_y(spec, 10, 0, top);
+        let (corner, _) = mass_roof_y(spec, 10, 10, top);
+        let (mid_card, _) = mass_roof_y(spec, 5, 0, top);
+        let (mid_diag, _) = mass_roof_y(spec, 5, 5, top);
+        let (apex, _) = mass_roof_y(spec, 0, 0, top);
+        assert_eq!(cardinal, corner, "eaves must match on every face");
+        assert_eq!(mid_card, mid_diag, "equal rings must sit at equal height");
+        assert!(apex > cardinal, "apex should rise above the eaves");
     }
 }

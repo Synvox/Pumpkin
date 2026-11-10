@@ -174,7 +174,9 @@ fn write_scene_renders(
             | SceneKind::Frontier
             | SceneKind::Manor
             | SceneKind::Vineyard
-            | SceneKind::Gorge => 6,
+            | SceneKind::Gorge
+            | SceneKind::StaveChurch
+            | SceneKind::Caravanserai => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -469,8 +471,8 @@ fn write_cutaways(
             volume,
             hall,
             hall_floor,
-            hall_floor + 5,
-            "Great hall · tables, dais, hearth",
+            hall_floor + 8,
+            "Great hall · tables, banners, chandeliers",
         ),
     )?;
 
@@ -629,8 +631,8 @@ fn write_cutaways(
                     volume,
                     nave,
                     floor,
-                    floor + 6,
-                    "Cathedral · nave cutaway, pews and rose",
+                    floor + 10,
+                    "Cathedral · nave cutaway, pews, altar, chandeliers",
                 ),
             )?;
             let cz = nave.center().1;

@@ -56,6 +56,10 @@ pub enum SceneKind {
     Vineyard,
     /// Cliffside or river-gorge town on stacked terraces.
     Gorge,
+    /// Taiga stave church with dragon-head gables.
+    StaveChurch,
+    /// Desert caravanserai with a courtyard and minarets.
+    Caravanserai,
 }
 
 impl SceneKind {
@@ -81,8 +85,10 @@ impl SceneKind {
             Self::Frontier => "Frontier town",
             Self::Riverside => "Riverside town",
             Self::Manor => "Hill-fort manor",
-            Self::Vineyard => "Abbey vineyard",
+            Self::Vineyard => "Terraced vineyard village",
             Self::Gorge => "Gorge town",
+            Self::StaveChurch => "Stave church",
+            Self::Caravanserai => "Caravanserai",
         }
     }
 }
@@ -178,6 +184,28 @@ pub fn place_scenes(
     paint_monastery_switchback(occ, grid, town, &scenes);
     place_manor(occ, grid, search, town, keep_out, lots, seed, &mut scenes);
     place_vineyard(occ, grid, search, town, keep_out, lots, seed, &mut scenes);
+    place_stave_church_scene(
+        occ,
+        grid,
+        search,
+        town,
+        keep_out,
+        lots,
+        seed,
+        palette,
+        &mut scenes,
+    );
+    place_caravanserai(
+        occ,
+        grid,
+        search,
+        town,
+        keep_out,
+        lots,
+        seed,
+        palette,
+        &mut scenes,
+    );
     place_gorge_town(occ, grid, search, town, keep_out, lots, seed, &mut scenes);
     place_outskirts(
         occ,
@@ -1840,6 +1868,8 @@ fn place_vineyard(
         cellar,
         gate_dir,
     );
+    let village = vineyard_village_strip(yard, gate_dir.opposite());
+    place_vineyard_cottages(occ, grid, lots, seed, village, gate_dir);
     let apron = vineyard_apron(yard, gate_dir);
     for z in apron.min_z..=apron.max_z {
         for x in apron.min_x..=apron.max_x {
@@ -1872,7 +1902,7 @@ fn place_vineyard(
     }
     scenes.push(Scene {
         kind: SceneKind::Vineyard,
-        rect: union_scene_rect(yard, apron).inflate(SCENE_YARD_MARGIN),
+        rect: union_scene_rect(union_scene_rect(yard, apron), village).inflate(SCENE_YARD_MARGIN),
     });
 }
 
@@ -1912,6 +1942,256 @@ fn union_scene_rect(a: Rect, b: Rect) -> Rect {
         a.max_x.max(b.max_x),
         a.max_z.max(b.max_z),
     )
+}
+
+fn vineyard_village_strip(yard: Rect, up: Dir) -> Rect {
+    match up {
+        Dir::North => Rect::new(
+            yard.min_x + 2,
+            yard.min_z - 11,
+            yard.min_x + 18,
+            yard.min_z - 4,
+        ),
+        Dir::South => Rect::new(
+            yard.min_x + 2,
+            yard.max_z + 4,
+            yard.min_x + 18,
+            yard.max_z + 11,
+        ),
+        Dir::East => Rect::new(
+            yard.max_x + 4,
+            yard.min_z + 2,
+            yard.max_x + 11,
+            yard.min_z + 18,
+        ),
+        Dir::West => Rect::new(
+            yard.min_x - 11,
+            yard.min_z + 2,
+            yard.min_x - 4,
+            yard.min_z + 18,
+        ),
+    }
+}
+
+fn place_vineyard_cottages(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    strip: Rect,
+    gate_dir: Dir,
+) {
+    let houses = if strip.width() >= 16 {
+        [
+            Rect::new(strip.min_x, strip.min_z, strip.min_x + 7, strip.min_z + 6),
+            Rect::new(
+                strip.min_x + 9,
+                strip.min_z,
+                strip.min_x + 16,
+                strip.min_z + 6,
+            ),
+        ]
+    } else {
+        [
+            Rect::new(strip.min_x, strip.min_z, strip.min_x + 7, strip.min_z + 6),
+            Rect::new(
+                strip.min_x,
+                strip.min_z + 8,
+                strip.min_x + 7,
+                strip.min_z + 14,
+            ),
+        ]
+    };
+    for (i, rect) in houses.into_iter().enumerate() {
+        let facing = if i == 0 {
+            gate_dir
+        } else {
+            gate_dir.opposite()
+        };
+        let _ = force_lot(occ, grid, lots, seed, BuildingKind::Cottage, rect, facing);
+    }
+}
+
+fn landmark_blocked(scenes: &[Scene], rect: Rect) -> bool {
+    scenes.iter().any(|scene| {
+        matches!(
+            scene.kind,
+            SceneKind::Cathedral
+                | SceneKind::Monastery
+                | SceneKind::Manor
+                | SceneKind::Vineyard
+                | SceneKind::Frontier
+                | SceneKind::Harbour
+                | SceneKind::MountainFortress
+                | SceneKind::Gorge
+                | SceneKind::StaveChurch
+                | SceneKind::Caravanserai
+        ) && scene.rect.deflate(2).intersects(rect)
+    })
+}
+
+fn place_stave_church_scene(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    palette: PaletteKind,
+    scenes: &mut Vec<Scene>,
+) {
+    if palette != PaletteKind::Spruce {
+        return;
+    }
+    let mut rng = TownRng::salted(seed, 0x57A7_E001, origin_salt(search));
+    let Some(yard) = find_gentle_site(occ, grid, search, town, keep_out, 22, 20, 10, &mut rng)
+        .or_else(|| find_site(occ, grid, search, town, keep_out, 20, 16, false, &mut rng))
+    else {
+        return;
+    };
+    if landmark_blocked(scenes, yard) {
+        return;
+    }
+    for z in yard.min_z..=yard.max_z {
+        for x in yard.min_x..=yard.max_x {
+            if riverside_reclaim(occ.kind(x, z)) {
+                occ.set(x, z, CellKind::Green, true);
+            }
+        }
+    }
+    let church = Rect::new(
+        yard.min_x + 2,
+        yard.min_z + 2,
+        yard.min_x + 16,
+        yard.min_z + 12,
+    );
+    if force_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::StaveChurch,
+        church,
+        Dir::South,
+    )
+    .is_none()
+    {
+        return;
+    }
+    let house = Rect::new(
+        yard.min_x + 2,
+        yard.max_z - 7,
+        yard.min_x + 9,
+        yard.max_z - 2,
+    );
+    let _ = force_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::Cottage,
+        house,
+        Dir::North,
+    );
+    scenes.push(Scene {
+        kind: SceneKind::StaveChurch,
+        rect: yard.inflate(SCENE_YARD_MARGIN),
+    });
+}
+
+fn place_caravanserai(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    palette: PaletteKind,
+    scenes: &mut Vec<Scene>,
+) {
+    if palette != PaletteKind::Sandstone {
+        return;
+    }
+    let mut rng = TownRng::salted(seed, 0xCA5A_7E51, origin_salt(search));
+    let Some(yard) = find_gentle_site(occ, grid, search, town, keep_out, 26, 22, 12, &mut rng)
+        .or_else(|| find_site(occ, grid, search, town, keep_out, 22, 18, false, &mut rng))
+    else {
+        return;
+    };
+    if landmark_blocked(scenes, yard) {
+        return;
+    }
+    for z in yard.min_z..=yard.max_z {
+        for x in yard.min_x..=yard.max_x {
+            if riverside_reclaim(occ.kind(x, z)) {
+                occ.set(x, z, CellKind::Green, true);
+            }
+        }
+    }
+    for z in yard.min_z..=yard.max_z {
+        for x in yard.min_x..=yard.max_x {
+            if yard.on_edge(x, z) {
+                occ.set(x, z, CellKind::TownWall, true);
+            }
+        }
+    }
+    let corners = [
+        (yard.min_x, yard.min_z),
+        (yard.max_x - 2, yard.min_z),
+        (yard.min_x, yard.max_z - 2),
+        (yard.max_x - 2, yard.max_z - 2),
+    ];
+    for (x, z) in corners {
+        occ.fill(Rect::new(x, z, x + 2, z + 2), CellKind::TownTower, true);
+    }
+    let gate_dir = manor_gate_dir(grid, yard);
+    paint_manor_gate(occ, yard, gate_dir);
+    let inner = yard.deflate(3);
+    occ.fill(inner, CellKind::Arcade, true);
+    let court = inner.deflate(2);
+    occ.fill(court, CellKind::Plaza, true);
+    let (cx, cz) = court.center();
+    occ.fill(
+        Rect::new(cx - 1, cz - 1, cx + 1, cz + 1),
+        CellKind::Fountain,
+        true,
+    );
+    let lodge_a = Rect::new(
+        inner.min_x + 1,
+        inner.min_z + 1,
+        inner.min_x + 8,
+        inner.min_z + 6,
+    );
+    let lodge_b = Rect::new(
+        inner.max_x - 8,
+        inner.min_z + 1,
+        inner.max_x - 1,
+        inner.min_z + 6,
+    );
+    let _ = force_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::Townhouse,
+        lodge_a,
+        gate_dir.opposite(),
+    );
+    let _ = force_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::Townhouse,
+        lodge_b,
+        gate_dir.opposite(),
+    );
+    scenes.push(Scene {
+        kind: SceneKind::Caravanserai,
+        rect: yard.inflate(SCENE_YARD_MARGIN),
+    });
 }
 
 fn place_gorge_town(
@@ -6009,6 +6289,12 @@ mod tests {
                 .filter(|lot| lot.kind == BuildingKind::Winepress && yard.rect.intersects(lot.rect))
                 .count();
             assert!(press >= 1, "winepress house {press}");
+            let cottages = oak
+                .lots
+                .iter()
+                .filter(|lot| lot.kind == BuildingKind::Cottage && yard.rect.intersects(lot.rect))
+                .count();
+            assert!(cottages >= 2, "vineyard village cottages {cottages}");
         }
         let river = HeightGrid::synthetic_river(
             origin.x - 360,
@@ -6584,5 +6870,68 @@ mod tests {
             best.3
         );
         panic!("HARBOUR {}", hits.join(" | "));
+    }
+
+    #[test]
+    fn round19_biome_landmarks() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let spruce = build_plan(7, origin, grid.clone(), PaletteKind::Spruce);
+        let spruce_kinds: Vec<_> = spruce.scenes.iter().map(|s| s.kind).collect();
+        assert!(
+            spruce_kinds.contains(&SceneKind::StaveChurch),
+            "taiga stave church: {spruce_kinds:?}"
+        );
+        assert!(
+            spruce
+                .lots
+                .iter()
+                .any(|lot| lot.kind == BuildingKind::StaveChurch),
+            "stave church lot missing"
+        );
+
+        let desert = build_plan(314_159, origin, grid.clone(), PaletteKind::Sandstone);
+        let desert_kinds: Vec<_> = desert.scenes.iter().map(|s| s.kind).collect();
+        assert!(
+            desert_kinds.contains(&SceneKind::Caravanserai),
+            "desert caravanserai: {desert_kinds:?}"
+        );
+        if let Some(yard) = desert
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::Caravanserai)
+        {
+            let mut towers = 0;
+            let mut plaza = 0;
+            let mut arcade = 0;
+            for z in yard.rect.min_z..=yard.rect.max_z {
+                for x in yard.rect.min_x..=yard.rect.max_x {
+                    match desert.occ.kind(x, z) {
+                        CellKind::TownTower => towers += 1,
+                        CellKind::Plaza => plaza += 1,
+                        CellKind::Arcade => arcade += 1,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(towers >= 16, "caravanserai minarets {towers}");
+            assert!(plaza >= 12, "caravanserai courtyard {plaza}");
+            assert!(arcade >= 20, "caravanserai arcade {arcade}");
+        }
+
+        let oak = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        assert!(
+            oak.scenes.iter().any(|s| s.kind == SceneKind::Vineyard),
+            "hillside vineyard village"
+        );
     }
 }
