@@ -648,7 +648,7 @@ impl Director {
             &[camp, keep, gate.unwrap_or(keep)],
             PLAYER_LIVE_RANGE,
         );
-        let materialized = near && self.live_body_count() < body_budget();
+        let materialized = (near || soaking()) && self.live_body_count() < body_budget();
         // Always warm tickets, including abstract raids, so first contact
         // does not apply a town's tickets on the same tick bodies spawn.
         let warm_until = tick.saturating_add(WARM_TICKS);
@@ -2152,7 +2152,22 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                         || !raid.pending_members.is_empty()
                         || raid.pending_retake > 0
                         || raid.extra_left > 0);
-                if raid.materialized
+                if soaking() {
+                    // Hold the soak load: a gate blender would otherwise trip
+                    // "raid defeated" and dump a live front in under a minute.
+                    finished = false;
+                    if raid.pending_members.is_empty()
+                        && raid.pending_retake == 0
+                        && raid.living.len() < usize::from(raid.spec.raiders) / 2
+                    {
+                        let need = raid
+                            .spec
+                            .raiders
+                            .saturating_sub(raid.living.len() as u16)
+                            .max(40);
+                        raid.pending_members = compose_wave(need, 0);
+                    }
+                } else if raid.materialized
                     && raid.wave >= raid.spec.waves
                     && raid.living.is_empty()
                     && raid.spawned_this_wave > 0
@@ -5324,7 +5339,7 @@ fn sync_front_lod(world: &Arc<World>, town_id: &str, tick: u32) {
         let dir = lock();
         dir.live_body_count() < body_budget()
     };
-    let want = near && (was_live || under_budget);
+    let want = (near || soaking()) && (was_live || under_budget);
     if want && !was_live {
         materialize_raid(world, town_id, tick);
         return;
