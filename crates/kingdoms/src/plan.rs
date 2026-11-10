@@ -34,7 +34,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 11;
+pub const PLAN_CACHE_VERSION: u32 = 12;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -601,7 +601,12 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     let capital = origin.cell_x == 0 && origin.cell_z == 0;
     let castle_rect = site_castle(&grid, origin.x, origin.z, &mut rng, CASTLE_SIZE);
     let gate = downhill_town_dir(&grid, castle_rect);
-    let town_rect = driest_town(&grid, castle_rect, gate, 132, 120);
+    let inner_town = driest_town(&grid, castle_rect, gate, 132, 120);
+    let town_rect = if capital {
+        grow_lower_city(&grid, inner_town, castle_rect, gate)
+    } else {
+        inner_town
+    };
     let core = union(castle_rect.inflate(6), town_rect.inflate(18));
     let hinter = union(castle_rect, town_rect).inflate(HINTERLAND_PAD);
     let bounds = clip_to_grid(&grid, union(core, hinter));
@@ -609,7 +614,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     let castle = paint_castle(&mut occ, &grid, castle_rect, &mut rng, capital);
     paint_keep_forecourt(&mut occ, &castle);
 
-    let market = flattest_dry(&grid, town_rect, 28, 28);
+    let market = flattest_dry(&grid, inner_town, 28, 28);
     occ.fill(market, CellKind::Market, false);
     let well = market.center();
     occ.set(well.0, well.1, CellKind::Well, true);
@@ -619,9 +624,22 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         }
     }
 
-    let (town_wall, town_towers) = paint_town_wall(&mut occ, &grid, town_rect, castle_rect, gate);
-    let gate_pts = town_gates(town_rect, castle.gatehouse.center(), gate);
-    let gates = vec![
+    let (mut town_wall, mut town_towers) =
+        paint_town_wall(&mut occ, &grid, inner_town, castle_rect, gate);
+    if capital {
+        let (outer_wall, outer_towers) =
+            paint_town_wall(&mut occ, &grid, town_rect, castle_rect, gate);
+        town_wall.extend(outer_wall);
+        town_towers.extend(outer_towers);
+    }
+    let mut gate_pts = town_gates(town_rect, castle.gatehouse.center(), gate);
+    let mut extra_gates = Vec::new();
+    if capital {
+        extra_gates.push(wall_gate(inner_town, gate));
+        extra_gates.extend(side_gates(town_rect, gate));
+        gate_pts.extend(extra_gates.iter().copied());
+    }
+    let mut gates = vec![
         GateInfo {
             kind: GateKind::Town,
             x: gate_pts[0].0,
@@ -635,6 +653,14 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
             facing: castle.gate_dir,
         },
     ];
+    for &pt in &extra_gates {
+        gates.push(GateInfo {
+            kind: GateKind::Town,
+            x: pt.0,
+            z: pt.1,
+            facing: gate,
+        });
+    }
     for gate_info in &gates {
         for dz in -2..=2 {
             for dx in -2..=2 {
@@ -645,9 +671,12 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     paint_gate_plazas(&mut occ, &gates);
     paint_fountain_ring(&mut occ, well, market);
 
-    let mut waypoints = vec![well, castle.gatehouse.center()];
-    waypoints.extend(gate_pts);
+    let waypoints = vec![well, castle.gatehouse.center(), gate_pts[0]];
     let mut roads = paint_roads(&mut occ, &grid, &waypoints);
+    if capital {
+        let inner_gate = wall_gate(inner_town, gate);
+        roads.extend(paint_roads(&mut occ, &grid, &[well, inner_gate]));
+    }
     let mut border_roads = HashMap::new();
     paint_outbound_roads(
         &mut occ,
@@ -660,13 +689,17 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &mut roads,
     );
 
-    let mut lots = place_lots(&mut occ, &grid, town_rect, market, &mut rng, seed, palette);
-    paint_street_infill(
-        &mut occ, &grid, &mut lots, seed, town_rect, market, palette, &mut rng,
+    let mut lots = place_lots(
+        &mut occ, &grid, inner_town, market, &mut rng, seed, palette, false,
     );
-    paint_civic_square(&mut occ, &grid, &mut lots, seed, market, town_rect, palette);
+    paint_street_infill(
+        &mut occ, &grid, &mut lots, seed, inner_town, market, palette, &mut rng, false,
+    );
+    paint_civic_square(
+        &mut occ, &grid, &mut lots, seed, market, inner_town, palette,
+    );
     paint_hedges_and_gardens(&mut occ, town_rect);
-    place_farms(&mut occ, &grid, town_rect, castle_rect, &mut rng);
+    place_farms(&mut occ, &grid, inner_town, castle_rect, &mut rng);
     let mut scenes = place_scenes(
         &mut occ,
         &grid,
@@ -678,6 +711,46 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &mut rng,
         palette,
     );
+    if capital {
+        let mut extra_rng = TownRng::salted(seed, 21, origin.cell_z as u64);
+        place_lots_in(
+            &mut occ,
+            &grid,
+            town_rect,
+            market,
+            &mut extra_rng,
+            seed,
+            palette,
+            &mut lots,
+            110,
+        );
+        paint_street_infill(
+            &mut occ,
+            &grid,
+            &mut lots,
+            seed,
+            town_rect,
+            market,
+            palette,
+            &mut extra_rng,
+            true,
+        );
+        place_farms(&mut occ, &grid, town_rect, castle_rect, &mut extra_rng);
+        paint_capital_districts(
+            &mut occ,
+            &grid,
+            &mut lots,
+            seed,
+            inner_town,
+            town_rect,
+            market,
+            castle_rect,
+            gate,
+            palette,
+            &mut extra_rng,
+            &mut scenes,
+        );
+    }
     scenes.push(Scene {
         kind: SceneKind::Plaza,
         rect: market,
@@ -693,6 +766,17 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &mut rng,
         &mut scenes,
     );
+    if capital {
+        paint_winding_lanes(
+            &mut occ,
+            &grid,
+            inner_town,
+            town_rect,
+            castle_rect,
+            &mut TownRng::salted(seed, 21, 3),
+            &mut roads,
+        );
+    }
     thicken_water_bridges(&mut occ, &grid);
     paint_scene_yards(&mut occ, &grid, &scenes);
     crate::scenes::paint_tree_keepout(&mut occ, &grid, &lots, market, town_rect);
@@ -785,6 +869,90 @@ fn driest_town(grid: &HeightGrid, castle: Rect, dir: Dir, w: i32, d: i32) -> Rec
         }
     }
     shrink_to_dry(grid, best)
+}
+
+/// Expand the civic town downhill and sideways into a walled lower city.
+/// Does not grow toward the castle, so the outer ring can attach to the
+/// same uphill flank without a wall between keep and market.
+fn grow_lower_city(grid: &HeightGrid, town: Rect, castle: Rect, dir: Dir) -> Rect {
+    let grown = match dir {
+        Dir::South => Rect::new(
+            town.min_x - 12,
+            town.min_z,
+            town.max_x + 12,
+            town.max_z + 56,
+        ),
+        Dir::North => Rect::new(
+            town.min_x - 12,
+            town.min_z - 56,
+            town.max_x + 12,
+            town.max_z,
+        ),
+        Dir::East => Rect::new(
+            town.min_x,
+            town.min_z - 12,
+            town.max_x + 56,
+            town.max_z + 12,
+        ),
+        Dir::West => Rect::new(
+            town.min_x - 56,
+            town.min_z - 12,
+            town.max_x,
+            town.max_z + 12,
+        ),
+    };
+    let grown = clip_off_castle(grown, castle.inflate(4), dir);
+    let grown = clip_to_grid(grid, grown);
+    // Leave a west corridor so island villages and west harbours stay outside town.
+    let grown = if grown.min_x < town.min_x - 12 {
+        let shift = (town.min_x - 12) - grown.min_x;
+        Rect::new(
+            town.min_x - 12,
+            grown.min_z,
+            grown.max_x + shift,
+            grown.max_z,
+        )
+    } else {
+        grown
+    };
+    let shrunk = shrink_to_dry(grid, grown);
+    if shrunk.width() > town.width() + 16 && shrunk.depth() > town.depth() + 12 {
+        shrunk
+    } else {
+        grown
+    }
+}
+
+fn clip_off_castle(town: Rect, castle: Rect, dir: Dir) -> Rect {
+    if !town.intersects(castle) {
+        return town;
+    }
+    match dir {
+        Dir::South => Rect::new(
+            town.min_x,
+            castle.max_z.max(town.min_z),
+            town.max_x,
+            town.max_z,
+        ),
+        Dir::North => Rect::new(
+            town.min_x,
+            town.min_z,
+            town.max_x,
+            castle.min_z.min(town.max_z),
+        ),
+        Dir::East => Rect::new(
+            castle.max_x.max(town.min_x),
+            town.min_z,
+            town.max_x,
+            town.max_z,
+        ),
+        Dir::West => Rect::new(
+            town.min_x,
+            town.min_z,
+            castle.min_x.min(town.max_x),
+            town.max_z,
+        ),
+    }
 }
 
 fn shrink_to_dry(grid: &HeightGrid, rect: Rect) -> Rect {
@@ -1367,14 +1535,29 @@ fn paint_town_wall(
 }
 
 fn town_gates(town: Rect, castle_gate: (i32, i32), dir: Dir) -> Vec<(i32, i32)> {
+    vec![wall_gate(town, dir), castle_gate]
+}
+
+fn wall_gate(town: Rect, dir: Dir) -> (i32, i32) {
     let (cx, cz) = town.center();
-    let outer = match dir {
+    match dir {
         Dir::South => (cx, town.max_z + 2),
         Dir::North => (cx, town.min_z - 2),
         Dir::East => (town.max_x + 2, cz),
         Dir::West => (town.min_x - 2, cz),
-    };
-    vec![outer, castle_gate]
+    }
+}
+
+fn side_gates(town: Rect, dir: Dir) -> Vec<(i32, i32)> {
+    let (cx, cz) = town.center();
+    match dir {
+        Dir::South | Dir::North => {
+            vec![(town.min_x - 2, cz), (town.max_x + 2, cz)]
+        }
+        Dir::East | Dir::West => {
+            vec![(cx, town.min_z - 2), (cx, town.max_z + 2)]
+        }
+    }
 }
 
 fn paint_roads(occ: &mut Occupancy, grid: &HeightGrid, waypoints: &[(i32, i32)]) -> Vec<RoadInfo> {
@@ -1496,6 +1679,96 @@ fn paint_path(
             for dx in -1..=1 {
                 stamp_road_cell(occ, overlay, grid, x + dx, z + dz, CellKind::Road);
             }
+        }
+    }
+}
+
+fn paint_narrow_path(
+    occ: &mut Occupancy,
+    overlay: &mut HashMap<(i32, i32), CellKind>,
+    grid: &HeightGrid,
+    path: &[(i32, i32)],
+) {
+    for window in path.windows(2) {
+        let (x, z) = window[0];
+        let (nx, nz) = window[1];
+        let dh = grid.height(nx, nz) - grid.height(x, z);
+        let stair = if dh.abs() >= 2 {
+            if nx > x {
+                CellKind::RoadStairE
+            } else if nx < x {
+                CellKind::RoadStairW
+            } else if nz > z {
+                CellKind::RoadStairS
+            } else {
+                CellKind::RoadStairN
+            }
+        } else {
+            CellKind::Road
+        };
+        stamp_road_cell(occ, overlay, grid, x, z, stair);
+    }
+    if let Some(&(x, z)) = path.last() {
+        stamp_road_cell(occ, overlay, grid, x, z, CellKind::Road);
+    }
+}
+
+fn paint_winding_lanes(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    inner: Rect,
+    outer: Rect,
+    castle: Rect,
+    rng: &mut TownRng,
+    roads: &mut Vec<RoadInfo>,
+) {
+    let mut unused = HashMap::new();
+    let mut pts = Vec::new();
+    let keep = castle.inflate(6);
+    for _ in 0..14 {
+        let x = rng.gen_range(outer.min_x + 6, outer.max_x - 5);
+        let z = rng.gen_range(outer.min_z + 6, outer.max_z - 5);
+        if keep.contains(x, z) || inner.deflate(8).contains(x, z) {
+            continue;
+        }
+        if occ.kind(x, z).is_castle() {
+            continue;
+        }
+        if !grid.is_dry(x, z) {
+            continue;
+        }
+        pts.push((x, z));
+    }
+    for pair in pts.windows(2) {
+        let path = astar(grid, outer, pair[0], pair[1])
+            .unwrap_or_else(|| bresenham(pair[0].0, pair[0].1, pair[1].0, pair[1].1));
+        let path: Vec<_> = path
+            .into_iter()
+            .filter(|&(x, z)| {
+                outer.contains(x, z)
+                    && grid.is_dry(x, z)
+                    && !occ.kind(x, z).is_castle()
+                    && !matches!(
+                        occ.kind(x, z),
+                        CellKind::Harbor
+                            | CellKind::Ship
+                            | CellKind::Boat
+                            | CellKind::Dock
+                            | CellKind::Quay
+                            | CellKind::Breakwater
+                    )
+            })
+            .collect();
+        if path.len() < 2 {
+            continue;
+        }
+        if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
+            paint_narrow_path(occ, &mut unused, grid, &path);
+            roads.push(RoadInfo {
+                from: [first.0, first.1],
+                to: [last.0, last.1],
+                points: path.iter().map(|&(x, z)| [x, z]).collect(),
+            });
         }
     }
 }
@@ -1784,10 +2057,27 @@ fn place_lots(
     rng: &mut TownRng,
     seed: u64,
     palette: PaletteKind,
+    capital: bool,
 ) -> Vec<Lot> {
     let mut lots = Vec::new();
+    let cap = if capital { 110 } else { 64 };
+    place_lots_in(occ, grid, town, market, rng, seed, palette, &mut lots, cap);
+    lots
+}
+
+fn place_lots_in(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    town: Rect,
+    market: Rect,
+    rng: &mut TownRng,
+    seed: u64,
+    palette: PaletteKind,
+    lots: &mut Vec<Lot>,
+    cap: usize,
+) {
     let kinds = lot_kinds(palette);
-    let mut id = 1u16;
+    let mut id = lots.iter().map(|lot| lot.id).max().unwrap_or(0) + 1;
     for z in (town.min_z + 5..town.max_z - 5).step_by(7) {
         for x in (town.min_x + 5..town.max_x - 5).step_by(6) {
             let jx = x + rng.gen_range(-2, 3);
@@ -1811,6 +2101,9 @@ fn place_lots(
             if !grid.rect_is_dry(rect) {
                 continue;
             }
+            if rect_hits_keep_court(occ, rect) {
+                continue;
+            }
             let facing = facing_toward_road(occ, rect)
                 .unwrap_or(*rng.choose(&Dir::ALL).unwrap_or(&Dir::South));
             let lot = Lot::new(id, kind, rect, facing, seed ^ (u64::from(id) << 8));
@@ -1818,12 +2111,11 @@ fn place_lots(
             paint_eaves(occ, rect);
             lots.push(lot);
             id += 1;
-            if lots.len() >= 64 {
-                return lots;
+            if lots.len() >= cap {
+                return;
             }
         }
     }
-    lots
 }
 
 fn paint_street_infill(
@@ -1835,6 +2127,7 @@ fn paint_street_infill(
     market: Rect,
     palette: PaletteKind,
     rng: &mut TownRng,
+    capital: bool,
 ) {
     let kinds: &[BuildingKind] = match palette {
         PaletteKind::Sandstone => &[
@@ -1862,11 +2155,12 @@ fn paint_street_infill(
             BuildingKind::Cottage,
         ],
     };
+    let cap = if capital { 44 } else { 28 };
     let mut extra = 0;
     let mut z = town.min_z + 4;
-    while z <= town.max_z - 4 && extra < 28 {
+    while z <= town.max_z - 4 && extra < cap {
         let mut x = town.min_x + 4;
-        while x <= town.max_x - 4 && extra < 28 {
+        while x <= town.max_x - 4 && extra < cap {
             if !matches!(
                 occ.kind(x, z),
                 CellKind::Road
@@ -1978,6 +2272,254 @@ fn paint_eaves(occ: &mut Occupancy, rect: Rect) {
                 occ.set(x, z, CellKind::Eave, false);
             }
         }
+    }
+}
+
+fn rect_hits_keep_court(occ: &Occupancy, rect: Rect) -> bool {
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            if occ.kind(x, z).is_castle() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn crafts_row(inner: Rect, outer: Rect, gate: Dir) -> Rect {
+    match gate {
+        Dir::South => Rect::new(
+            inner.min_x + 4,
+            inner.max_z - 24,
+            inner.max_x - 4,
+            outer.max_z - 6,
+        ),
+        Dir::North => Rect::new(
+            inner.min_x + 4,
+            outer.min_z + 6,
+            inner.max_x - 4,
+            inner.min_z + 24,
+        ),
+        Dir::East => Rect::new(
+            inner.max_x - 24,
+            inner.min_z + 4,
+            outer.max_x - 6,
+            inner.max_z - 4,
+        ),
+        Dir::West => Rect::new(
+            outer.min_x + 6,
+            inner.min_z + 4,
+            inner.min_x + 24,
+            inner.max_z - 4,
+        ),
+    }
+}
+
+fn uphill_band(inner: Rect, gate: Dir) -> Rect {
+    match gate {
+        Dir::South => Rect::new(
+            inner.min_x + 4,
+            inner.min_z + 2,
+            inner.max_x - 4,
+            inner.min_z + inner.depth() / 3,
+        ),
+        Dir::North => Rect::new(
+            inner.min_x + 4,
+            inner.max_z - inner.depth() / 3,
+            inner.max_x - 4,
+            inner.max_z - 2,
+        ),
+        Dir::East => Rect::new(
+            inner.min_x + 2,
+            inner.min_z + 4,
+            inner.min_x + inner.width() / 3,
+            inner.max_z - 4,
+        ),
+        Dir::West => Rect::new(
+            inner.max_x - inner.width() / 3,
+            inner.min_z + 4,
+            inner.max_x - 2,
+            inner.max_z - 4,
+        ),
+    }
+}
+
+fn downhill_band(outer: Rect, gate: Dir, depth: i32) -> Rect {
+    match gate {
+        Dir::South => Rect::new(
+            outer.min_x + 6,
+            outer.max_z - depth,
+            outer.max_x - 6,
+            outer.max_z - 4,
+        ),
+        Dir::North => Rect::new(
+            outer.min_x + 6,
+            outer.min_z + 4,
+            outer.max_x - 6,
+            outer.min_z + depth,
+        ),
+        Dir::East => Rect::new(
+            outer.max_x - depth,
+            outer.min_z + 6,
+            outer.max_x - 4,
+            outer.max_z - 6,
+        ),
+        Dir::West => Rect::new(
+            outer.min_x + 4,
+            outer.min_z + 6,
+            outer.min_x + depth,
+            outer.max_z - 6,
+        ),
+    }
+}
+
+fn pack_district(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    rect: Rect,
+    kinds: &[BuildingKind],
+    rng: &mut TownRng,
+    cap: usize,
+) {
+    if rect.width() < 8 || rect.depth() < 8 {
+        return;
+    }
+    let mut placed = 0;
+    let mut z = rect.min_z + 2;
+    while z <= rect.max_z - 2 && placed < cap {
+        let mut x = rect.min_x + 2;
+        while x <= rect.max_x - 2 && placed < cap {
+            let Some(&kind) = rng.choose(kinds) else {
+                x += 6;
+                continue;
+            };
+            let (w, d) = kind.size();
+            let lot_rect = Rect::new(x, z, x + w - 1, z + d - 1);
+            x += w.max(6);
+            if !rect.contains(lot_rect.max_x, lot_rect.max_z) {
+                continue;
+            }
+            if rect_hits_keep_court(occ, lot_rect)
+                || matches!(occ.kind(lot_rect.min_x, lot_rect.min_z), CellKind::WindSail)
+            {
+                continue;
+            }
+            let facing = facing_toward_road(occ, lot_rect).unwrap_or(Dir::South);
+            if try_lot(occ, grid, lots, seed, kind, lot_rect, facing).is_some() {
+                placed += 1;
+            }
+        }
+        z += 8;
+    }
+}
+
+fn paint_noble_gardens(occ: &mut Occupancy, rect: Rect) {
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            if occ.kind(x, z) != CellKind::Empty {
+                continue;
+            }
+            let mix = (x.wrapping_mul(7) + z.wrapping_mul(13)).rem_euclid(5);
+            if mix == 0 {
+                occ.set(x, z, CellKind::Hedge, false);
+            } else {
+                occ.set(x, z, CellKind::Green, false);
+            }
+        }
+    }
+}
+
+fn paint_capital_districts(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    inner: Rect,
+    outer: Rect,
+    market: Rect,
+    castle: Rect,
+    gate: Dir,
+    palette: PaletteKind,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let market_q = Rect::new(
+        market.min_x - 8,
+        market.min_z - 8,
+        market.max_x + 8,
+        market.max_z + 8,
+    );
+    scenes.push(Scene {
+        kind: SceneKind::MarketQuarter,
+        rect: market_q,
+    });
+
+    let crafts = crafts_row(inner, outer, gate);
+    let crafts_kinds: &[BuildingKind] = match palette {
+        PaletteKind::Sandstone => &[
+            BuildingKind::Blacksmith,
+            BuildingKind::Barn,
+            BuildingKind::Cottage,
+            BuildingKind::Townhouse,
+        ],
+        _ => &[
+            BuildingKind::Blacksmith,
+            BuildingKind::Blacksmith,
+            BuildingKind::Barn,
+            BuildingKind::Cottage,
+            BuildingKind::Timber,
+        ],
+    };
+    pack_district(occ, grid, lots, seed, crafts, crafts_kinds, rng, 10);
+    scenes.push(Scene {
+        kind: SceneKind::CraftsmenRow,
+        rect: crafts,
+    });
+
+    let mut noble = uphill_band(inner, gate);
+    if noble.intersects(castle) {
+        noble = clip_off_castle(noble, castle.inflate(2), gate);
+    }
+    let noble_kinds: &[BuildingKind] = match palette {
+        PaletteKind::Sandstone => &[BuildingKind::Townhouse, BuildingKind::Townhouse],
+        _ => &[
+            BuildingKind::Townhouse,
+            BuildingKind::Townhouse,
+            BuildingKind::Timber,
+        ],
+    };
+    pack_district(occ, grid, lots, seed, noble, noble_kinds, rng, 8);
+    paint_noble_gardens(occ, noble);
+    if noble.width() >= 10 && noble.depth() >= 8 {
+        scenes.push(Scene {
+            kind: SceneKind::NobleQuarter,
+            rect: noble,
+        });
+    }
+
+    let docks = downhill_band(outer, gate, 36);
+    let dock_kinds: &[BuildingKind] = match palette {
+        PaletteKind::Sandstone => &[
+            BuildingKind::Tavern,
+            BuildingKind::Barn,
+            BuildingKind::Cottage,
+            BuildingKind::Townhouse,
+        ],
+        _ => &[
+            BuildingKind::Tavern,
+            BuildingKind::Barn,
+            BuildingKind::Cottage,
+            BuildingKind::Timber,
+        ],
+    };
+    pack_district(occ, grid, lots, seed, docks, dock_kinds, rng, 8);
+    if docks.width() >= 10 && docks.depth() >= 8 {
+        scenes.push(Scene {
+            kind: SceneKind::DocksQuarter,
+            rect: docks,
+        });
     }
 }
 
@@ -2303,7 +2845,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 11);
+        assert_eq!(PLAN_CACHE_VERSION, 12);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -2341,8 +2883,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 11;
-    const PLAN_LAYOUT_HASH: u64 = 0xef54_6263_fe07_4442;
+    const PLAN_LAYOUT_VERSION: u32 = 12;
+    const PLAN_LAYOUT_HASH: u64 = 0x5ad9_6c7a_d122_81e8;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

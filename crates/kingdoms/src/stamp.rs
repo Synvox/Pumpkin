@@ -817,6 +817,8 @@ fn place_pasture(
         }
     } else if (x + z) % 13 == 0 {
         sink.put(x, ground + 1, z, Block::HAY_BLOCK.default_state);
+    } else if (x.wrapping_mul(3) + z).rem_euclid(17) == 0 {
+        sink.put(x, ground + 1, z, Block::WHITE_WOOL.default_state);
     }
 }
 
@@ -3664,6 +3666,13 @@ fn place_green(
     sink.put(x, ground, z, palette.grass);
     terrace_edge(sink, plan, x, ground, z, palette);
     clear_above(sink, x, ground + 1, ground + 4, z);
+    if plan
+        .scene_at(x, z)
+        .is_some_and(|scene| scene.kind == crate::scenes::SceneKind::LumberCamp)
+    {
+        place_lumber_yard(sink, x, ground, z, palette);
+        return;
+    }
     if near_extractive(plan, x, z) || in_mill_disc(plan, x, z) || plan.strips_trees(x, z) {
         return;
     }
@@ -3690,6 +3699,22 @@ fn place_green(
     }
     if palette.kind == PaletteKind::Spruce && mix % 5 == 0 {
         sink.put(x, ground + 1, z, Block::SNOW.default_state);
+    }
+}
+
+fn place_lumber_yard(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+    let mix = (x.wrapping_mul(13) + z.wrapping_mul(7)).unsigned_abs();
+    match mix % 11 {
+        0 | 1 => {
+            sink.put(x, ground + 1, z, palette.log);
+            sink.put(x, ground + 2, z, palette.log);
+            if mix % 2 == 0 {
+                sink.put(x, ground + 3, z, palette.log);
+            }
+        }
+        2 => sink.put(x, ground + 1, z, Block::CRAFTING_TABLE.default_state),
+        3 => sink.put(x, ground + 1, z, Block::OAK_FENCE.default_state),
+        _ => {}
     }
 }
 

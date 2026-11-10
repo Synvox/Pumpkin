@@ -176,7 +176,12 @@ fn write_scene_renders(
             | SceneKind::Vineyard
             | SceneKind::Gorge
             | SceneKind::StaveChurch
-            | SceneKind::Caravanserai => 6,
+            | SceneKind::Caravanserai
+            | SceneKind::MarketQuarter
+            | SceneKind::CraftsmenRow
+            | SceneKind::NobleQuarter
+            | SceneKind::DocksQuarter
+            | SceneKind::LumberCamp => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
