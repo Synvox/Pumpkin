@@ -211,6 +211,12 @@ pub fn paint_harbour_town(
     let mut harbors = Vec::new();
     for z in search.min_z..=search.max_z {
         for x in search.min_x..=search.max_x {
+            if scenes
+                .iter()
+                .any(|scene| scene.kind == SceneKind::Gorge && scene.rect.contains(x, z))
+            {
+                continue;
+            }
             match occ.kind(x, z) {
                 CellKind::Dock => docks.push((x, z)),
                 CellKind::Harbor => harbors.push((x, z)),
@@ -1929,14 +1935,82 @@ fn place_gorge_town(
             }
         }
     }
-    let along_x = wet_span(grid, yard) == Dir::East;
-    place_gorge_houses(occ, grid, yard, lots, seed, along_x);
-    paint_gorge_bridge_gate(occ, grid, yard, along_x);
-    paint_gorge_terraces(occ, grid, yard, along_x);
+    let river_ew = wet_span(grid, yard) == Dir::East;
+    paint_gorge_ravine(occ, grid, yard, river_ew);
+    place_gorge_houses(occ, grid, yard, lots, seed, river_ew);
+    paint_gorge_bridge_gate(occ, grid, yard, river_ew);
+    paint_gorge_eaves(occ, grid, yard, lots, river_ew);
+    paint_gorge_terraces(occ, grid, yard, river_ew);
     scenes.push(Scene {
         kind: SceneKind::Gorge,
         rect: yard.inflate(SCENE_YARD_MARGIN),
     });
+}
+
+fn gorge_ravine_axis(grid: &HeightGrid, yard: Rect, river_ew: bool) -> i32 {
+    let mut best = i32::MAX;
+    let mut axis = if river_ew {
+        yard.center().1
+    } else {
+        yard.center().0
+    };
+    if river_ew {
+        for z in yard.min_z..=yard.max_z {
+            let mut sum = 0;
+            let mut n = 0;
+            for x in yard.min_x..=yard.max_x {
+                sum += grid.height(x, z);
+                n += 1;
+            }
+            if n > 0 && sum / n < best {
+                best = sum / n;
+                axis = z;
+            }
+        }
+    } else {
+        for x in yard.min_x..=yard.max_x {
+            let mut sum = 0;
+            let mut n = 0;
+            for z in yard.min_z..=yard.max_z {
+                sum += grid.height(x, z);
+                n += 1;
+            }
+            if n > 0 && sum / n < best {
+                best = sum / n;
+                axis = x;
+            }
+        }
+    }
+    axis
+}
+
+fn paint_gorge_ravine(occ: &mut Occupancy, grid: &HeightGrid, yard: Rect, river_ew: bool) {
+    let axis = gorge_ravine_axis(grid, yard, river_ew);
+    for z in yard.min_z..=yard.max_z {
+        for x in yard.min_x..=yard.max_x {
+            let on_channel = if river_ew {
+                (z - axis).abs() <= 2
+            } else {
+                (x - axis).abs() <= 2
+            };
+            let wet = !grid.is_dry(x, z);
+            if !(on_channel || wet) {
+                continue;
+            }
+            if matches!(
+                occ.kind(x, z),
+                CellKind::Green
+                    | CellKind::Empty
+                    | CellKind::Farm
+                    | CellKind::FarmEdge
+                    | CellKind::Hedge
+                    | CellKind::Orchard
+                    | CellKind::Pasture
+            ) {
+                occ.set(x, z, CellKind::Harbor, true);
+            }
+        }
+    }
 }
 
 fn find_gorge_site(
@@ -2005,91 +2079,130 @@ fn find_gorge_site(
     best
 }
 
-fn paint_gorge_bridge_gate(occ: &mut Occupancy, grid: &HeightGrid, yard: Rect, along_x: bool) {
+fn paint_gorge_bridge_gate(occ: &mut Occupancy, grid: &HeightGrid, yard: Rect, river_ew: bool) {
     let (cx, cz) = yard.center();
-    if along_x {
-        for x in yard.min_x + 4..=yard.max_x - 4 {
-            let wet = !grid.is_dry(x, cz) || !grid.is_dry(x, cz - 1);
-            occ.set(
-                x,
-                cz,
-                if wet {
-                    CellKind::Bridge
-                } else {
-                    CellKind::Road
-                },
-                true,
-            );
-            occ.set(
-                x,
-                cz - 1,
-                if wet {
-                    CellKind::Bridge
-                } else {
-                    CellKind::Road
-                },
-                true,
-            );
+    let axis = gorge_ravine_axis(grid, yard, river_ew);
+    if river_ew {
+        for z in yard.min_z..=yard.max_z {
+            for dx in -1..=1 {
+                let x = cx + dx;
+                if !yard.contains(x, z) {
+                    continue;
+                }
+                let kind = occ.kind(x, z);
+                if matches!(
+                    kind,
+                    CellKind::Building
+                        | CellKind::TownWall
+                        | CellKind::TownTower
+                        | CellKind::TownGate
+                ) {
+                    continue;
+                }
+                let wet = !grid.is_dry(x, z) || kind == CellKind::Harbor;
+                occ.set(
+                    x,
+                    z,
+                    if wet {
+                        CellKind::Bridge
+                    } else {
+                        CellKind::Road
+                    },
+                    true,
+                );
+            }
         }
-        for (dx, dz) in [(-8, -3), (8, -3), (-8, 2), (8, 2)] {
-            let tx = (cx + dx).clamp(yard.min_x, yard.max_x - 2);
-            let tz = (cz + dz).clamp(yard.min_z, yard.max_z - 2);
-            occ.fill(Rect::new(tx, tz, tx + 2, tz + 2), CellKind::TownTower, true);
+        for z in yard.min_z..=yard.max_z {
+            for x in yard.min_x..=yard.max_x {
+                if (x - cx).abs() <= 2
+                    && matches!(occ.kind(x, z), CellKind::Harbor | CellKind::Road)
+                    && ((x - cx).abs() <= 1 || occ.kind(x, z) == CellKind::Harbor)
+                {
+                    let near_drop = occ.kind(x, z) == CellKind::Harbor
+                        || !grid.is_dry(x, z)
+                        || Dir::ALL.iter().any(|dir| {
+                            matches!(
+                                occ.kind(x + dir.dx(), z + dir.dz()),
+                                CellKind::Harbor | CellKind::Bridge
+                            )
+                        });
+                    if near_drop {
+                        occ.set(x, z, CellKind::Bridge, true);
+                    }
+                }
+            }
         }
-        for x in [cx - 6, cx + 6] {
-            occ.set(
-                x.clamp(yard.min_x, yard.max_x),
-                cz,
-                CellKind::TownGate,
-                true,
-            );
-            occ.set(
-                x.clamp(yard.min_x, yard.max_x),
-                cz - 1,
-                CellKind::TownGate,
+        for side in [-1, 1] {
+            let gz = (axis + side * 8).clamp(yard.min_z + 1, yard.max_z - 1);
+            for dx in -1..=1 {
+                occ.set(cx + dx, gz, CellKind::TownGate, true);
+            }
+            let tx = (cx + 3).clamp(yard.min_x, yard.max_x - 2);
+            occ.fill(
+                Rect::new(tx, gz - 1, tx + 2, gz + 1),
+                CellKind::TownTower,
                 true,
             );
         }
     } else {
-        for z in yard.min_z + 4..=yard.max_z - 4 {
-            let wet = !grid.is_dry(cx, z) || !grid.is_dry(cx - 1, z);
-            occ.set(
-                cx,
-                z,
-                if wet {
-                    CellKind::Bridge
-                } else {
-                    CellKind::Road
-                },
-                true,
-            );
-            occ.set(
-                cx - 1,
-                z,
-                if wet {
-                    CellKind::Bridge
-                } else {
-                    CellKind::Road
-                },
-                true,
-            );
+        for x in yard.min_x..=yard.max_x {
+            for dz in -1..=1 {
+                let z = cz + dz;
+                if !yard.contains(x, z) {
+                    continue;
+                }
+                let kind = occ.kind(x, z);
+                if matches!(
+                    kind,
+                    CellKind::Building
+                        | CellKind::TownWall
+                        | CellKind::TownTower
+                        | CellKind::TownGate
+                ) {
+                    continue;
+                }
+                let wet = !grid.is_dry(x, z) || kind == CellKind::Harbor;
+                occ.set(
+                    x,
+                    z,
+                    if wet {
+                        CellKind::Bridge
+                    } else {
+                        CellKind::Road
+                    },
+                    true,
+                );
+            }
         }
-        for (dx, dz) in [(-3, -8), (-3, 8), (2, -8), (2, 8)] {
-            let tx = (cx + dx).clamp(yard.min_x, yard.max_x - 2);
-            let tz = (cz + dz).clamp(yard.min_z, yard.max_z - 2);
-            occ.fill(Rect::new(tx, tz, tx + 2, tz + 2), CellKind::TownTower, true);
+        for z in yard.min_z..=yard.max_z {
+            for x in yard.min_x..=yard.max_x {
+                if (z - cz).abs() <= 2
+                    && matches!(occ.kind(x, z), CellKind::Harbor | CellKind::Road)
+                    && ((z - cz).abs() <= 1 || occ.kind(x, z) == CellKind::Harbor)
+                {
+                    let near_drop = occ.kind(x, z) == CellKind::Harbor
+                        || !grid.is_dry(x, z)
+                        || Dir::ALL.iter().any(|dir| {
+                            matches!(
+                                occ.kind(x + dir.dx(), z + dir.dz()),
+                                CellKind::Harbor | CellKind::Bridge
+                            )
+                        });
+                    if near_drop {
+                        occ.set(x, z, CellKind::Bridge, true);
+                    }
+                }
+            }
         }
-        for z in [cz - 6, cz + 6] {
-            occ.set(
-                cx,
-                z.clamp(yard.min_z, yard.max_z),
-                CellKind::TownGate,
-                true,
-            );
-            occ.set(
-                cx - 1,
-                z.clamp(yard.min_z, yard.max_z),
-                CellKind::TownGate,
+        for side in [-1, 1] {
+            let gx = (axis + side * 8).clamp(yard.min_x + 1, yard.max_x - 1);
+            for dz in -1..=1 {
+                occ.set(gx, cz + dz, CellKind::TownGate, true);
+            }
+            let tz = (cz + 3).clamp(yard.min_z, yard.max_z - 2);
+            occ.fill(
+                Rect::new(gx - 1, tz, gx + 1, tz + 2),
+                CellKind::TownTower,
                 true,
             );
         }
@@ -2165,95 +2278,91 @@ fn place_gorge_houses(
     yard: Rect,
     lots: &mut Vec<Lot>,
     seed: u64,
-    along_x: bool,
+    river_ew: bool,
 ) {
-    let pads = if along_x {
-        [
-            Rect::new(
-                yard.min_x + 4,
-                yard.min_z + 3,
-                yard.min_x + 11,
-                yard.min_z + 9,
-            ),
-            Rect::new(
-                yard.min_x + 14,
-                yard.min_z + 9,
-                yard.min_x + 21,
-                yard.min_z + 15,
-            ),
-            Rect::new(
-                yard.max_x - 12,
-                yard.min_z + 3,
-                yard.max_x - 5,
-                yard.min_z + 9,
-            ),
-            Rect::new(
-                yard.min_x + 4,
-                yard.max_z - 9,
-                yard.min_x + 11,
-                yard.max_z - 3,
-            ),
-            Rect::new(
-                yard.min_x + 16,
-                yard.max_z - 15,
-                yard.min_x + 23,
-                yard.max_z - 9,
-            ),
-            Rect::new(
-                yard.max_x - 12,
-                yard.max_z - 9,
-                yard.max_x - 5,
-                yard.max_z - 3,
-            ),
-        ]
+    let axis = gorge_ravine_axis(grid, yard, river_ew);
+    let (cx, cz) = yard.center();
+    let mut placed = 0;
+    let mut z = yard.min_z + 1;
+    while z + 7 <= yard.max_z && placed < 6 {
+        let mut x = yard.min_x + 1;
+        while x + 8 <= yard.max_x && placed < 6 {
+            if river_ew && (x + 4 - cx).abs() < 5 {
+                x += 3;
+                continue;
+            }
+            if !river_ew && (z + 3 - cz).abs() < 5 {
+                x += 3;
+                continue;
+            }
+            let pad = Rect::new(x, z, x + 7, z + 6);
+            let facing = if river_ew {
+                if z + 3 <= axis {
+                    Dir::South
+                } else {
+                    Dir::North
+                }
+            } else if x + 4 <= axis {
+                Dir::East
+            } else {
+                Dir::West
+            };
+            let kind = if placed % 2 == 0 {
+                BuildingKind::Townhouse
+            } else {
+                BuildingKind::Cottage
+            };
+            if force_lot(occ, grid, lots, seed, kind, pad, facing).is_some() {
+                placed += 1;
+                x += 9;
+                continue;
+            }
+            x += 3;
+        }
+        z += 4;
+    }
+}
+
+fn paint_gorge_eaves(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    yard: Rect,
+    lots: &[Lot],
+    river_ew: bool,
+) {
+    let toward = if river_ew {
+        [Dir::South, Dir::North]
     } else {
-        [
-            Rect::new(
-                yard.min_x + 3,
-                yard.min_z + 4,
-                yard.min_x + 9,
-                yard.min_z + 11,
-            ),
-            Rect::new(
-                yard.min_x + 9,
-                yard.min_z + 14,
-                yard.min_x + 15,
-                yard.min_z + 21,
-            ),
-            Rect::new(
-                yard.min_x + 3,
-                yard.max_z - 12,
-                yard.min_x + 9,
-                yard.max_z - 5,
-            ),
-            Rect::new(
-                yard.max_x - 9,
-                yard.min_z + 4,
-                yard.max_x - 3,
-                yard.min_z + 11,
-            ),
-            Rect::new(
-                yard.max_x - 15,
-                yard.min_z + 16,
-                yard.max_x - 9,
-                yard.min_z + 23,
-            ),
-            Rect::new(
-                yard.max_x - 9,
-                yard.max_z - 12,
-                yard.max_x - 3,
-                yard.max_z - 5,
-            ),
-        ]
+        [Dir::East, Dir::West]
     };
-    let facing = if along_x { Dir::South } else { Dir::East };
-    for (i, pad) in pads.into_iter().enumerate() {
-        let kind = if i % 3 == 1 {
-            BuildingKind::Townhouse
-        } else {
-            BuildingKind::Cottage
-        };
-        let _ = force_lot(occ, grid, lots, seed, kind, pad, facing);
+    for lot in lots {
+        if !yard.intersects(lot.rect) {
+            continue;
+        }
+        if !matches!(lot.kind, BuildingKind::Cottage | BuildingKind::Townhouse) {
+            continue;
+        }
+        for dir in toward {
+            for z in lot.rect.min_z..=lot.rect.max_z {
+                for x in lot.rect.min_x..=lot.rect.max_x {
+                    if !lot.rect.on_edge(x, z) {
+                        continue;
+                    }
+                    let nx = x + dir.dx();
+                    let nz = z + dir.dz();
+                    if !yard.contains(nx, nz) {
+                        continue;
+                    }
+                    if matches!(
+                        occ.kind(nx, nz),
+                        CellKind::Green | CellKind::Empty | CellKind::Eave
+                    ) && grid.is_dry(nx, nz)
+                    {
+                        occ.set(nx, nz, CellKind::Eave, true);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2288,16 +2397,24 @@ fn place_outskirts(
     let mut orchards = 0;
     let mut shrines = 0;
     let mut farms = 0;
+    let mut pastures = 0;
     let mut cottages = 0;
     for &(x, z) in &samples {
         if shrines < 10 && place_wayside_shrine(occ, grid, x, z) {
             shrines += 1;
         }
         paint_roadside_hedge_and_wall(occ, grid, x, z);
-        if farms < 16 && place_roadside_farm(occ, grid, town, keep_out, x, z) {
+        if farms < 22 && place_roadside_farm(occ, grid, town, keep_out, x, z) {
             farms += 1;
         }
-        if orchards < 8 && place_roadside_orchard(occ, grid, search, town, keep_out, x, z, scenes) {
+        if pastures < 10 && place_roadside_pasture(occ, grid, town, keep_out, x, z, scenes) {
+            pastures += 1;
+        }
+        if orchards < 10 && place_roadside_orchard(occ, grid, search, town, keep_out, x, z, scenes)
+        {
+            orchards += 1;
+        }
+        if orchards < 16 && place_roadside_copse(occ, grid, town, keep_out, x, z, scenes) {
             orchards += 1;
         }
         if cottages < 8
@@ -2332,6 +2449,8 @@ fn place_outskirts(
             mills += 1;
         }
     }
+    densify_empty_fields(occ, grid, search, town, keep_out, scenes);
+    place_island_village(occ, grid, search, town, keep_out, lots, seed, scenes);
 }
 
 fn is_road_cell(kind: CellKind) -> bool {
@@ -2436,6 +2555,288 @@ fn place_roadside_farm(
         return true;
     }
     false
+}
+
+fn place_roadside_pasture(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    town: Rect,
+    keep_out: Rect,
+    x: i32,
+    z: i32,
+    scenes: &mut Vec<Scene>,
+) -> bool {
+    for dir in Dir::ALL {
+        let px = x + dir.dx() * 10;
+        let pz = z + dir.dz() * 8;
+        let rect = Rect::new(px - 6, pz - 5, px + 6, pz + 5);
+        if town.inflate(4).intersects(rect) || keep_out.intersects(rect) {
+            continue;
+        }
+        if !occ.bounds.contains(rect.min_x, rect.min_z)
+            || !occ.bounds.contains(rect.max_x, rect.max_z)
+        {
+            continue;
+        }
+        if !grid.rect_is_dry(rect) || !occ.is_free(rect) {
+            continue;
+        }
+        let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+        if hi - lo > 6 {
+            continue;
+        }
+        occ.fill(rect, CellKind::FarmEdge, false);
+        occ.fill(rect.deflate(1), CellKind::Pasture, true);
+        scenes.push(Scene {
+            kind: SceneKind::Pasture,
+            rect,
+        });
+        return true;
+    }
+    false
+}
+
+fn place_roadside_copse(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    town: Rect,
+    keep_out: Rect,
+    x: i32,
+    z: i32,
+    scenes: &mut Vec<Scene>,
+) -> bool {
+    for dir in Dir::ALL {
+        let ox = x + dir.dx() * 7;
+        let oz = z + dir.dz() * 6;
+        let rect = Rect::new(ox - 3, oz - 3, ox + 3, oz + 3);
+        if town.inflate(4).intersects(rect) || keep_out.intersects(rect) {
+            continue;
+        }
+        if !occ.bounds.contains(rect.min_x, rect.min_z)
+            || !occ.bounds.contains(rect.max_x, rect.max_z)
+        {
+            continue;
+        }
+        if !grid.rect_is_dry(rect) || !occ.is_free(rect) {
+            continue;
+        }
+        occ.fill(rect, CellKind::Orchard, true);
+        scenes.push(Scene {
+            kind: SceneKind::Orchard,
+            rect,
+        });
+        return true;
+    }
+    false
+}
+
+fn densify_empty_fields(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    scenes: &mut Vec<Scene>,
+) {
+    let mut farms = 0;
+    let mut pastures = 0;
+    let mut copses = 0;
+    let mut z = search.min_z + 8;
+    while z + 12 < search.max_z {
+        let mut x = search.min_x + 8;
+        while x + 14 < search.max_x {
+            let mix = (x + z).rem_euclid(9);
+            if town.inflate(8).contains(x, z) || keep_out.contains(x, z) {
+                x += 16;
+                continue;
+            }
+            if !grid.is_dry(x, z) || occ.kind(x, z) != CellKind::Empty {
+                x += 16;
+                continue;
+            }
+            if mix == 0 && farms < 14 {
+                let rect = Rect::new(x - 5, z - 4, x + 5, z + 4);
+                if occ.bounds.contains(rect.min_x, rect.min_z)
+                    && occ.bounds.contains(rect.max_x, rect.max_z)
+                    && grid.rect_is_dry(rect)
+                    && occ.is_free(rect)
+                    && !town.inflate(4).intersects(rect)
+                    && !keep_out.intersects(rect)
+                {
+                    occ.fill(rect, CellKind::FarmEdge, false);
+                    occ.fill(rect.deflate(1), CellKind::Farm, true);
+                    farms += 1;
+                }
+            } else if mix == 3 && pastures < 8 {
+                let rect = Rect::new(x - 6, z - 5, x + 6, z + 5);
+                if occ.bounds.contains(rect.min_x, rect.min_z)
+                    && occ.bounds.contains(rect.max_x, rect.max_z)
+                    && grid.rect_is_dry(rect)
+                    && occ.is_free(rect)
+                    && !town.inflate(4).intersects(rect)
+                    && !keep_out.intersects(rect)
+                {
+                    occ.fill(rect, CellKind::FarmEdge, false);
+                    occ.fill(rect.deflate(1), CellKind::Pasture, true);
+                    scenes.push(Scene {
+                        kind: SceneKind::Pasture,
+                        rect,
+                    });
+                    pastures += 1;
+                }
+            } else if mix == 6 && copses < 8 {
+                let rect = Rect::new(x - 3, z - 3, x + 3, z + 3);
+                if occ.bounds.contains(rect.min_x, rect.min_z)
+                    && occ.bounds.contains(rect.max_x, rect.max_z)
+                    && grid.rect_is_dry(rect)
+                    && occ.is_free(rect)
+                    && !town.inflate(4).intersects(rect)
+                    && !keep_out.intersects(rect)
+                {
+                    occ.fill(rect, CellKind::Orchard, true);
+                    scenes.push(Scene {
+                        kind: SceneKind::Orchard,
+                        rect,
+                    });
+                    copses += 1;
+                }
+            }
+            x += 16;
+        }
+        z += 14;
+    }
+}
+
+fn island_wet_sides(grid: &HeightGrid, rect: Rect) -> i32 {
+    let north = (rect.min_x..=rect.max_x).any(|x| !grid.is_dry(x, rect.min_z - 1));
+    let south = (rect.min_x..=rect.max_x).any(|x| !grid.is_dry(x, rect.max_z + 1));
+    let west = (rect.min_z..=rect.max_z).any(|z| !grid.is_dry(rect.min_x - 1, z));
+    let east = (rect.min_z..=rect.max_z).any(|z| !grid.is_dry(rect.max_x + 1, z));
+    i32::from(north) + i32::from(south) + i32::from(west) + i32::from(east)
+}
+
+fn place_island_village(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    scenes: &mut Vec<Scene>,
+) {
+    let w = 20;
+    let d = 16;
+    let mut best = None;
+    let mut best_score = i32::MIN;
+    let mut z = search.min_z + 6;
+    while z + d < search.max_z {
+        let mut x = search.min_x + 6;
+        while x + w < town.min_x.saturating_sub(4).max(search.min_x + w + 1) {
+            let rect = Rect::new(x, z, x + w - 1, z + d - 1);
+            x += 10;
+            if town.inflate(8).intersects(rect) || keep_out.intersects(rect) {
+                continue;
+            }
+            if scenes.iter().any(|scene| {
+                matches!(
+                    scene.kind,
+                    SceneKind::Harbour
+                        | SceneKind::Manor
+                        | SceneKind::Frontier
+                        | SceneKind::Gorge
+                        | SceneKind::Hamlet
+                ) && scene.rect.deflate(2).intersects(rect)
+            }) {
+                continue;
+            }
+            if !occ.bounds.contains(rect.min_x, rect.min_z)
+                || !occ.bounds.contains(rect.max_x, rect.max_z)
+            {
+                continue;
+            }
+            if !grid.rect_is_dry(rect) {
+                continue;
+            }
+            if !riverside_yard_free(occ, rect) {
+                continue;
+            }
+            let wet = island_wet_sides(grid, rect);
+            if wet < 2 {
+                continue;
+            }
+            let score = wet * 8
+                + (town.min_x - rect.max_x).min(40)
+                + (rect.min_x * 3 + rect.min_z).rem_euclid(5);
+            if score > best_score {
+                best_score = score;
+                best = Some(rect);
+            }
+        }
+        z += 8;
+    }
+    let Some(yard) = best else {
+        return;
+    };
+    for zz in yard.min_z..=yard.max_z {
+        for xx in yard.min_x..=yard.max_x {
+            if riverside_reclaim(occ.kind(xx, zz)) {
+                occ.set(xx, zz, CellKind::Green, true);
+            }
+        }
+    }
+    for zz in yard.min_z..=yard.max_z {
+        for xx in yard.min_x..=yard.max_x {
+            if yard.on_edge(xx, zz) {
+                occ.set(xx, zz, CellKind::TownWall, true);
+            }
+        }
+    }
+    let corners = [
+        (yard.min_x, yard.min_z),
+        (yard.max_x - 2, yard.min_z),
+        (yard.min_x, yard.max_z - 2),
+        (yard.max_x - 2, yard.max_z - 2),
+    ];
+    for (tx, tz) in corners {
+        occ.fill(Rect::new(tx, tz, tx + 2, tz + 2), CellKind::TownTower, true);
+    }
+    let gate_dir = manor_gate_dir(grid, yard);
+    paint_manor_gate(occ, yard, gate_dir);
+    let inner = yard.deflate(3);
+    let a = Rect::new(
+        inner.min_x + 1,
+        inner.min_z + 1,
+        inner.min_x + 8,
+        inner.min_z + 7,
+    );
+    let b = Rect::new(
+        inner.max_x - 8,
+        inner.max_z - 7,
+        inner.max_x - 1,
+        inner.max_z - 1,
+    );
+    let c = Rect::new(
+        inner.min_x + 1,
+        inner.max_z - 7,
+        inner.min_x + 8,
+        inner.max_z - 1,
+    );
+    let _ = force_lot(occ, grid, lots, seed, BuildingKind::Cottage, a, Dir::South);
+    let _ = force_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::Townhouse,
+        b,
+        Dir::North,
+    );
+    let _ = force_lot(occ, grid, lots, seed, BuildingKind::Cottage, c, Dir::East);
+    scenes.push(Scene {
+        kind: SceneKind::Hamlet,
+        rect: yard.inflate(SCENE_YARD_MARGIN),
+    });
 }
 
 fn place_roadside_orchard(
@@ -5935,7 +6336,15 @@ mod tests {
         assert!(stairs >= 4, "gorge stairs {stairs}");
         assert!(gates >= 1, "fortified bridge gate {gates}");
         assert!(towers >= 4, "bridge-gate towers {towers}");
-        assert!(bridge >= 4, "gorge bridge {bridge}");
+        let mut kinds_dbg = std::collections::BTreeMap::new();
+        for z in yard.min_z..=yard.max_z {
+            for x in yard.min_x..=yard.max_x {
+                *kinds_dbg
+                    .entry(format!("{:?}", gorge_plan.occ.kind(x, z)))
+                    .or_insert(0) += 1;
+            }
+        }
+        assert!(bridge >= 4, "gorge bridge {bridge} cells={kinds_dbg:?}");
         let houses = gorge_plan
             .lots
             .iter()
@@ -5945,6 +6354,136 @@ mod tests {
             })
             .count();
         assert!(houses >= 3, "stacked gorge houses {houses}");
+        let mut harbor = 0;
+        let mut eaves = 0;
+        for z in yard.min_z..=yard.max_z {
+            for x in yard.min_x..=yard.max_x {
+                match gorge_plan.occ.kind(x, z) {
+                    CellKind::Harbor => harbor += 1,
+                    CellKind::Eave => eaves += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(harbor >= 12, "gorge ravine {harbor}");
+        assert!(eaves >= 4, "jettied gorge eaves {eaves}");
+    }
+
+    #[test]
+    fn round18_fields_pastures_copses_bridges_and_island() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let oak = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let mut pasture = 0;
+        let mut orchard = 0;
+        let mut farm = 0;
+        for z in oak.occ.bounds.min_z..=oak.occ.bounds.max_z {
+            for x in oak.occ.bounds.min_x..=oak.occ.bounds.max_x {
+                match oak.occ.kind(x, z) {
+                    CellKind::Pasture => pasture += 1,
+                    CellKind::Orchard => orchard += 1,
+                    CellKind::Farm => farm += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(pasture >= 20, "fenced pastures {pasture}");
+        assert!(orchard >= 16, "woodland copses {orchard}");
+        assert!(farm >= 40, "hinterland fields {farm}");
+
+        let river = HeightGrid::synthetic_river(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+            origin.z + 140,
+        );
+        let river_plan = build_plan(11, origin, river, PaletteKind::Oak);
+        let mut wide = 0;
+        let mut bridge = 0;
+        for z in river_plan.occ.bounds.min_z..=river_plan.occ.bounds.max_z {
+            for x in river_plan.occ.bounds.min_x..=river_plan.occ.bounds.max_x {
+                if river_plan.occ.kind(x, z) != CellKind::Bridge {
+                    continue;
+                }
+                bridge += 1;
+                let along_x = river_plan.occ.kind(x - 1, z) == CellKind::Bridge
+                    || river_plan.occ.kind(x + 1, z) == CellKind::Bridge;
+                let width = if along_x {
+                    i32::from(river_plan.occ.kind(x, z - 1) == CellKind::Bridge)
+                        + i32::from(river_plan.occ.kind(x, z + 1) == CellKind::Bridge)
+                } else {
+                    i32::from(river_plan.occ.kind(x - 1, z) == CellKind::Bridge)
+                        + i32::from(river_plan.occ.kind(x + 1, z) == CellKind::Bridge)
+                };
+                if width >= 2 {
+                    wide += 1;
+                }
+            }
+        }
+        assert!(bridge >= 8, "river bridges {bridge}");
+        assert!(wide >= 8, "bridges should be 3+ wide {wide}/{bridge}");
+
+        let mut coast = HeightGrid::synthetic_coast(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            50,
+            origin.x - 40,
+        );
+        let island_x = origin.x - 120;
+        let island_z = origin.z;
+        for z in island_z - 16..=island_z + 16 {
+            for x in island_x - 16..=island_x + 16 {
+                let ix = (x - coast.min_x).div_euclid(coast.step);
+                let iz = (z - coast.min_z).div_euclid(coast.step);
+                if ix >= 0 && iz >= 0 && ix < coast.nx && iz < coast.nz {
+                    let i = (iz * coast.nx + ix) as usize;
+                    coast.heights[i] = 70;
+                }
+            }
+        }
+        let coast_plan = build_plan(1, origin, coast, PaletteKind::Oak);
+        let island = coast_plan.scenes.iter().any(|scene| {
+            scene.kind == SceneKind::Hamlet && scene.rect.max_x < coast_plan.town.min_x
+        });
+        let walled_west = coast_plan.scenes.iter().any(|scene| {
+            if scene.rect.max_x >= coast_plan.town.min_x {
+                return false;
+            }
+            let mut wall = 0;
+            for z in scene.rect.min_z..=scene.rect.max_z {
+                for x in scene.rect.min_x..=scene.rect.max_x {
+                    if matches!(
+                        coast_plan.occ.kind(x, z),
+                        CellKind::TownWall | CellKind::TownTower | CellKind::TownGate
+                    ) {
+                        wall += 1;
+                    }
+                }
+            }
+            wall >= 20
+        });
+        assert!(
+            island || walled_west,
+            "west island village should wall a dry patch west of town"
+        );
     }
 
     #[test]
