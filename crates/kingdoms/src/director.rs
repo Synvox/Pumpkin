@@ -2655,32 +2655,33 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             } else {
                 LodTier::Far
             };
-            if far_tier.should_tick(base.entity_id, tick) {
-                let dest = match faction {
-                    Faction::Pillager => {
-                        let dest = overlay_flag_dest(
-                            march_dest,
-                            faction,
-                            has_tag(base, TAG_BEARER),
-                            pos.x,
-                            pos.z,
-                            keep_rect,
-                            gatehouse_rect,
-                            &siege_gates,
-                            breached,
-                            capturing,
-                            keep_dest,
-                        );
-                        if dest.x == keep_dest.x && dest.z == keep_dest.z {
-                            plate_slot(base.entity_id, dest)
-                        } else {
-                            dest
-                        }
+            let dest = match faction {
+                Faction::Pillager => {
+                    let dest = overlay_flag_dest(
+                        march_dest,
+                        faction,
+                        has_tag(base, TAG_BEARER),
+                        pos.x,
+                        pos.z,
+                        keep_rect,
+                        gatehouse_rect,
+                        &siege_gates,
+                        breached,
+                        capturing,
+                        keep_dest,
+                    );
+                    if dest_is_plate(dest, keep_dest) {
+                        plate_slot(base.entity_id, dest)
+                    } else {
+                        dest
                     }
-                    _ => march_dest,
-                };
+                }
+                _ => march_dest,
+            };
+            let rush_plate = dest_is_plate(dest, keep_dest);
+            if rush_plate || far_tier.should_tick(base.entity_id, tick) {
                 let dist = (pos.x - f64::from(dest.x)).hypot(pos.z - f64::from(dest.z));
-                if amortizing || dist <= STUCK_STORM_RANGE {
+                if amortizing || dist <= STUCK_STORM_RANGE || rush_plate {
                     slide_direct(base, dest);
                 } else {
                     slide_along_field(base, town_id, dest);
@@ -2806,10 +2807,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             capturing,
             keep_dest,
         );
-        let dest = if matches!(faction, Faction::Pillager)
-            && dest.x == keep_dest.x
-            && dest.z == keep_dest.z
-        {
+        let dest = if matches!(faction, Faction::Pillager) && dest_is_plate(dest, keep_dest) {
             plate_slot(id, dest)
         } else {
             dest
@@ -2862,7 +2860,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         let follower = !in_combat && !is_squad_leader(id);
         // Followers refresh every 24 ticks (~0.2 blk/s), too slow to cross a
         // two-ring capital before the soak ends. Raiders use the alarm period.
-        let due = if is_builder && repair_dest.is_some() {
+        let due = if is_builder && repair_dest.is_some()
+            || (matches!(faction, Faction::Pillager) && dest_is_plate(dest, keep_dest))
+        {
             true
         } else if matches!(faction, Faction::Pillager) && alarm {
             tick.is_multiple_of(period)
@@ -2877,6 +2877,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             if amortizing
                 || (follower && dist < DIRECT_RANGE)
                 || (matches!(faction, Faction::Pillager) && dist <= STUCK_STORM_RANGE)
+                || (matches!(faction, Faction::Pillager) && dest_is_plate(dest, keep_dest))
                 || (is_builder && repair_dest.is_some())
             {
                 slide_direct(base, dest);
@@ -5970,6 +5971,10 @@ fn plate_slot(entity_id: i32, flag: PostTarget) -> PostTarget {
     }
 }
 
+fn dest_is_plate(dest: PostTarget, flag: PostTarget) -> bool {
+    (dest.x - flag.x).abs() <= 1 && (dest.z - flag.z).abs() <= 1
+}
+
 fn overlay_flag_dest(
     dest: PostTarget,
     faction: &Faction,
@@ -5996,12 +6001,10 @@ fn overlay_flag_dest(
     if !gates.is_empty() && !breached && !capturing {
         return outermost_gate_dest(gates, flag_dest);
     }
+    // After the first hole, dest the mast. Next-ring waypoints parked the
+    // column at an inner gate far from the plate.
     if breached || capturing {
-        let dist = (x - f64::from(flag_dest.x)).hypot(z - f64::from(flag_dest.z));
-        if dist <= STUCK_STORM_RANGE {
-            return flag_dest;
-        }
-        return inward_siege_dest(x, z, gates, gatehouse, inner, flag_dest);
+        return flag_dest;
     }
     dest
 }
@@ -6277,7 +6280,7 @@ fn tick_ghosts(
                     capturing,
                     keep_dest,
                 );
-                let dest = if dest.x == keep_dest.x && dest.z == keep_dest.z {
+                let dest = if dest_is_plate(dest, keep_dest) {
                     plate_slot(i as i32, dest)
                 } else {
                     dest
@@ -6334,41 +6337,6 @@ fn tick_ghosts(
     }
 }
 
-/// Next ring toward the keep-court plate: outer town, civic, castle, then
-/// the inner-bailey side of the gatehouse.
-fn inward_siege_dest(
-    x: f64,
-    z: f64,
-    gates: &[GateInfo],
-    gatehouse: Rect,
-    inner: Rect,
-    flag: PostTarget,
-) -> PostTarget {
-    if in_capture_zone(inner, gatehouse, x, z) || in_courtyard(gatehouse, x, z) {
-        return flag;
-    }
-    let fx = f64::from(flag.x);
-    let fz = f64::from(flag.z);
-    let me = (x - fx).hypot(z - fz);
-    let mut ordered: Vec<&GateInfo> = gates.iter().collect();
-    ordered.sort_by(|a, b| {
-        let da = (f64::from(a.x) - fx).hypot(f64::from(a.z) - fz);
-        let db = (f64::from(b.x) - fx).hypot(f64::from(b.z) - fz);
-        db.total_cmp(&da)
-    });
-    for gate in ordered {
-        let gd = (f64::from(gate.x) - fx).hypot(f64::from(gate.z) - fz);
-        if me > gd + 10.0 {
-            return PostTarget {
-                x: gate.x,
-                y: flag.y,
-                z: gate.z,
-            };
-        }
-    }
-    gatehouse_inner_dest(gatehouse, inner, flag)
-}
-
 fn in_join_ai_window(index: usize, live_age: u32, n: usize) -> bool {
     if n == 0 {
         return false;
@@ -6381,23 +6349,6 @@ fn in_join_ai_window(index: usize, live_age: u32, n: usize) -> bool {
         index + n - start
     };
     pos < budget
-}
-
-/// First waypoint past the portcullis, on the inner-bailey side of the gatehouse.
-fn gatehouse_inner_dest(gatehouse: Rect, inner: Rect, flag: PostTarget) -> PostTarget {
-    let (gx, gz) = gatehouse.center();
-    let dx = (flag.x - gx).signum();
-    let dz = (flag.z - gz).signum();
-    let mut x = gx;
-    let mut z = gz;
-    for _ in 0..24 {
-        x += dx;
-        z += dz;
-        if inner.contains(x, z) && !gatehouse.contains(x, z) {
-            return PostTarget { x, y: flag.y, z };
-        }
-    }
-    flag
 }
 
 fn swap_flag_banner(town_id: &str, owner: &TownOwner) {
@@ -8037,9 +7988,10 @@ mod tests {
             false,
             flag,
         );
-        assert!(
-            inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
-            "after the breach the column walks through the gatehouse, dest={dest:?}"
+        assert_eq!(
+            (dest.x, dest.z),
+            (flag.x, flag.z),
+            "after the breach the column walks the plate, dest={dest:?}"
         );
         let dest = overlay_flag_dest(
             march,
@@ -8089,9 +8041,10 @@ mod tests {
                 false,
                 flag,
             );
-            assert!(
-                inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
-                "raider {i} at gate must walk through the gatehouse dest={dest:?}"
+            assert_eq!(
+                (dest.x, dest.z),
+                (flag.x, flag.z),
+                "raider {i} at gate walks the plate after the breach dest={dest:?}"
             );
             through_gate += 1;
             let dest = overlay_flag_dest(
@@ -8257,8 +8210,8 @@ mod tests {
         );
         assert_eq!(
             (dest.x, dest.z),
-            (gates[0].x, gates[0].z),
-            "outside the outer wall, dest is the town gate"
+            (flag.x, flag.z),
+            "after the first breach, dest is the mast even from outside the wall"
         );
         let dest = overlay_flag_dest(
             dest,
@@ -8275,8 +8228,8 @@ mod tests {
         );
         assert_eq!(
             (dest.x, dest.z),
-            (gates[1].x, gates[1].z),
-            "at the town gate, dest is the civic ring"
+            (flag.x, flag.z),
+            "at the town gate after a breach, dest is the mast, not the civic ring"
         );
         let dest = overlay_flag_dest(
             dest,
@@ -8293,8 +8246,8 @@ mod tests {
         );
         assert_eq!(
             (dest.x, dest.z),
-            (gates[2].x, gates[2].z),
-            "at the civic gate, dest is the castle gate"
+            (flag.x, flag.z),
+            "at the civic gate after a breach, dest is the mast, not the castle"
         );
         let dest = overlay_flag_dest(
             dest,
@@ -8309,9 +8262,10 @@ mod tests {
             false,
             flag,
         );
-        assert!(
-            inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
-            "past the castle gate the column walks the gatehouse dest={dest:?}"
+        assert_eq!(
+            (dest.x, dest.z),
+            (flag.x, flag.z),
+            "past the castle gate the column walks the mast dest={dest:?}"
         );
         let dest = overlay_flag_dest(
             march,
