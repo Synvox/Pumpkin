@@ -27,6 +27,8 @@ pub enum BuildingKind {
     Watermill,
     /// Abbey winepress house with a cellar.
     Winepress,
+    /// Taiga stave church with dragon-head gables.
+    StaveChurch,
 }
 
 impl BuildingKind {
@@ -52,6 +54,7 @@ impl BuildingKind {
             Self::TownHall => (14, 12),
             Self::Watermill => (7, 6),
             Self::Winepress => (9, 7),
+            Self::StaveChurch => (15, 11),
         }
     }
 
@@ -65,6 +68,7 @@ impl BuildingKind {
             | Self::Windmill
             | Self::Watermill
             | Self::Winepress
+            | Self::StaveChurch
             | Self::Monastery => 1,
             Self::Longhouse | Self::Blacksmith | Self::Cathedral => 1,
             Self::Tavern | Self::Church => 2,
@@ -97,6 +101,7 @@ impl BuildingKind {
             Self::TownHall => 16,
             Self::Watermill => 8,
             Self::Winepress => 6,
+            Self::StaveChurch => 8,
         }
     }
 

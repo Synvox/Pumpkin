@@ -247,7 +247,8 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             | BuildingKind::Watermill
             | BuildingKind::Barn
             | BuildingKind::Stall
-            | BuildingKind::Winepress => spawns.push(at(SpawnRole::Workstation, cx, cz)),
+            | BuildingKind::Winepress
+            | BuildingKind::StaveChurch => spawns.push(at(SpawnRole::Workstation, cx, cz)),
             BuildingKind::Watchtower
             | BuildingKind::Outpost
             | BuildingKind::BellTower
@@ -336,7 +337,12 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));
             }
-            SceneKind::Cathedral | SceneKind::Mine | SceneKind::Riverside | SceneKind::Vineyard => {
+            SceneKind::Cathedral
+            | SceneKind::Mine
+            | SceneKind::Riverside
+            | SceneKind::Vineyard
+            | SceneKind::StaveChurch
+            | SceneKind::Caravanserai => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::Workstation, cx, cz));
             }

@@ -111,13 +111,18 @@ pub fn furnish_hall(
     if dais && lz == 1 && aisle {
         sink.put(x, floor + 1, z, stair_state(palette.stairs, Dir::South));
         sink.put(x, floor + 2, z, Block::RED_BANNER.default_state);
+        sink.put(x, floor + 3, z, Block::RED_BANNER.default_state);
+    } else if dais && (x - cx).abs() <= 2 && lz == 1 {
+        sink.put(x, floor + 1, z, palette.slab);
+        sink.put(x, floor + 2, z, Block::RED_BANNER.default_state);
     } else if dais && (x - cx).abs() <= 2 && lz == 2 {
         sink.put(x, floor + 1, z, palette.slab);
     }
+    // Two long tables of oak planks with benches on both sides.
     if !dais && !aisle && (x - cx).abs() == 2 && lz % 3 != 0 {
-        sink.put(x, floor + 1, z, palette.slab);
+        sink.put(x, floor + 1, z, Block::OAK_PLANKS.default_state);
     }
-    if !dais && (x - cx).abs() == 3 && lz % 3 != 0 {
+    if !dais && ((x - cx).abs() == 3 || (x - cx).abs() == 4) && lz % 3 != 0 {
         let dir = if x < cx { Dir::East } else { Dir::West };
         sink.put(x, floor + 1, z, stair_state(palette.stairs, dir));
     }
@@ -130,7 +135,11 @@ pub fn furnish_hall(
             }
         }
     }
-    if light_here(x, z, 5) && roof_y >= floor + 4 {
+    // Chandeliers in the room volume so hall cutaways show them, plus a high hang.
+    if aisle && lz % 4 == 2 && roof_y >= floor + 6 {
+        hang_lantern(sink, x, floor + 6, z);
+    }
+    if light_here(x, z, 4) && roof_y >= floor + 8 {
         hang_lantern(sink, x, roof_y - 2, z);
     }
     if lx == 2 && lz == depth / 2 {
@@ -204,7 +213,7 @@ pub fn furnish_cathedral(
     match kind {
         CellKind::CathedralChoir => {
             if aisle && x >= rect.max_x - 2 {
-                sink.put(x, floor + 1, z, Block::SMOOTH_STONE.default_state);
+                sink.put(x, floor + 1, z, Block::GOLD_BLOCK.default_state);
                 sink.put(x, floor + 2, z, Block::CANDLE.default_state);
                 if x == rect.max_x - 1 {
                     sink.put(x, floor + 3, z, Block::LANTERN.default_state);
@@ -236,16 +245,24 @@ pub fn furnish_cathedral(
             if aisle {
                 sink.put(x, floor + 1, z, Block::RED_CARPET.default_state);
             } else if (z - cz).abs() >= 2
-                && (z - cz).abs() <= 4
+                && (z - cz).abs() <= 5
                 && x % 2 == 0
                 && (x - cx).abs() != 2
             {
                 let dir = if z < cz { Dir::South } else { Dir::North };
                 sink.put(x, floor + 1, z, stair_state(palette.stairs, dir));
             }
+            // Banners on the nave arcade columns.
+            if (x - cx).abs() == 2 && z % 4 == 0 {
+                sink.put(x, floor + 4, z, Block::RED_BANNER.default_state);
+                sink.put(x, floor + 5, z, Block::RED_BANNER.default_state);
+            }
         }
     }
-    if aisle && x % 4 == 0 && roof_y >= floor + 6 {
+    if aisle && x % 3 == 0 && roof_y >= floor + 7 {
+        hang_lantern(sink, x, floor + 6, z);
+    }
+    if aisle && x % 4 == 0 && roof_y >= floor + 8 {
         hang_lantern(sink, x, roof_y - 2, z);
     }
 }
@@ -376,7 +393,10 @@ pub fn furnish_house(
         return;
     }
     match kind {
-        BuildingKind::Church | BuildingKind::Monastery | BuildingKind::Cathedral => {
+        BuildingKind::Church
+        | BuildingKind::StaveChurch
+        | BuildingKind::Monastery
+        | BuildingKind::Cathedral => {
             furnish_chapel(sink, rect, x, floor, z, roof_y, palette, true);
         }
         BuildingKind::Watchtower | BuildingKind::Outpost | BuildingKind::BellTower => {}
@@ -736,7 +756,7 @@ fn decorate_wall(sink: &mut impl BlockSink, rect: Rect, x: i32, floor: i32, z: i
     if rect.is_corner(x, z) {
         return;
     }
-    if fancy && (x + z) % 5 == 1 {
+    if fancy && (x + z) % 3 == 1 {
         sink.put(x, floor + 3, z, Block::RED_WOOL.default_state);
         sink.put(x, floor + 4, z, Block::RED_BANNER.default_state);
     } else if (x + z) % 7 == 0 {
