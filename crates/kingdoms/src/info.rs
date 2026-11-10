@@ -342,7 +342,8 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             SceneKind::Watchtower
             | SceneKind::MountainFortress
             | SceneKind::HermitTower
-            | SceneKind::BanditHideout => {
+            | SceneKind::BanditHideout
+            | SceneKind::CastleRuin => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));
             }

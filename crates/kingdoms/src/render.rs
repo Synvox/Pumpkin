@@ -352,6 +352,7 @@ fn write_scene_renders(
             | SceneKind::CathedralClose
             | SceneKind::Extramural
             | SceneKind::RuinedAbbey
+            | SceneKind::CastleRuin
             | SceneKind::BanditHideout
             | SceneKind::HermitTower
             | SceneKind::StoneCircle
@@ -518,9 +519,38 @@ fn write_scene_renders(
                 volume,
                 hull.inflate(4),
                 2,
-                "Cog · curved hull, square sail, sterncastle, rudder",
+                "Cog · pointed bow, billowed sail, yard, forecastle",
                 ship_beam_rot(hull),
             ),
+        )?;
+    }
+    for kind in [
+        SceneKind::RuinedAbbey,
+        SceneKind::CastleRuin,
+        SceneKind::BanditHideout,
+        SceneKind::HermitTower,
+        SceneKind::StoneCircle,
+    ] {
+        let Some(scene) = plan.scenes.iter().find(|scene| scene.kind == kind) else {
+            continue;
+        };
+        let rect = scene.rect.inflate(2);
+        let name = kind.label().to_ascii_lowercase().replace(' ', "-");
+        let title = match kind {
+            SceneKind::RuinedAbbey => "Ruined abbey · Tintern nave, tracery, arcade, graves",
+            SceneKind::CastleRuin => "Castle ruin · broken curtain and keep on a hill",
+            SceneKind::BanditHideout => "Bandit hideout · ravine camp, lookout, cages",
+            SceneKind::HermitTower => "Hermit's tower · balcony, chimney, garden",
+            SceneKind::StoneCircle => "Stone circle · menhirs and fallen lintel",
+            _ => kind.label(),
+        };
+        save(
+            &out_dir.join(format!("{stem}-scene-{name}-close.png")),
+            &render_exterior_rot(volume, rect, 2, title, 0),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-scene-{name}-close-sw.png")),
+            &render_exterior_rot(volume, rect, 2, title, 1),
         )?;
     }
     if let Some(market) = fish_market_lot(plan) {
