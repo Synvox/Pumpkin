@@ -34,7 +34,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 8;
+pub const PLAN_CACHE_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -689,6 +689,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         &mut rng,
         &mut scenes,
     );
+    thicken_water_bridges(&mut occ, &grid);
     paint_scene_yards(&mut occ, &grid, &scenes);
     crate::scenes::paint_tree_keepout(&mut occ, &grid, &lots, market, town_rect);
 
@@ -1489,6 +1490,127 @@ fn stamp_road_cell(
     }
 }
 
+fn thicken_water_bridges(occ: &mut Occupancy, grid: &HeightGrid) {
+    let bounds = occ.bounds;
+    let mut seen = HashSet::new();
+    let mut blobs = Vec::new();
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            if occ.kind(x, z) != CellKind::Bridge || !seen.insert((x, z)) {
+                continue;
+            }
+            let mut cells = vec![(x, z)];
+            let mut i = 0;
+            while i < cells.len() {
+                let (cx, cz) = cells[i];
+                i += 1;
+                for dir in Dir::ALL {
+                    let nx = cx + dir.dx();
+                    let nz = cz + dir.dz();
+                    if occ.kind(nx, nz) == CellKind::Bridge && seen.insert((nx, nz)) {
+                        cells.push((nx, nz));
+                    }
+                }
+            }
+            blobs.push(cells);
+        }
+    }
+    for cells in blobs {
+        let min_x = cells.iter().map(|c| c.0).min().unwrap_or(0);
+        let max_x = cells.iter().map(|c| c.0).max().unwrap_or(0);
+        let min_z = cells.iter().map(|c| c.1).min().unwrap_or(0);
+        let max_z = cells.iter().map(|c| c.1).max().unwrap_or(0);
+        let along_x = max_x - min_x >= max_z - min_z;
+        let length = if along_x {
+            max_x - min_x + 1
+        } else {
+            max_z - min_z + 1
+        };
+        if length < 6 {
+            continue;
+        }
+        let half = if length >= 36 { 2 } else { 1 };
+        for &(bx, bz) in &cells {
+            for d in -half..=half {
+                let (nx, nz) = if along_x { (bx, bz + d) } else { (bx + d, bz) };
+                if !occ.bounds.contains(nx, nz) {
+                    continue;
+                }
+                let kind = occ.kind(nx, nz);
+                if kind.is_castle() {
+                    continue;
+                }
+                let wet = !grid.is_dry(nx, nz)
+                    || matches!(kind, CellKind::Harbor | CellKind::Dock | CellKind::Bridge);
+                if wet
+                    && matches!(
+                        kind,
+                        CellKind::Empty
+                            | CellKind::Green
+                            | CellKind::Farm
+                            | CellKind::FarmEdge
+                            | CellKind::Harbor
+                            | CellKind::Dock
+                            | CellKind::Bridge
+                            | CellKind::Hedge
+                            | CellKind::Orchard
+                            | CellKind::Pasture
+                    )
+                {
+                    occ.set(nx, nz, CellKind::Bridge, true);
+                }
+            }
+        }
+        let dir = if along_x { Dir::East } else { Dir::South };
+        for &(ex, ez, out) in &[(min_x, min_z, dir.opposite()), (max_x, max_z, dir)] {
+            for step in 1..=4 {
+                let nx = ex + out.dx() * step;
+                let nz = ez + out.dz() * step;
+                if !occ.bounds.contains(nx, nz) || !grid.is_dry(nx, nz) {
+                    break;
+                }
+                for d in -1..=1 {
+                    let (cx, cz) = if along_x { (nx, nz + d) } else { (nx + d, nz) };
+                    if !occ.bounds.contains(cx, cz) {
+                        continue;
+                    }
+                    if matches!(
+                        occ.kind(cx, cz),
+                        CellKind::Empty
+                            | CellKind::Green
+                            | CellKind::Farm
+                            | CellKind::FarmEdge
+                            | CellKind::Hedge
+                    ) {
+                        occ.set(cx, cz, CellKind::Road, true);
+                    }
+                }
+            }
+        }
+        if length >= 28 {
+            let mx = (min_x + max_x) / 2;
+            let mz = (min_z + max_z) / 2;
+            let pad = Rect::new(mx - 1, mz - 1, mx + 1, mz + 1);
+            let mut free = true;
+            for z in pad.min_z..=pad.max_z {
+                for x in pad.min_x..=pad.max_x {
+                    if occ.kind(x, z).is_castle()
+                        || matches!(
+                            occ.kind(x, z),
+                            CellKind::Building | CellKind::TownWall | CellKind::TownGate
+                        )
+                    {
+                        free = false;
+                    }
+                }
+            }
+            if free && occ.bounds.contains(pad.min_x, pad.min_z) {
+                occ.fill(pad, CellKind::TownTower, true);
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Eq, PartialEq)]
 struct Node {
     f: i32,
@@ -1558,7 +1680,7 @@ fn astar(
                 cost += 40;
             }
             if grid.height(nx, nz) <= grid.sea_level + 1 {
-                cost += 240;
+                cost += 360;
             }
             let tentative = g.saturating_add(cost);
             if tentative < *gscore.get(&(nx, nz)).unwrap_or(&i32::MAX) {
@@ -2039,7 +2161,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 8);
+        assert_eq!(PLAN_CACHE_VERSION, 9);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -2077,8 +2199,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 8;
-    const PLAN_LAYOUT_HASH: u64 = 0xdb4f_e8e9_9ca5_f553;
+    const PLAN_LAYOUT_VERSION: u32 = 9;
+    const PLAN_LAYOUT_HASH: u64 = 0x629f_49c0_a8b9_1ffb;
 
     #[test]
     fn plan_cache_version_tracks_layout() {
