@@ -115,6 +115,15 @@ fn write_flag_renders(
     stem: &str,
 ) -> std::io::Result<()> {
     let (fx, fz) = plan.castle.flag;
+    let castle = &plan.castle;
+    let plinth_col = |x: i32, z: i32| {
+        (x - fx).abs() <= 2
+            && (z - fz).abs() <= 2
+            && castle.keep_mass_at(x, z).is_none()
+            && !castle.hall.contains(x, z)
+            && !castle.chapel.contains(x, z)
+            && !castle.kitchen.contains(x, z)
+    };
     let mut owned = clone_volume(volume);
     paint_flag_cloth(&mut owned, fx, fz, None);
     let crop = render_iso_view(
@@ -125,15 +134,13 @@ fn write_flag_renders(
         fz + 3,
         24,
         1,
-        |x, _, z| (x - fx).abs() <= 2 && (z - fz).abs() <= 2,
+        |x, _, z| plinth_col(x, z),
         Some("Keep flag plinth · pedestal, mast, plates"),
         false,
         0,
     );
     save(&out_dir.join(format!("{stem}-flag-se.png")), &crop)?;
-    let (kx, kz) = plan.castle.keep.center();
-    let ox = (fx - kx).signum() * 3;
-    let oz = (fz - kz).signum() * 3;
+    let (kx, kz) = castle.keep.center();
     let mast_top = owned.top(fx, fz).map_or(80, |(y, _)| y);
     let slab_y = mast_top - 4;
     let mut rot = 0u8;
@@ -156,13 +163,19 @@ fn write_flag_renders(
     }
     let court = render_iso_view(
         &owned,
-        fx - 7 + ox,
-        fz - 7 + oz,
-        fx + 7 + ox,
-        fz + 7 + oz,
+        fx - 8,
+        fz - 8,
+        fx + 8,
+        fz + 8,
         16,
         1,
-        |x, y, z| (x - fx).abs().max((z - fz).abs()) <= 2 || y <= slab_y,
+        |x, y, z| {
+            if castle.keep_mass_at(x, z).is_some() || castle.hall.contains(x, z) {
+                y <= slab_y
+            } else {
+                plinth_col(x, z) || y <= slab_y
+            }
+        },
         Some("Inner bailey · flag in courtyard context"),
         false,
         rot,
@@ -178,7 +191,7 @@ fn write_flag_renders(
         fz + 3,
         24,
         1,
-        |x, _, z| (x - fx).abs() <= 2 && (z - fz).abs() <= 2,
+        |x, _, z| plinth_col(x, z),
         Some("Keep flag plinth · after capture"),
         false,
         0,
