@@ -72,10 +72,14 @@ pub fn gable_door_at(rect: Rect, x: i32, z: i32) -> bool {
     }
 }
 
-/// Lantern on a fence post so it hangs without a neighbour write.
-fn hang_lantern(sink: &mut impl BlockSink, x: i32, y: i32, z: i32) {
-    sink.put(x, y, z, Block::OAK_FENCE.default_state);
+/// Lantern hanging from `roof_y` on a fence and chain in this column.
+fn hang_lantern(sink: &mut impl BlockSink, x: i32, y: i32, z: i32, roof_y: i32) {
     sink.put(x, y - 1, z, Block::LANTERN.default_state);
+    sink.put(x, y, z, Block::OAK_FENCE.default_state);
+    let top = (roof_y - 1).max(y);
+    for yy in y + 1..=top {
+        sink.put(x, yy, z, Block::IRON_CHAIN.default_state);
+    }
 }
 
 fn light_here(x: i32, z: i32, period: i32) -> bool {
@@ -137,10 +141,10 @@ pub fn furnish_hall(
     }
     // Chandeliers in the room volume so hall cutaways show them, plus a high hang.
     if aisle && lz % 4 == 2 && roof_y >= floor + 6 {
-        hang_lantern(sink, x, floor + 6, z);
+        hang_lantern(sink, x, floor + 6, z, roof_y);
     }
     if light_here(x, z, 4) && roof_y >= floor + 8 {
-        hang_lantern(sink, x, roof_y - 2, z);
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
     if lx == 2 && lz == depth / 2 {
         sink.put(x, floor + 1, z, Block::BARREL.default_state);
@@ -193,7 +197,7 @@ pub fn furnish_chapel(
         sink.put(x, floor + 1, z, stair_state(palette.stairs, dir));
     }
     if light_here(x, z, 6) && roof_y >= floor + 4 {
-        hang_lantern(sink, x, roof_y - 2, z);
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
 }
 
@@ -260,10 +264,10 @@ pub fn furnish_cathedral(
         }
     }
     if aisle && x % 3 == 0 && roof_y >= floor + 7 {
-        hang_lantern(sink, x, floor + 6, z);
+        hang_lantern(sink, x, floor + 6, z, roof_y);
     }
     if aisle && x % 4 == 0 && roof_y >= floor + 8 {
-        hang_lantern(sink, x, roof_y - 2, z);
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
 }
 
@@ -306,7 +310,7 @@ pub fn furnish_kitchen(
         sink.put(x, floor + 1, z, Block::HAY_BLOCK.default_state);
     }
     if light_here(x, z, 4) && roof_y >= floor + 4 {
-        hang_lantern(sink, x, (roof_y - 2).max(floor + 3), z);
+        hang_lantern(sink, x, (roof_y - 2).max(floor + 3), z, roof_y);
     }
     let _ = palette;
 }
@@ -371,7 +375,7 @@ pub fn furnish_stables(
         sink.put(x, floor + 1, z, Block::HAY_BLOCK.default_state);
     }
     if light_here(x, z, 5) && roof_y >= floor + 4 {
-        hang_lantern(sink, x, roof_y - 2, z);
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
     let _ = palette;
 }
@@ -451,7 +455,7 @@ fn furnish_dwelling(
         }
     }
     if roof_y >= floor + 5 && light_here(x, z, 6) {
-        hang_lantern(sink, x, roof_y - 2, z);
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
 }
 
@@ -491,7 +495,7 @@ fn furnish_tavern(
         sink.put(x, floor + 3, z, Block::LANTERN.default_state);
     }
     if roof_y >= floor + 6 && light_here(x + 1, z, 5) {
-        hang_lantern(sink, x, roof_y - 2, z);
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
 }
 
@@ -509,7 +513,7 @@ fn furnish_smith(sink: &mut impl BlockSink, rect: Rect, x: i32, floor: i32, z: i
         sink.put(x, floor + 1, z, Block::CHEST.default_state);
     }
     if light_here(x, z, 4) && roof_y >= floor + 4 {
-        hang_lantern(sink, x, roof_y - 2, z);
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
 }
 
@@ -523,7 +527,7 @@ fn furnish_barn(sink: &mut impl BlockSink, rect: Rect, x: i32, floor: i32, z: i3
         sink.put(x, floor + 1, z, Block::CHEST.default_state);
     }
     if light_here(x, z, 5) && roof_y >= floor + 4 {
-        hang_lantern(sink, x, roof_y - 2, z);
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
 }
 
@@ -544,7 +548,7 @@ fn furnish_winepress(
         sink.put(x, floor + 1, z, Block::HAY_BLOCK.default_state);
     }
     if light_here(x, z, 4) && roof_y >= floor + 4 {
-        hang_lantern(sink, x, roof_y - 2, z);
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
 }
 

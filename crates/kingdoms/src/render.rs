@@ -356,7 +356,10 @@ fn write_scene_renders(
             | SceneKind::BanditHideout
             | SceneKind::HermitTower
             | SceneKind::StoneCircle
-            | SceneKind::Gallows => 6,
+            | SceneKind::Gallows
+            | SceneKind::TollBridge
+            | SceneKind::CharcoalCamp
+            | SceneKind::RoadsideInn => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -530,6 +533,9 @@ fn write_scene_renders(
         SceneKind::BanditHideout,
         SceneKind::HermitTower,
         SceneKind::StoneCircle,
+        SceneKind::TollBridge,
+        SceneKind::CharcoalCamp,
+        SceneKind::RoadsideInn,
     ] {
         let Some(scene) = plan.scenes.iter().find(|scene| scene.kind == kind) else {
             continue;
@@ -542,6 +548,9 @@ fn write_scene_renders(
             SceneKind::BanditHideout => "Bandit hideout · ravine camp, lookout, cages",
             SceneKind::HermitTower => "Hermit's tower · balcony, chimney, garden",
             SceneKind::StoneCircle => "Stone circle · menhirs and fallen lintel",
+            SceneKind::TollBridge => "Toll bridge · gatehouse over the river",
+            SceneKind::CharcoalCamp => "Charcoal camp · hut, mounds and hearths",
+            SceneKind::RoadsideInn => "Roadside inn · stable, coaching yard, sign",
             _ => kind.label(),
         };
         save(

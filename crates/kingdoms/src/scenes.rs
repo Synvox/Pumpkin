@@ -91,6 +91,12 @@ pub enum SceneKind {
     Gallows,
     /// Broken curtain and keep stump on a rise.
     CastleRuin,
+    /// Gatehouse and barred deck over a river.
+    TollBridge,
+    /// Charcoal-burners' hut and mounds in a woodland clearing.
+    CharcoalCamp,
+    /// Coaching inn with a stable, yard and hanging sign.
+    RoadsideInn,
 }
 
 impl SceneKind {
@@ -133,7 +139,22 @@ impl SceneKind {
             Self::StoneCircle => "Stone circle",
             Self::Gallows => "Crossroads gallows",
             Self::CastleRuin => "Castle ruin",
+            Self::TollBridge => "Toll bridge",
+            Self::CharcoalCamp => "Charcoal camp",
+            Self::RoadsideInn => "Roadside inn",
         }
+    }
+}
+
+/// Extra strip around a scene so hanging Features canopies cannot float
+/// in the close-up crop.
+#[must_use]
+pub const fn scene_tree_margin(kind: SceneKind) -> i32 {
+    match kind {
+        SceneKind::Frontier | SceneKind::CastleRuin | SceneKind::RuinedAbbey => {
+            SCENE_YARD_MARGIN + FRONTIER_TREE_MARGIN
+        }
+        _ => SCENE_YARD_MARGIN,
     }
 }
 
@@ -293,7 +314,17 @@ pub fn place_scenes(
         &mut scenes,
     );
     paint_wind_sails(occ, lots);
-    place_wayside_pois(occ, grid, search, town, keep_out, &mut extra, &mut scenes);
+    place_wayside_pois(
+        occ,
+        grid,
+        search,
+        town,
+        keep_out,
+        lots,
+        seed,
+        &mut extra,
+        &mut scenes,
+    );
     scenes
 }
 
@@ -303,12 +334,17 @@ fn place_wayside_pois(
     search: Rect,
     town: Rect,
     keep_out: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
     place_ruined_abbey(occ, grid, search, town, keep_out, rng, scenes);
     place_castle_ruin(occ, grid, search, town, keep_out, rng, scenes);
     place_bandit_hideout(occ, grid, search, town, keep_out, rng, scenes);
+    place_coaching_inn_scene(occ, grid, search, town, keep_out, lots, seed, rng, scenes);
+    place_toll_bridge(occ, grid, search, town, keep_out, lots, seed, rng, scenes);
+    place_charcoal_camp(occ, grid, search, town, keep_out, lots, seed, rng, scenes);
     place_hermit_tower(occ, grid, search, town, keep_out, rng, scenes);
     place_stone_circle(occ, grid, search, town, keep_out, rng, scenes);
     place_crossroads_gallows(occ, grid, search, town, keep_out, rng, scenes);
@@ -464,63 +500,498 @@ fn place_bandit_hideout(
         search,
         town,
         keep_out.inflate(6),
+        22,
         18,
-        16,
         false,
         rng,
-    ) else {
+    )
+    .or_else(|| {
+        find_site(
+            occ,
+            grid,
+            search,
+            town,
+            keep_out.inflate(6),
+            20,
+            16,
+            false,
+            rng,
+        )
+    })
+    .or_else(|| {
+        find_site(
+            occ,
+            grid,
+            search,
+            town,
+            keep_out.inflate(6),
+            18,
+            16,
+            false,
+            rng,
+        )
+    }) else {
         return;
     };
     occ.fill(yard, CellKind::Green, true);
-    let (cx, cz) = yard.center();
+    let cz = yard.center().1;
+    let ravine_x = yard.max_x - 2;
     for z in (yard.min_z + 1)..yard.max_z {
-        for x in cx - 1..=cx + 1 {
-            occ.set(x, z, CellKind::SiegeTrench, true);
+        for x in ravine_x - 1..=ravine_x + 1 {
+            if yard.contains(x, z) {
+                occ.set(x, z, CellKind::SiegeTrench, true);
+            }
         }
     }
-    let camp = Rect::new(yard.min_x + 1, yard.min_z + 2, cx - 2, yard.max_z - 2);
+    let camp = Rect::new(
+        yard.min_x + 1,
+        yard.min_z + 1,
+        (ravine_x - 3).max(yard.min_x + 10),
+        yard.max_z - 1,
+    );
     occ.fill(camp, CellKind::CampCourt, true);
-    for z in camp.min_z..=camp.max_z {
-        occ.set(camp.min_x, z, CellKind::Palisade, true);
-        occ.set(camp.max_x, z, CellKind::Palisade, true);
-    }
-    for x in camp.min_x..=camp.max_x {
-        occ.set(x, camp.min_z, CellKind::Palisade, true);
-        occ.set(x, camp.max_z, CellKind::Palisade, true);
-    }
+    paint_staked_palisade(occ, camp);
     occ.set(camp.max_x, cz, CellKind::PalisadeGate, true);
+    occ.set(camp.max_x, cz - 1, CellKind::CampCourt, true);
+    occ.set(camp.max_x, cz + 1, CellKind::CampCourt, true);
     let look = Rect::new(
-        camp.min_x + 1,
-        camp.min_z + 1,
         camp.min_x + 2,
         camp.min_z + 2,
+        camp.min_x + 4,
+        camp.min_z + 4,
     );
     occ.fill(look, CellKind::WatchPost, true);
-    occ.set(camp.min_x + 2, cz, CellKind::WarTent, true);
     let tents = [
         Rect::new(
             camp.min_x + 2,
-            camp.min_z + 4,
-            camp.min_x + 3,
-            camp.min_z + 5,
+            camp.max_z - 5,
+            camp.min_x + 4,
+            camp.max_z - 3,
         ),
         Rect::new(
-            camp.min_x + 2,
+            camp.max_x - 5,
+            camp.min_z + 2,
+            camp.max_x - 3,
+            camp.min_z + 4,
+        ),
+        Rect::new(
+            camp.max_x - 5,
             camp.max_z - 5,
-            camp.min_x + 3,
-            camp.max_z - 4,
+            camp.max_x - 3,
+            camp.max_z - 3,
+        ),
+        Rect::new(
+            camp.min_x + 6,
+            camp.min_z + 2,
+            camp.min_x + 8,
+            camp.min_z + 4,
         ),
     ];
-    for tent in tents {
-        occ.fill(tent, CellKind::Tent, true);
+    for (i, tent) in tents.iter().enumerate() {
+        if !camp.contains(tent.min_x, tent.min_z) || !camp.contains(tent.max_x, tent.max_z) {
+            continue;
+        }
+        occ.fill(
+            *tent,
+            if i == 1 {
+                CellKind::WarTent
+            } else {
+                CellKind::Tent
+            },
+            true,
+        );
     }
-    occ.set(camp.min_x + 2, camp.max_z - 2, CellKind::Cage, true);
-    occ.set(camp.min_x + 3, camp.max_z - 1, CellKind::Cage, true);
-    occ.set(cx, cz, CellKind::CampCourt, true);
+    let loot = Rect::new(camp.max_x - 4, cz - 1, camp.max_x - 3, cz);
+    if camp.contains(loot.min_x, loot.min_z) {
+        occ.fill(loot, CellKind::LootPile, true);
+    }
+    occ.set(camp.max_x - 2, camp.max_z - 2, CellKind::Cage, true);
+    occ.set(camp.max_x - 3, camp.max_z - 2, CellKind::Cage, true);
     scenes.push(Scene {
         kind: SceneKind::BanditHideout,
         rect: yard,
     });
+}
+
+fn place_coaching_inn_scene(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let Some(yard) = find_site_near_road(occ, grid, search, town, keep_out.inflate(8), 36, 28, rng)
+        .or_else(|| find_site_near_road(occ, grid, search, town, keep_out.inflate(8), 32, 24, rng))
+        .or_else(|| {
+            find_site(
+                occ,
+                grid,
+                search,
+                town,
+                keep_out.inflate(8),
+                32,
+                24,
+                true,
+                rng,
+            )
+        })
+    else {
+        return;
+    };
+    if landmark_blocked(scenes, yard) {
+        return;
+    }
+    let (tw, td) = BuildingKind::Tavern.size();
+    let (bw, bd) = BuildingKind::Barn.size();
+    let tavern = Rect::new(
+        yard.min_x + 2,
+        yard.min_z + 2,
+        yard.min_x + 1 + tw,
+        yard.min_z + 1 + td,
+    );
+    let barn = Rect::new(
+        yard.min_x + 2,
+        yard.max_z - bd - 1,
+        yard.min_x + 1 + bw,
+        yard.max_z - 2,
+    );
+    if !grid.rect_is_buildable(tavern) || !grid.rect_is_buildable(barn) {
+        return;
+    }
+    occ.fill(yard, CellKind::Green, true);
+    if force_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::Tavern,
+        tavern,
+        Dir::South,
+    )
+    .is_none()
+    {
+        return;
+    }
+    let _ = force_lot(occ, grid, lots, seed, BuildingKind::Barn, barn, Dir::North);
+    for z in tavern.max_z + 1..barn.min_z {
+        for x in yard.min_x + 2..=yard.max_x - 2 {
+            if occ.kind(x, z) == CellKind::Green {
+                occ.set(x, z, CellKind::Plaza, true);
+            }
+        }
+    }
+    scenes.push(Scene {
+        kind: SceneKind::RoadsideInn,
+        rect: yard,
+    });
+}
+
+fn place_charcoal_camp(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let Some(yard) = find_site(
+        occ,
+        grid,
+        search,
+        town,
+        keep_out.inflate(8),
+        22,
+        16,
+        true,
+        rng,
+    )
+    .or_else(|| {
+        find_site(
+            occ,
+            grid,
+            search,
+            town,
+            keep_out.inflate(8),
+            18,
+            14,
+            true,
+            rng,
+        )
+    }) else {
+        return;
+    };
+    if landmark_blocked(scenes, yard) || scenes.iter().any(|scene| scene.rect.intersects(yard)) {
+        return;
+    }
+    let (w, d) = BuildingKind::Cottage.size();
+    let hut = Rect::new(
+        yard.min_x + 2,
+        yard.min_z + 2,
+        yard.min_x + 1 + w,
+        yard.min_z + 1 + d,
+    );
+    if !grid.rect_is_buildable(hut) {
+        return;
+    }
+    occ.fill(yard, CellKind::Green, true);
+    if force_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::Cottage,
+        hut,
+        Dir::South,
+    )
+    .is_none()
+    {
+        return;
+    }
+    scenes.push(Scene {
+        kind: SceneKind::CharcoalCamp,
+        rect: yard,
+    });
+}
+
+fn place_toll_bridge(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let Some(yard) = find_toll_site(occ, grid, search, town, keep_out, scenes, rng) else {
+        return;
+    };
+    let Some((along_x, line, _)) = toll_crossing(grid, yard) else {
+        return;
+    };
+    let (tw, td) = BuildingKind::Watchtower.size();
+    let Some(gate) = toll_gate_pad(grid, yard, along_x, line, tw, td) else {
+        return;
+    };
+    for z in yard.min_z..=yard.max_z {
+        for x in yard.min_x..=yard.max_x {
+            if riverside_reclaim(occ.kind(x, z)) {
+                occ.set(x, z, CellKind::Green, true);
+            }
+        }
+    }
+    if along_x {
+        for x in yard.min_x..=yard.max_x {
+            if !grid.is_dry(x, line) {
+                occ.set(x, line, CellKind::Bridge, true);
+                occ.set(x, line - 1, CellKind::Bridge, true);
+                occ.set(x, line + 1, CellKind::Bridge, true);
+            }
+        }
+    } else {
+        for z in yard.min_z..=yard.max_z {
+            if !grid.is_dry(line, z) {
+                occ.set(line, z, CellKind::Bridge, true);
+                occ.set(line - 1, z, CellKind::Bridge, true);
+                occ.set(line + 1, z, CellKind::Bridge, true);
+            }
+        }
+    }
+    if force_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::Watchtower,
+        gate,
+        if along_x { Dir::East } else { Dir::South },
+    )
+    .is_none()
+    {
+        return;
+    }
+    let (gx, gz) = gate.center();
+    for dir in Dir::ALL {
+        let nx = gx + dir.dx() * 4;
+        let nz = gz + dir.dz() * 4;
+        if occ.kind(nx, nz) == CellKind::Bridge {
+            occ.set(nx, nz, CellKind::PalisadeGate, true);
+            occ.set(nx + dir.dz(), nz + dir.dx(), CellKind::Palisade, true);
+            occ.set(nx - dir.dz(), nz - dir.dx(), CellKind::Palisade, true);
+        }
+    }
+    scenes.push(Scene {
+        kind: SceneKind::TollBridge,
+        rect: yard,
+    });
+}
+
+fn find_toll_site(
+    occ: &Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    scenes: &[Scene],
+    rng: &mut TownRng,
+) -> Option<Rect> {
+    let w = 32;
+    let d = 36;
+    let mut best = None;
+    let mut best_score = i32::MIN;
+    let mut z = search.min_z + 8;
+    while z + d < search.max_z {
+        let mut x = search.min_x + 8;
+        while x + w < search.max_x {
+            let rect = Rect::new(x, z, x + w - 1, z + d - 1);
+            x += 12;
+            if town.inflate(12).intersects(rect) || keep_out.intersects(rect) {
+                continue;
+            }
+            if landmark_blocked(scenes, rect)
+                || scenes.iter().any(|scene| scene.rect.intersects(rect))
+            {
+                continue;
+            }
+            if !toll_yard_open(occ, rect) {
+                continue;
+            }
+            let Some((along_x, line, wet)) = toll_crossing(grid, rect) else {
+                continue;
+            };
+            let banks = if along_x {
+                i32::from(grid.is_dry(rect.min_x + 1, line))
+                    + i32::from(grid.is_dry(rect.max_x - 1, line))
+            } else {
+                i32::from(grid.is_dry(line, rect.min_z + 1))
+                    + i32::from(grid.is_dry(line, rect.max_z - 1))
+            };
+            let (tw, td) = BuildingKind::Watchtower.size();
+            if toll_gate_pad(grid, rect, along_x, line, tw, td).is_none() {
+                continue;
+            }
+            let score =
+                wet * 4 + banks * 4 + i32::from(near_road(occ, rect)) * 20 + rng.gen_range(0, 5);
+            if score > best_score {
+                best_score = score;
+                best = Some(rect);
+            }
+        }
+        z += 10;
+    }
+    best
+}
+
+fn toll_crossing(grid: &HeightGrid, yard: Rect) -> Option<(bool, i32, i32)> {
+    let mut best_row = (yard.min_z, 0);
+    for z in yard.min_z..=yard.max_z {
+        let mut n = 0;
+        for x in yard.min_x..=yard.max_x {
+            if !grid.is_dry(x, z) {
+                n += 1;
+            }
+        }
+        if n > best_row.1 {
+            best_row = (z, n);
+        }
+    }
+    let mut best_col = (yard.min_x, 0);
+    for x in yard.min_x..=yard.max_x {
+        let mut n = 0;
+        for z in yard.min_z..=yard.max_z {
+            if !grid.is_dry(x, z) {
+                n += 1;
+            }
+        }
+        if n > best_col.1 {
+            best_col = (x, n);
+        }
+    }
+    if best_row.1 >= best_col.1 && best_row.1 >= 6 {
+        Some((true, best_row.0, best_row.1))
+    } else if best_col.1 >= 6 {
+        Some((false, best_col.0, best_col.1))
+    } else {
+        None
+    }
+}
+
+fn toll_yard_open(occ: &Occupancy, rect: Rect) -> bool {
+    let mut ok = 0;
+    let mut n = 0;
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            n += 1;
+            if riverside_reclaim(occ.kind(x, z))
+                || matches!(
+                    occ.kind(x, z),
+                    CellKind::Road
+                        | CellKind::RoadStairN
+                        | CellKind::RoadStairS
+                        | CellKind::RoadStairE
+                        | CellKind::RoadStairW
+                )
+            {
+                ok += 1;
+            }
+        }
+    }
+    n > 0 && ok * 4 >= n * 3
+}
+
+fn toll_gate_pad(
+    grid: &HeightGrid,
+    yard: Rect,
+    along_x: bool,
+    line: i32,
+    w: i32,
+    d: i32,
+) -> Option<Rect> {
+    let mut best = None;
+    let mut best_dist = i32::MAX;
+    let mut z = yard.min_z;
+    while z + d - 1 <= yard.max_z {
+        let mut x = yard.min_x;
+        while x + w - 1 <= yard.max_x {
+            let pad = Rect::new(x, z, x + w - 1, z + d - 1);
+            x += 3;
+            if !grid.rect_is_buildable(pad) {
+                continue;
+            }
+            let mut near_water = false;
+            'water: for pz in pad.min_z - 2..=pad.max_z + 2 {
+                for px in pad.min_x - 2..=pad.max_x + 2 {
+                    if yard.contains(px, pz) && !grid.is_dry(px, pz) {
+                        near_water = true;
+                        break 'water;
+                    }
+                }
+            }
+            if !near_water {
+                continue;
+            }
+            let (cx, cz) = pad.center();
+            let dist = if along_x {
+                (cz - line).abs()
+            } else {
+                (cx - line).abs()
+            };
+            if dist < best_dist {
+                best_dist = dist;
+                best = Some(pad);
+            }
+        }
+        z += 3;
+    }
+    best
 }
 
 fn place_hermit_tower(
@@ -974,12 +1445,7 @@ pub fn paint_tree_keepout(
 /// lily pads cannot survive the stamper.
 pub fn paint_scene_yards(occ: &mut Occupancy, grid: &HeightGrid, scenes: &[Scene]) {
     for scene in scenes {
-        let extra = if scene.kind == SceneKind::Frontier {
-            SCENE_YARD_MARGIN + FRONTIER_TREE_MARGIN
-        } else {
-            SCENE_YARD_MARGIN
-        };
-        let pad = scene.rect.inflate(extra);
+        let pad = scene.rect.inflate(scene_tree_margin(scene.kind));
         for z in pad.min_z..=pad.max_z {
             for x in pad.min_x..=pad.max_x {
                 if !occ.bounds.contains(x, z) {
@@ -2850,6 +3316,9 @@ fn landmark_blocked(scenes: &[Scene], rect: Rect) -> bool {
                 | SceneKind::Caravanserai
                 | SceneKind::RuinedAbbey
                 | SceneKind::CastleRuin
+                | SceneKind::TollBridge
+                | SceneKind::CharcoalCamp
+                | SceneKind::RoadsideInn
         ) && scene.rect.deflate(2).intersects(rect)
     })
 }
@@ -6661,6 +7130,7 @@ pub(crate) fn try_lot(
                         | CellKind::MineHead
                         | CellKind::MineRail
                         | CellKind::MineSpoil
+                        | CellKind::LootPile
                         | CellKind::Ship
                         | CellKind::TourneyList
                         | CellKind::TourneyStand
@@ -6746,6 +7216,7 @@ pub(crate) fn force_lot(
                         | CellKind::Crane
                         | CellKind::MineAdit
                         | CellKind::MineHead
+                        | CellKind::LootPile
                         | CellKind::Burnt
                         | CellKind::Breakwater
                         | CellKind::SiegeTrench
@@ -10051,5 +10522,180 @@ mod tests {
             h
         };
         assert!(stone_h >= 5, "menhirs {stone_h}");
+    }
+
+    #[test]
+    fn round28_open_bandit_and_hinterland_set_pieces() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            6,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let kinds: Vec<_> = plan.scenes.iter().map(|s| s.kind).collect();
+        let bandit = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::BanditHideout)
+            .expect("bandit hideout");
+        let mut look = 0;
+        let mut tents = 0;
+        let mut tent_blobs = 0;
+        let mut loot = 0;
+        let mut palisade = 0;
+        let mut court = 0;
+        for z in bandit.rect.min_z..=bandit.rect.max_z {
+            for x in bandit.rect.min_x..=bandit.rect.max_x {
+                match plan.occ.kind(x, z) {
+                    CellKind::WatchPost => look += 1,
+                    CellKind::Tent | CellKind::WarTent => {
+                        tents += 1;
+                        let left = plan.occ.kind(x - 1, z);
+                        let up = plan.occ.kind(x, z - 1);
+                        if !matches!(left, CellKind::Tent | CellKind::WarTent)
+                            && !matches!(up, CellKind::Tent | CellKind::WarTent)
+                        {
+                            tent_blobs += 1;
+                        }
+                    }
+                    CellKind::LootPile => loot += 1,
+                    CellKind::Palisade => palisade += 1,
+                    CellKind::CampCourt => court += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(look >= 9, "stilt lookout {look}");
+        assert!(tents >= 12, "wool tent cells {tents}");
+        assert!(tent_blobs >= 3, "separate tents {tent_blobs}");
+        assert!(loot >= 2, "loot pile {loot}");
+        assert!(palisade >= 8, "palisade ring {palisade}");
+        assert!(
+            palisade < 40,
+            "staked palisade, not a timber box {palisade}"
+        );
+        assert!(court >= 8, "open camp court {court}");
+        assert!(
+            kinds.contains(&SceneKind::RoadsideInn) || kinds.contains(&SceneKind::CharcoalCamp),
+            "inn or charcoal in {kinds:?}"
+        );
+        if let Some(inn) = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::RoadsideInn)
+        {
+            let mut tavern = 0;
+            let mut barn = 0;
+            let mut yard = 0;
+            for lot in &plan.lots {
+                if !inn.rect.intersects(lot.rect) {
+                    continue;
+                }
+                match lot.kind {
+                    BuildingKind::Tavern => tavern += 1,
+                    BuildingKind::Barn => barn += 1,
+                    _ => {}
+                }
+            }
+            for z in inn.rect.min_z..=inn.rect.max_z {
+                for x in inn.rect.min_x..=inn.rect.max_x {
+                    if plan.occ.kind(x, z) == CellKind::Plaza {
+                        yard += 1;
+                    }
+                }
+            }
+            assert!(tavern >= 1, "inn tavern");
+            assert!(barn >= 1, "inn stable");
+            assert!(yard >= 4, "coaching yard {yard}");
+        }
+        if let Some(camp) = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::CharcoalCamp)
+        {
+            assert!(
+                plan.lots.iter().any(|lot| {
+                    lot.kind == BuildingKind::Cottage && camp.rect.intersects(lot.rect)
+                }),
+                "charcoal hut"
+            );
+        }
+        let river = HeightGrid::synthetic_river(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+            origin.z + 140,
+        );
+        let river_plan = build_plan(11, origin, river, PaletteKind::Oak);
+        let toll = river_plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::TollBridge)
+            .expect("toll bridge");
+        let mut bridge = 0;
+        for z in toll.rect.min_z..=toll.rect.max_z {
+            for x in toll.rect.min_x..=toll.rect.max_x {
+                if river_plan.occ.kind(x, z) == CellKind::Bridge {
+                    bridge += 1;
+                }
+            }
+        }
+        assert!(bridge >= 8, "toll deck {bridge}");
+        assert!(
+            river_plan.lots.iter().any(|lot| {
+                lot.kind == BuildingKind::Watchtower && toll.rect.intersects(lot.rect)
+            }),
+            "toll gatehouse"
+        );
+        let river_volume = crate::stamp::fill_volume(&river_plan);
+        let river_float = crate::watertight::check_floating_fragments(&river_plan, &river_volume);
+        assert!(
+            river_float.is_empty(),
+            "toll floating fragments:\n{}",
+            river_float.join("\n")
+        );
+        let river_check = crate::watertight::check_town(&river_plan, &river_volume);
+        assert!(
+            river_check
+                .failures()
+                .into_iter()
+                .all(|b| !b.name.contains("Watchtower")),
+            "toll gatehouse should stay watertight: {}",
+            river_check.summary()
+        );
+        let volume = crate::stamp::fill_volume(&plan);
+        let check = crate::watertight::check_town(&plan, &volume);
+        let inn_fails: Vec<_> = check
+            .failures()
+            .into_iter()
+            .filter(|b| {
+                b.name.contains("Tavern")
+                    || b.name.contains("Barn")
+                    || b.name.contains("Cottage")
+                    || b.name.contains("Watchtower")
+            })
+            .map(|b| b.name.clone())
+            .collect();
+        assert!(
+            inn_fails.is_empty(),
+            "enclosed set pieces should stay watertight: {inn_fails:?}"
+        );
+        let floating = crate::watertight::check_floating_fragments(&plan, &volume);
+        assert!(
+            floating.is_empty(),
+            "floating fragments:\n{}",
+            floating.join("\n")
+        );
     }
 }

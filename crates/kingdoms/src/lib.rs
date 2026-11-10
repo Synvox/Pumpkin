@@ -97,7 +97,7 @@ pub use stamp::{
     PlannedBlock, planned_block, planned_block_at, planned_blocks_in, planned_blocks_in_at,
     planned_building_blocks, planned_building_blocks_for, planned_column, planned_column_at,
 };
-pub use watertight::{BuildingCheck, TownCheck, check_town};
+pub use watertight::{BuildingCheck, TownCheck, check_floating_fragments, check_town};
 
 use height::register_world_gen;
 use marker::register_hooks;

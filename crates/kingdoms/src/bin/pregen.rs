@@ -25,7 +25,7 @@ use pumpkin_kingdoms::plan::{plan_for, plan_from_cache};
 use pumpkin_kingdoms::render::{overview_bounds, write_planner_renders, write_renders};
 use pumpkin_kingdoms::stamp::{MARKER_FLOOR, fill_volume};
 use pumpkin_kingdoms::town::{CELL_SIZE, nearest_town, town_in_cell};
-use pumpkin_kingdoms::watertight::check_town;
+use pumpkin_kingdoms::watertight::{check_floating_fragments, check_town};
 use pumpkin_util::world_seed::Seed;
 use pumpkin_world::generation::generator::WorldGenerator;
 use pumpkin_world::generation::get_world_gen;
@@ -166,6 +166,16 @@ fn render_one(
         }
         return false;
     }
+    let floating = check_floating_fragments(&plan_a, &vol_a);
+    if floating.is_empty() {
+        println!("  no floating fragments");
+    } else {
+        eprintln!("  floating fragments:");
+        for line in &floating {
+            eprintln!("    {line}");
+        }
+        return false;
+    }
 
     let well_ok = vol_a
         .top(plan_a.well.0, plan_a.well.1)
@@ -234,7 +244,7 @@ fn main() -> ExitCode {
     for (seed, cx, cz, label) in jobs {
         let stem = format!("town-{label}-{seed}");
         if render_one(seed, cx, cz, &args.out_dir, &stem, args.planner_only) {
-            reports.push(format!("{label} {seed}: watertight ok"));
+            reports.push(format!("{label} {seed}: watertight + floating ok"));
         } else {
             ok = false;
             reports.push(format!("{label} {seed}: render/watertight failed"));
