@@ -142,6 +142,10 @@ pub enum CellKind {
     Vine,
     /// Harbour lighthouse on the breakwater end.
     Lighthouse,
+    /// Wayside shrine beside a road.
+    Shrine,
+    /// Dry-stone field wall along a farm or road.
+    FieldWall,
 }
 
 impl CellKind {

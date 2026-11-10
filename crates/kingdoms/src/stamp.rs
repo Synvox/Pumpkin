@@ -88,6 +88,8 @@ fn strip_feature_vegetation(
             | CellKind::MillRace
             | CellKind::Sluice
             | CellKind::WaterWheel
+            | CellKind::Shrine
+            | CellKind::FieldWall
     );
     let flowing = !plan.heights.is_dry(x, z);
     if !plan.strips_trees(x, z) && !wet_use && !flowing {
@@ -146,6 +148,8 @@ fn keeps_planned_timber(kind: CellKind) -> bool {
             | CellKind::WaterWheel
             | CellKind::Sluice
             | CellKind::Vine
+            | CellKind::Shrine
+            | CellKind::FieldWall
     )
 }
 
@@ -268,6 +272,7 @@ pub fn stamp_column(
             | CellKind::Bridge
             | CellKind::MillRace
             | CellKind::Sluice
+            | CellKind::WaterWheel
     ) {
         let planned = plan.heights.height(x, z);
         let sea = plan.heights.sea_level;
@@ -498,6 +503,8 @@ pub fn stamp_column(
         CellKind::Lighthouse => {
             place_lighthouse(sink, plan, x, ground, z, plan.heights.sea_level, &palette);
         }
+        CellKind::Shrine => place_shrine(sink, plan, x, ground, z, &palette),
+        CellKind::FieldWall => place_field_wall(sink, x, ground, z, &palette),
     }
     apply_column_damage(sink, plan, x, z, kind, floor, ground, &palette);
     // Harbour cranes used to punch mill walls. Restamp the mill envelope on
@@ -1698,7 +1705,16 @@ fn place_curtain(
             sink.put(x, top + 2, z, palette.slab);
         }
         if castle && r_banner(x, z) {
-            sink.put(x, top + 3, z, Block::RED_BANNER.default_state);
+            sink.put(
+                x,
+                top + 3,
+                z,
+                if (x + z) % 3 == 0 {
+                    Block::BLACK_BANNER.default_state
+                } else {
+                    Block::RED_BANNER.default_state
+                },
+            );
         }
         if castle && (x + z) % 9 == 0 {
             sink.put(x, top - 1, z, Block::LANTERN.default_state);
@@ -4085,11 +4101,9 @@ fn place_water_wheel(
     z: i32,
     palette: &Palette,
 ) {
+    const WHEEL_R: i32 = 5;
     let sea = plan.heights.sea_level;
     let water_y = plan.heights.height(x, z).min(sea).max(ground.min(sea));
-    if !plan.heights.is_dry(x, z) {
-        sink.put(x, water_y, z, Block::WATER.default_state);
-    }
     let mill = plan
         .lots
         .iter()
@@ -4098,51 +4112,117 @@ fn place_water_wheel(
             let (cx, cz) = lot.rect.center();
             (x - cx).abs() + (z - cz).abs()
         });
-    let da = mill.map_or_else(
+    let (along, out) = mill.map_or_else(
         || {
             let blob = blob_of(plan, x, z, CellKind::WaterWheel);
             let (cx, cz) = blob.center();
             if blob.width() >= blob.depth() {
-                x - cx
+                (x - cx, (z - blob.min_z).min(blob.max_z - z) + 1)
             } else {
-                z - cz
+                (z - cz, (x - blob.min_x).min(blob.max_x - x) + 1)
             }
         },
         |mill| {
             let (cx, cz) = mill.rect.center();
-            if matches!(mill.facing, Dir::East | Dir::West) {
+            let along = if matches!(mill.facing, Dir::East | Dir::West) {
                 z - cz
             } else {
                 x - cx
-            }
+            };
+            let out = match mill.facing {
+                Dir::West => x - mill.rect.max_x,
+                Dir::East => mill.rect.min_x - x,
+                Dir::North => z - mill.rect.max_z,
+                Dir::South => mill.rect.min_z - z,
+            };
+            (along, out)
         },
     );
-    // Standing disk in a vertical plane, hub at the waterline so half is submerged.
+    // Carve a well so bank dirt cannot hide the disk.
     let hub = sea;
-    for dy in -6..=6 {
-        let d2 = da * da + dy * dy;
-        if d2 > 36 {
+    clear_above(sink, x, hub - WHEEL_R, hub + WHEEL_R + 2, z);
+    sink.put(x, water_y.saturating_sub(1), z, palette.cobble);
+    if water_y <= sea {
+        sink.put(x, water_y, z, Block::WATER.default_state);
+        for y in (water_y + 1)..=(hub + WHEEL_R + 2) {
+            sink.put(x, y, z, Block::AIR.default_state);
+        }
+    }
+    if out <= 2 {
+        // Gap and visible axle standing out from the mill wall.
+        if along == 0 {
+            sink.put(x, hub, z, Block::STRIPPED_OAK_LOG.default_state);
+        }
+        return;
+    }
+    // Standing disk, at least 9 across, half below the waterline.
+    for dy in -WHEEL_R..=WHEEL_R {
+        let d2 = along * along + dy * dy;
+        if d2 > WHEEL_R * WHEEL_R {
             continue;
         }
         let y = hub + dy;
-        let on_axis = da == 0 || dy == 0;
-        let on_diag = da.abs() == dy.abs();
+        let on_axis = along == 0 || dy == 0;
+        let on_diag = along.abs() == dy.abs();
         let spoke = on_axis || on_diag;
-        let rim = d2 >= 20;
-        let paddle = rim && spoke && d2 >= 25;
-        let hub_cell = da == 0 && dy == 0;
+        let rim = d2 >= (WHEEL_R - 1) * (WHEEL_R - 1);
+        let paddle = rim && spoke;
+        let hub_cell = along == 0 && dy == 0;
+        // Fill the disk (pale birch) so an iso at 45° still reads as a wheel,
+        // not a handful of rim planks beside the mill.
         let block = if hub_cell {
-            palette.stripped
+            Block::STRIPPED_OAK_LOG.default_state
         } else if paddle {
-            palette.planks
+            Block::DARK_OAK_PLANKS.default_state
         } else if rim {
-            palette.stripped
-        } else if spoke {
-            palette.fence
+            Block::STRIPPED_DARK_OAK_LOG.default_state
         } else {
-            continue;
+            Block::BIRCH_PLANKS.default_state
         };
         sink.put(x, y, z, block);
+    }
+}
+
+fn place_shrine(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    sink.put(x, ground, z, palette.cobble);
+    clear_above(sink, x, ground + 1, ground + 6, z);
+    let centre = Dir::ALL
+        .iter()
+        .all(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) == CellKind::Shrine);
+    sink.put(x, ground + 1, z, palette.bricks);
+    if centre {
+        sink.put(x, ground + 2, z, palette.brick_wall);
+        sink.put(x, ground + 3, z, palette.brick_wall);
+        sink.put(x, ground + 4, z, palette.brick_wall);
+        sink.put(x, ground + 5, z, Block::RED_BANNER.default_state);
+    } else {
+        let face = Dir::ALL
+            .iter()
+            .copied()
+            .find(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) != CellKind::Shrine)
+            .unwrap_or(Dir::South);
+        sink.put(x, ground + 2, z, stair_state(palette.brick_stairs, face));
+        if (x + z) % 3 == 0 {
+            sink.put(x, ground + 3, z, Block::LANTERN.default_state);
+        }
+    }
+}
+
+fn place_field_wall(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+    sink.put(x, ground, z, palette.grass);
+    clear_above(sink, x, ground + 1, ground + 4, z);
+    sink.put(x, ground + 1, z, palette.cobble);
+    if (x + z) % 2 == 0 {
+        sink.put(x, ground + 2, z, palette.cobble_wall);
+    } else {
+        sink.put(x, ground + 2, z, palette.andesite);
     }
 }
 
@@ -4362,9 +4442,10 @@ fn place_watermill(
             );
         }
         if opening {
+            for y in (hub - 4)..=(hub + 5) {
+                sink.put(x, y, z, Block::IRON_BARS.default_state);
+            }
             sink.put(x, hub, z, palette.stripped);
-            sink.put(x, hub + 1, z, Block::IRON_BARS.default_state);
-            sink.put(x, hub + 2, z, Block::IRON_BARS.default_state);
         }
         if door && !opening && !wet_side {
             interior::place_door(sink, x, floor + 1, z, lot.facing, false);
@@ -4416,10 +4497,27 @@ fn place_bridge(
     sea: i32,
     palette: &Palette,
 ) {
-    let y = sea.max(ground) + 1;
-    sink.put(x, y, z, palette.planks);
+    let deck = sea.max(ground) + 2;
+    let pier = (sea - 3).min(ground).max(sink.floor_min() + 2);
+    if (x + z) % 4 == 0 {
+        for y in pier..=deck {
+            sink.put(
+                x,
+                y,
+                z,
+                if y <= sea {
+                    palette.cobble
+                } else {
+                    palette.bricks
+                },
+            );
+        }
+    }
+    sink.put(x, deck, z, palette.bricks);
+    clear_above(sink, x, deck + 1, deck + 4, z);
+    sink.put(x, deck + 1, z, palette.brick_wall);
     if (x + z) % 3 == 0 {
-        sink.put(x, y + 1, z, palette.fence);
+        sink.put(x, deck + 2, z, palette.fence);
     }
 }
 

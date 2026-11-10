@@ -84,6 +84,24 @@ pub fn write_renders(
         &out_dir.join(format!("{stem}-castle-skyline.png")),
         &skyline,
     )?;
+    for (rot, name) in [(0u8, "se"), (1u8, "sw")] {
+        save(
+            &out_dir.join(format!("{stem}-castle-skyline-{name}.png")),
+            &render_iso_view(
+                volume,
+                keep.0 - 36,
+                keep.1 - 36,
+                keep.0 + 36,
+                keep.1 + 36,
+                8,
+                1,
+                |_, _, _| true,
+                Some("Castle skyline · spires, towers, banners"),
+                false,
+                rot,
+            ),
+        )?;
+    }
     write_cutaways(plan, volume, out_dir, stem)?;
     write_scene_renders(plan, volume, out_dir, stem)?;
     Ok(())
@@ -155,7 +173,8 @@ fn write_scene_renders(
             | SceneKind::Tourney
             | SceneKind::Frontier
             | SceneKind::Manor
-            | SceneKind::Vineyard => 6,
+            | SceneKind::Vineyard
+            | SceneKind::Gorge => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -199,9 +218,9 @@ fn write_scene_renders(
         .iter()
         .find(|lot| lot.kind == BuildingKind::Watermill)
     {
-        let mut rect = mill.rect.inflate(12);
+        let mut rect = mill.rect.inflate(4);
         if let Some(wheel) = wheel_for_mill(plan, mill.rect) {
-            rect = union_rect(rect, wheel.inflate(8));
+            rect = union_rect(rect, wheel.inflate(1));
             save(
                 &out_dir.join(format!("{stem}-scene-water-wheel.png")),
                 &render_wheel_elevation(volume, wheel, "Water wheel"),
@@ -219,7 +238,7 @@ fn write_scene_renders(
             &render_exterior_rot(
                 volume,
                 rect,
-                4,
+                1,
                 "Watermill · wheel from the river",
                 river_rot,
             ),
@@ -227,7 +246,7 @@ fn write_scene_renders(
         for (rot, name) in [(0u8, "se"), (1u8, "sw"), (2u8, "nw"), (3u8, "ne")] {
             save(
                 &out_dir.join(format!("{stem}-scene-watermill-{name}.png")),
-                &render_exterior_rot(volume, rect, 4, &format!("Watermill · {name}"), rot),
+                &render_exterior_rot(volume, rect, 1, &format!("Watermill · {name}"), rot),
             )?;
         }
     }
@@ -266,7 +285,7 @@ fn write_scene_renders(
 }
 
 fn wheel_for_mill(plan: &TownPlan, mill: Rect) -> Option<Rect> {
-    let pad = mill.inflate(4);
+    let pad = mill.inflate(8);
     let mut found: Option<Rect> = None;
     for z in pad.min_z..=pad.max_z {
         for x in pad.min_x..=pad.max_x {
@@ -925,9 +944,11 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     if id == Block::OAK_PLANKS.id {
         return [162, 130, 78];
     }
+    if id == Block::BIRCH_PLANKS.id {
+        return [216, 204, 160];
+    }
     if id == Block::WHITE_TERRACOTTA.id
         || id == Block::CALCITE.id
-        || id == Block::BIRCH_PLANKS.id
         || id == Block::LIGHT_GRAY_TERRACOTTA.id
     {
         return [220, 214, 200];

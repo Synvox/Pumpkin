@@ -707,7 +707,7 @@ fn ring_towers(
         ],
     };
     let roofs = [
-        RoofKind::Cone,
+        RoofKind::Spire,
         RoofKind::Crenellated,
         RoofKind::Cone,
         RoofKind::Crenellated,
@@ -750,7 +750,7 @@ fn ring_towers(
                 cx: x + 2,
                 cz: z + 2,
                 radius: 2,
-                height: height + 4,
+                height: height + 8,
                 shape: TowerShape::Round,
                 roof: RoofKind::Cone,
                 inner: false,
