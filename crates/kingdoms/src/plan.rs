@@ -23,7 +23,7 @@ use crate::info::{GateInfo, GateKind, RoadInfo, TownInfo};
 use crate::palette::PaletteKind;
 use crate::rng::TownRng;
 use crate::scenes::{
-    Scene, SceneKind, force_lot, paint_harbour_town, paint_scene_yards, place_scenes,
+    Scene, SceneKind, force_lot, paint_harbour_town, paint_scene_yards, place_scenes, try_lot,
 };
 use crate::town::{
     CELL_SIZE, TownPos, border_crossing, border_goal, town_containing, town_in_cell,
@@ -34,7 +34,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 10;
+pub const PLAN_CACHE_VERSION: u32 = 11;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -607,6 +607,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     let bounds = clip_to_grid(&grid, union(core, hinter));
     let mut occ = Occupancy::new(bounds);
     let castle = paint_castle(&mut occ, &grid, castle_rect, &mut rng, capital);
+    paint_keep_forecourt(&mut occ, &castle);
 
     let market = flattest_dry(&grid, town_rect, 28, 28);
     occ.fill(market, CellKind::Market, false);
@@ -660,6 +661,9 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     );
 
     let mut lots = place_lots(&mut occ, &grid, town_rect, market, &mut rng, seed, palette);
+    paint_street_infill(
+        &mut occ, &grid, &mut lots, seed, town_rect, market, palette, &mut rng,
+    );
     paint_civic_square(&mut occ, &grid, &mut lots, seed, market, town_rect, palette);
     paint_hedges_and_gardens(&mut occ, town_rect);
     place_farms(&mut occ, &grid, town_rect, castle_rect, &mut rng);
@@ -1038,6 +1042,57 @@ fn evict_lots(occ: &mut Occupancy, lots: &mut Vec<Lot>, rect: Rect) {
         for z in old.min_z..=old.max_z {
             for x in old.min_x..=old.max_x {
                 occ.set(x, z, CellKind::Empty, true);
+            }
+        }
+    }
+}
+
+/// Paved inner-bailey pad between keep and hall so a flag plinth has a court.
+fn paint_keep_forecourt(occ: &mut Occupancy, castle: &CastlePlan) {
+    let (kx, kz) = castle.keep.center();
+    let (hx, hz) = castle.hall.center();
+    let search = castle.inner.inflate(8);
+    let mut best = None;
+    let mut best_score = i32::MAX;
+    for z in search.min_z..=search.max_z {
+        for x in search.min_x..=search.max_x {
+            if !occ.bounds.contains(x, z) {
+                continue;
+            }
+            if castle.keep_mass_at(x, z).is_some() {
+                continue;
+            }
+            if !matches!(
+                occ.kind(x, z),
+                CellKind::Green | CellKind::Empty | CellKind::CastleCourt | CellKind::Plaza
+            ) {
+                continue;
+            }
+            let score = (x - kx).abs() + (z - kz).abs() + (x - hx).abs() + (z - hz).abs();
+            if score < best_score {
+                best_score = score;
+                best = Some((x, z));
+            }
+        }
+    }
+    let Some((cx, cz)) = best else {
+        return;
+    };
+    for dz in -2..=2 {
+        for dx in -2..=2 {
+            let x = cx + dx;
+            let z = cz + dz;
+            if !occ.bounds.contains(x, z) {
+                continue;
+            }
+            if castle.keep_mass_at(x, z).is_some() {
+                continue;
+            }
+            if matches!(
+                occ.kind(x, z),
+                CellKind::Green | CellKind::Empty | CellKind::CastleCourt | CellKind::Plaza
+            ) {
+                occ.set(x, z, CellKind::CastleCourt, false);
             }
         }
     }
@@ -1733,8 +1788,8 @@ fn place_lots(
     let mut lots = Vec::new();
     let kinds = lot_kinds(palette);
     let mut id = 1u16;
-    for z in (town.min_z + 6..town.max_z - 6).step_by(9) {
-        for x in (town.min_x + 6..town.max_x - 6).step_by(8) {
+    for z in (town.min_z + 5..town.max_z - 5).step_by(7) {
+        for x in (town.min_x + 5..town.max_x - 5).step_by(6) {
             let jx = x + rng.gen_range(-2, 3);
             let jz = z + rng.gen_range(-2, 3);
             if market.inflate(3).contains(jx, jz) {
@@ -1763,12 +1818,99 @@ fn place_lots(
             paint_eaves(occ, rect);
             lots.push(lot);
             id += 1;
-            if lots.len() >= 40 {
+            if lots.len() >= 64 {
                 return lots;
             }
         }
     }
     lots
+}
+
+fn paint_street_infill(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    town: Rect,
+    market: Rect,
+    palette: PaletteKind,
+    rng: &mut TownRng,
+) {
+    let kinds: &[BuildingKind] = match palette {
+        PaletteKind::Sandstone => &[
+            BuildingKind::Cottage,
+            BuildingKind::Townhouse,
+            BuildingKind::Townhouse,
+            BuildingKind::Blacksmith,
+            BuildingKind::Tavern,
+            BuildingKind::Cottage,
+        ],
+        PaletteKind::Spruce => &[
+            BuildingKind::Cottage,
+            BuildingKind::Longhouse,
+            BuildingKind::Timber,
+            BuildingKind::Blacksmith,
+            BuildingKind::Tavern,
+            BuildingKind::Cottage,
+        ],
+        PaletteKind::Oak => &[
+            BuildingKind::Cottage,
+            BuildingKind::Timber,
+            BuildingKind::Townhouse,
+            BuildingKind::Blacksmith,
+            BuildingKind::Tavern,
+            BuildingKind::Cottage,
+        ],
+    };
+    let mut extra = 0;
+    let mut z = town.min_z + 4;
+    while z <= town.max_z - 4 && extra < 28 {
+        let mut x = town.min_x + 4;
+        while x <= town.max_x - 4 && extra < 28 {
+            if !matches!(
+                occ.kind(x, z),
+                CellKind::Road
+                    | CellKind::RoadStairN
+                    | CellKind::RoadStairS
+                    | CellKind::RoadStairE
+                    | CellKind::RoadStairW
+            ) {
+                x += 5;
+                continue;
+            }
+            let Some(&kind) = rng.choose(kinds) else {
+                x += 5;
+                continue;
+            };
+            let (w, d) = kind.size();
+            for dir in Dir::ALL {
+                let ox = x + dir.dx() * (w / 2 + 2);
+                let oz = z + dir.dz() * (d / 2 + 2);
+                let rect = Rect::new(
+                    ox - w / 2,
+                    oz - d / 2,
+                    ox - w / 2 + w - 1,
+                    oz - d / 2 + d - 1,
+                );
+                if market.inflate(3).intersects(rect)
+                    || !town.contains(rect.min_x, rect.min_z)
+                    || !town.contains(rect.max_x, rect.max_z)
+                {
+                    continue;
+                }
+                let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+                if hi.saturating_sub(lo) > 6 {
+                    continue;
+                }
+                if try_lot(occ, grid, lots, seed, kind, rect, dir.opposite()).is_some() {
+                    extra += 1;
+                    break;
+                }
+            }
+            x += 5;
+        }
+        z += 5;
+    }
 }
 
 fn lot_kinds(palette: PaletteKind) -> &'static [BuildingKind] {
@@ -2161,7 +2303,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 10);
+        assert_eq!(PLAN_CACHE_VERSION, 11);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -2199,8 +2341,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 10;
-    const PLAN_LAYOUT_HASH: u64 = 0xfd4e_f942_51e5_1e55;
+    const PLAN_LAYOUT_VERSION: u32 = 11;
+    const PLAN_LAYOUT_HASH: u64 = 0xef54_6263_fe07_4442;
 
     #[test]
     fn plan_cache_version_tracks_layout() {
