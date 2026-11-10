@@ -131,18 +131,41 @@ fn write_flag_renders(
         0,
     );
     save(&out_dir.join(format!("{stem}-flag-se.png")), &crop)?;
+    let (kx, kz) = plan.castle.keep.center();
+    let ox = (fx - kx).signum() * 3;
+    let oz = (fz - kz).signum() * 3;
+    let mast_top = owned.top(fx, fz).map_or(80, |(y, _)| y);
+    let slab_y = mast_top - 4;
+    let mut rot = 0u8;
+    let mut best = i32::MIN;
+    for candidate in 0u8..4 {
+        let (lx, lz) = iso_local(
+            candidate,
+            fx,
+            fz,
+            kx.min(fx),
+            kz.min(fz),
+            kx.max(fx),
+            kz.max(fz),
+        );
+        let score = lx + lz;
+        if score > best {
+            best = score;
+            rot = candidate;
+        }
+    }
     let court = render_iso_view(
-        volume,
-        fx - 18,
-        fz - 18,
-        fx + 18,
-        fz + 18,
-        10,
+        &owned,
+        fx - 7 + ox,
+        fz - 7 + oz,
+        fx + 7 + ox,
+        fz + 7 + oz,
+        16,
         1,
-        |_, _, _| true,
+        |x, y, z| (x - fx).abs().max((z - fz).abs()) <= 2 || y <= slab_y,
         Some("Inner bailey · flag in courtyard context"),
         false,
-        0,
+        rot,
     );
     save(&out_dir.join(format!("{stem}-flag-court-se.png")), &court)?;
     let mut flipped = clone_volume(volume);

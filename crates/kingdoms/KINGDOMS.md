@@ -637,21 +637,22 @@ Plots: `/opt/cursor/artifacts/soak-r11-branch-summary.json`, `soak-r11-branch2-s
 
 Round 12 (this PR) captures at the keep flag plinth, not by clearing the whole inner bailey. Attackers stand on the plate; defenders within 4 blocks pause; hiders in walls do not. After the ram breaches or eight raiders storm the portcullis, the column paths through the gatehouse to the plate. Distant combatants skip targeting outside 48 blocks of a player; materialized raids snapshot by entity id; item/XP orbs despawn 8/tick; engines run on one town per tick. The first 40 live ticks of a town skip engines and repair scan. `/kingdom rank set` is permission level 2+. `PLAN_CACHE_VERSION` is 10. `KINGDOMS.md` has a Sails quickstart (token, cloudflared, HMAC, director loop).
 
-10-min identical-load soak (seed `20261025`, 3 fronts, `/raid start` 120 40, `KINGDOMS_BODY_BUDGET=600`, plan cache v7) vs master `c5dbd267`:
+10-min identical-load soak (seed `20261025`, 3 fronts, `/raid start` 120 40, `KINGDOMS_BODY_BUDGET=600`, debug, plan cache v10) vs master `7bab6500` (v9). War clock off so the three 120+40 gate raids stay the load. After the ram / storm breach, this branch paths the column through the gatehouse onto the plate.
 
-| | branch (this PR) | master `c5dbd267` |
+| | branch (this PR) | master `7bab6500` |
 | --- | ---: | ---: |
-| MSPT p50 / p95 / max | **58.27** / 81.00 / 103.65 | 68.20 / 96.95 / 130.79 |
-| director_ms p50 / p95 / max | **4.42** / 5.99 / 12.08 | 7.73 / 9.93 / 25.43 |
-| hitch log max (director_ms) | **0** | **471.72** (first live town ticks 214–222 ms) |
-| phase > 20 ms | **0** | 17 (`towns` 471.55) |
-| live fronts / bodies max | 3 / 480 | 3 / 480 |
-| entities max | **876** | 1029 |
-| `Can't keep up` | 34 | 31 |
+| MSPT p50 / p95 / max | **81.69** / 103.72 / 114.11 | 102.66 / 146.55 / 190.43 |
+| director_ms p50 / p95 / max | **2.74** / 10.27 / 155.62 | 8.30 / 16.27 / 32.07 |
+| first-town-tick hitch (director_ms) | **214.5** (`towns` 214.35) | **625.18** (`towns` 624.84) |
+| live fronts / bodies max | 3 / **480** | 3 / 456 |
+| captures / plate_r max | **2** / **109** | 0 / 0 (keep_r max 94; soak still skips hold) |
+| `Can't keep up` | 28 | 45 |
 
-Same 480-body load. Director hitch is gone. MSPT p50 is 10 ms better but still above the 50 ms budget; remaining cost is vanilla entity/chunk sim of ~480 NoAI soldiers (packet batching would need pumpkin-core).
+p50 is still above the 50 ms budget; leftover cost is vanilla entity/chunk sim of ~480 NoAI soldiers. Two of the three 120-raider sieges walked the gatehouse, stacked on the plate (`plate_r=109` and `60`, need=6), and flipped. Capital `0:0` stayed at the town gate (`keep_r=0`) for that run.
 
-Plots: `/opt/cursor/artifacts/soak-r12-branch-summary.json`, `soak-r12-master-summary.json`.
+A shorter war-clock pass (size 24, three fronts) also reached the plate: `plate_r=4`, three flips, hitch 0.
+
+Plots: `/opt/cursor/artifacts/soak-r12-branch480-summary.json`, `soak-r12-master480-summary.json`, `soak-r12-branch-clock24-summary.json`. Flag crops: `flag-plinth-se.png`, `flag-plinth-se-flipped.png`, `flag-plinth-court.png`.
 
 ### Commands
 
