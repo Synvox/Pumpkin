@@ -315,7 +315,8 @@ fn write_scene_renders(
             | SceneKind::NobleQuarter
             | SceneKind::DocksQuarter
             | SceneKind::LumberCamp
-            | SceneKind::CathedralClose => 6,
+            | SceneKind::CathedralClose
+            | SceneKind::Extramural => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -415,6 +416,45 @@ fn write_scene_renders(
             save(
                 &out_dir.join(format!("{stem}-scene-wall-walk.png")),
                 &render_exterior(volume, walk, 2, "City wall-walk · crenellated curtain"),
+            )?;
+            save(
+                &out_dir.join(format!("{stem}-scene-curtain-ring.png")),
+                &render_exterior(
+                    volume,
+                    walk.inflate(10),
+                    2,
+                    "City curtain · pomerium, wall and fosse",
+                ),
+            )?;
+        }
+        if let Some(cat) = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == SceneKind::Cathedral)
+        {
+            save(
+                &out_dir.join(format!("{stem}-scene-cathedral-city.png")),
+                &render_exterior(
+                    volume,
+                    cat.rect.inflate(8),
+                    3,
+                    "Cathedral · west towers, crossing and buttresses",
+                ),
+            )?;
+        }
+        if let Some(sub) = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == SceneKind::Extramural)
+        {
+            save(
+                &out_dir.join(format!("{stem}-scene-extramural.png")),
+                &render_exterior(
+                    volume,
+                    sub.rect.inflate(4),
+                    2,
+                    "Extramural suburb · cottages, tannery, almshouse",
+                ),
             )?;
         }
     }

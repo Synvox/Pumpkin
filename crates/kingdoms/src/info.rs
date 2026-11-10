@@ -353,7 +353,8 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             | SceneKind::MarketQuarter
             | SceneKind::CraftsmenRow
             | SceneKind::DocksQuarter
-            | SceneKind::LumberCamp => {
+            | SceneKind::LumberCamp
+            | SceneKind::Extramural => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::Workstation, cx, cz));
             }

@@ -148,6 +148,8 @@ pub enum CellKind {
     FieldWall,
     /// Keep-courtyard flag plinth (pedestal, mast, pressure plates).
     FlagPlinth,
+    /// Dry fosse outside the lower-city curtain.
+    CityDitch,
 }
 
 impl CellKind {
@@ -321,6 +323,23 @@ impl Occupancy {
                     if dx * dx + dz * dz <= radius * radius + 1 {
                         self.set(x + dx, z + dz, kind, overwrite);
                     }
+                }
+            }
+        }
+    }
+
+    /// Paints a Chebyshev-thick polyline (a `radius` of 1 is three blocks wide).
+    pub fn stroke_square(
+        &mut self,
+        points: &[(i32, i32)],
+        radius: i32,
+        kind: CellKind,
+        overwrite: bool,
+    ) {
+        for &(x, z) in points {
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
+                    self.set(x + dx, z + dz, kind, overwrite);
                 }
             }
         }

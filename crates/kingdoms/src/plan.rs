@@ -36,7 +36,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 14;
+pub const PLAN_CACHE_VERSION: u32 = 15;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -708,6 +708,8 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     );
     if capital {
         punch_road_gates(&mut occ, town_rect, &mut gates);
+        paint_pomerium(&mut occ, town_rect);
+        paint_city_ditch(&mut occ, town_rect, castle_rect, gate);
     }
 
     let mut lots = place_lots(
@@ -807,6 +809,17 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
             market,
             palette,
             &mut TownRng::salted(seed, 22, 4),
+        );
+        paint_pomerium(&mut occ, town_rect);
+        paint_extramural(
+            &mut occ,
+            &grid,
+            &mut lots,
+            seed,
+            town_rect,
+            gate,
+            &mut TownRng::salted(seed, 23, 5),
+            &mut scenes,
         );
     }
     thicken_water_bridges(&mut occ, &grid);
@@ -1561,7 +1574,7 @@ fn paint_city_curtain(
             continue;
         }
         let line = contour_edge(grid, a, b);
-        occ.stroke(&line, 2, CellKind::TownWall, false);
+        occ.stroke_square(&line, 1, CellKind::TownWall, false);
         ring.extend(line);
     }
     let mut towers = Vec::new();
@@ -1569,20 +1582,127 @@ fn paint_city_curtain(
     while i < ring.len() {
         let (x, z) = ring[i];
         if !castle.contains(x, z) && !occ.kind(x, z).is_castle() {
-            let tower = Rect::new(x - 2, z - 2, x + 2, z + 2);
-            towers.push(tower);
-            for dz in -2..=2 {
-                for dx in -2..=2 {
-                    if occ.kind(x + dx, z + dz).is_castle() {
-                        continue;
-                    }
-                    occ.set(x + dx, z + dz, CellKind::TownTower, true);
-                }
-            }
+            towers.push(place_round_city_tower(occ, x, z));
         }
         i += CITY_TOWER_SPACING;
     }
     (verts.to_vec(), towers)
+}
+
+fn place_round_city_tower(occ: &mut Occupancy, x: i32, z: i32) -> Rect {
+    let tower = Rect::new(x - 3, z - 3, x + 3, z + 3);
+    for dz in -3..=3 {
+        for dx in -3..=3 {
+            if dx * dx + dz * dz > 10 {
+                continue;
+            }
+            if occ.kind(x + dx, z + dz).is_castle() {
+                continue;
+            }
+            occ.set(x + dx, z + dz, CellKind::TownTower, true);
+        }
+    }
+    tower
+}
+
+fn paint_pomerium(occ: &mut Occupancy, town: Rect) {
+    for z in town.min_z..=town.max_z {
+        for x in town.min_x..=town.max_x {
+            let d = (x - town.min_x)
+                .min(town.max_x - x)
+                .min(z - town.min_z)
+                .min(town.max_z - z);
+            if d > 2 {
+                continue;
+            }
+            let kind = occ.kind(x, z);
+            if kind.is_castle()
+                || matches!(
+                    kind,
+                    CellKind::Building
+                        | CellKind::TownWall
+                        | CellKind::TownTower
+                        | CellKind::TownGate
+                        | CellKind::Road
+                        | CellKind::RoadStairN
+                        | CellKind::RoadStairS
+                        | CellKind::RoadStairE
+                        | CellKind::RoadStairW
+                        | CellKind::Bridge
+                        | CellKind::Market
+                        | CellKind::Well
+                        | CellKind::Fountain
+                        | CellKind::CathedralNave
+                        | CellKind::CathedralTransept
+                        | CellKind::CathedralChoir
+                        | CellKind::CathedralTower
+                        | CellKind::CathedralButtress
+                        | CellKind::Grave
+                        | CellKind::Arcade
+                        | CellKind::Lychgate
+                )
+            {
+                continue;
+            }
+            occ.set(x, z, CellKind::Plaza, true);
+        }
+    }
+}
+
+fn paint_city_ditch(occ: &mut Occupancy, town: Rect, castle: Rect, gate: Dir) {
+    let wall = town.inflate(2);
+    for z in wall.min_z - 4..=wall.max_z + 4 {
+        for x in wall.min_x - 4..=wall.max_x + 4 {
+            let skip = match gate {
+                Dir::South => z < wall.min_z,
+                Dir::North => z > wall.max_z,
+                Dir::East => x < wall.min_x,
+                Dir::West => x > wall.max_x,
+            };
+            if skip {
+                continue;
+            }
+            if castle.contains(x, z) || occ.kind(x, z).is_castle() {
+                continue;
+            }
+            let dx = if x < wall.min_x {
+                wall.min_x - x
+            } else if x > wall.max_x {
+                x - wall.max_x
+            } else {
+                0
+            };
+            let dz = if z < wall.min_z {
+                wall.min_z - z
+            } else if z > wall.max_z {
+                z - wall.max_z
+            } else {
+                0
+            };
+            let out = dx.max(dz);
+            if !(1..=4).contains(&out) {
+                continue;
+            }
+            if matches!(
+                occ.kind(x, z),
+                CellKind::TownWall
+                    | CellKind::TownTower
+                    | CellKind::TownGate
+                    | CellKind::Road
+                    | CellKind::RoadStairN
+                    | CellKind::RoadStairS
+                    | CellKind::RoadStairE
+                    | CellKind::RoadStairW
+                    | CellKind::Bridge
+                    | CellKind::Harbor
+                    | CellKind::Quay
+                    | CellKind::Dock
+            ) {
+                continue;
+            }
+            occ.set(x, z, CellKind::CityDitch, true);
+        }
+    }
 }
 
 fn contour_edge(grid: &HeightGrid, a: (i32, i32), b: (i32, i32)) -> Vec<(i32, i32)> {
@@ -1659,14 +1779,7 @@ fn punch_gatehouse(occ: &mut Occupancy, x: i32, z: i32, facing: Dir) {
         Dir::East | Dir::West => (0, 6),
     };
     for &(ox, oz) in &[(tx, tz), (-tx, -tz)] {
-        for dz in -2..=2 {
-            for dx in -2..=2 {
-                if occ.kind(x + ox + dx, z + oz + dz).is_castle() {
-                    continue;
-                }
-                occ.set(x + ox + dx, z + oz + dz, CellKind::TownTower, true);
-            }
-        }
+        let _ = place_round_city_tower(occ, x + ox, z + oz);
     }
 }
 
@@ -2716,6 +2829,13 @@ fn packable_city_lot(
     if !town.contains(rect.min_x, rect.min_z) || !town.contains(rect.max_x, rect.max_z) {
         return false;
     }
+    let edge = (rect.min_x - town.min_x)
+        .min(town.max_x - rect.max_x)
+        .min(rect.min_z - town.min_z)
+        .min(town.max_z - rect.max_z);
+    if edge <= 2 {
+        return false;
+    }
     if market.inflate(2).intersects(rect) {
         return false;
     }
@@ -2737,9 +2857,30 @@ fn packable_city_lot(
             ) {
                 return false;
             }
+            if near_gothic_pack(occ, x, z) {
+                return false;
+            }
         }
     }
     true
+}
+
+fn near_gothic_pack(occ: &Occupancy, x: i32, z: i32) -> bool {
+    for dz in -2..=2 {
+        for dx in -2..=2 {
+            if matches!(
+                occ.kind(x + dx, z + dz),
+                CellKind::CathedralNave
+                    | CellKind::CathedralTransept
+                    | CellKind::CathedralChoir
+                    | CellKind::CathedralTower
+                    | CellKind::CathedralButtress
+            ) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Wall-to-wall 2–3 storey jettied houses along lanes, then leftover gardens
@@ -2828,6 +2969,140 @@ fn pack_jettied_city(
     }
     paint_small_squares(occ, town, market);
     paint_hedges_and_gardens(occ, town);
+}
+
+fn paint_extramural(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    town: Rect,
+    gate: Dir,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let start = wall_gate(town, gate);
+    let mut cover = Rect::new(start.0, start.1, start.0, start.1);
+    let mut placed = 0;
+    let facing = gate.opposite();
+    let (hw, hd) = BuildingKind::Church.size();
+    let hospital = extramural_rect(start, gate, 22, 0, hw, hd);
+    if !town.inflate(6).intersects(hospital)
+        && force_lot(
+            occ,
+            grid,
+            lots,
+            seed,
+            BuildingKind::Church,
+            hospital,
+            facing,
+        )
+        .is_some()
+    {
+        cover = union(cover, hospital);
+        placed += 1;
+    }
+    let (bw, bd) = BuildingKind::Barn.size();
+    let tannery = find_tannery_site(occ, grid, town, start, gate)
+        .unwrap_or_else(|| extramural_rect(start, gate, 32, 12, bw, bd));
+    if !town.inflate(6).intersects(tannery)
+        && (try_lot(occ, grid, lots, seed, BuildingKind::Barn, tannery, facing).is_some()
+            || force_lot(occ, grid, lots, seed, BuildingKind::Barn, tannery, facing).is_some())
+    {
+        cover = union(cover, tannery);
+        placed += 1;
+    }
+    let (cw, cd) = BuildingKind::Cottage.size();
+    for i in 0..12 {
+        let dist = 14 + i * 5 + rng.gen_range(0, 3);
+        let side = if rng.chance(1, 2) { 10 } else { -11 };
+        let rect = extramural_rect(start, gate, dist, side, cw, cd);
+        if town.inflate(6).intersects(rect) {
+            continue;
+        }
+        let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+        if hi - lo > 10 {
+            continue;
+        }
+        if try_lot(occ, grid, lots, seed, BuildingKind::Cottage, rect, facing).is_some()
+            || force_lot(occ, grid, lots, seed, BuildingKind::Cottage, rect, facing).is_some()
+        {
+            cover = union(cover, rect);
+            placed += 1;
+        }
+    }
+    if placed >= 2 {
+        scenes.push(Scene {
+            kind: SceneKind::Extramural,
+            rect: cover.inflate(4),
+        });
+    }
+}
+
+fn extramural_rect(start: (i32, i32), gate: Dir, dist: i32, side: i32, w: i32, d: i32) -> Rect {
+    let along = match gate {
+        Dir::North | Dir::South => (side, 0),
+        Dir::East | Dir::West => (0, side),
+    };
+    let x = start.0 + gate.dx() * dist + along.0;
+    let z = start.1 + gate.dz() * dist + along.1;
+    match gate {
+        Dir::South => Rect::new(x - w / 2, z, x - w / 2 + w - 1, z + d - 1),
+        Dir::North => Rect::new(x - w / 2, z - d + 1, x - w / 2 + w - 1, z),
+        Dir::East => Rect::new(x, z - d / 2, x + w - 1, z - d / 2 + d - 1),
+        Dir::West => Rect::new(x - w + 1, z - d / 2, x, z - d / 2 + d - 1),
+    }
+}
+
+fn find_tannery_site(
+    occ: &Occupancy,
+    grid: &HeightGrid,
+    town: Rect,
+    start: (i32, i32),
+    gate: Dir,
+) -> Option<Rect> {
+    let (w, d) = BuildingKind::Barn.size();
+    let mut best = None;
+    let mut best_s = i32::MIN;
+    for dist in 14..48 {
+        for side in [-12, -6, 6, 12] {
+            let (ox, oz) = match gate {
+                Dir::North | Dir::South => (side, 0),
+                Dir::East | Dir::West => (0, side),
+            };
+            let x = start.0 + gate.dx() * dist + ox;
+            let z = start.1 + gate.dz() * dist + oz;
+            let rect = Rect::new(x, z, x + w - 1, z + d - 1);
+            if town.inflate(4).intersects(rect) {
+                continue;
+            }
+            if !occ.bounds.contains(rect.min_x, rect.min_z)
+                || !occ.bounds.contains(rect.max_x, rect.max_z)
+            {
+                continue;
+            }
+            if !grid.rect_is_dry(rect) {
+                continue;
+            }
+            let mut wet = 0;
+            for dz in -4..=d + 3 {
+                for dx in -4..=w + 3 {
+                    if !grid.is_dry(x + dx, z + dz) {
+                        wet += 1;
+                    }
+                }
+            }
+            if wet < 4 {
+                continue;
+            }
+            let score = wet * 4 - dist;
+            if score > best_s {
+                best_s = score;
+                best = Some(rect);
+            }
+        }
+    }
+    best
 }
 
 fn paint_small_squares(occ: &mut Occupancy, town: Rect, market: Rect) {
@@ -3192,7 +3467,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 14);
+        assert_eq!(PLAN_CACHE_VERSION, 15);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -3230,8 +3505,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 14;
-    const PLAN_LAYOUT_HASH: u64 = 0x4ee7_5435_ae80_3db6;
+    const PLAN_LAYOUT_VERSION: u32 = 15;
+    const PLAN_LAYOUT_HASH: u64 = 0x7dfc_e026_702e_3b24;
 
     #[test]
     fn plan_cache_version_tracks_layout() {
