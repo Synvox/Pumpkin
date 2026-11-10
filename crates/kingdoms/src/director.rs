@@ -118,7 +118,7 @@ const ROUT_TAGS_PER_TICK: usize = 8;
 /// Leftover raid bodies despawned per town per tick.
 const DESPAWNS_PER_TICK: usize = 12;
 /// Far wave members turned into sliding ghosts per town per tick.
-const GHOST_SPAWNS_PER_TICK: usize = 40;
+const GHOST_SPAWNS_PER_TICK: usize = 8;
 /// Nearby players credited on a capture or successful defense.
 const CREDIT_RANGE: f64 = 64.0;
 /// Minimum ticks between any soldier/captain line on the whole director.
@@ -2914,7 +2914,11 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         world,
         town_id,
         tick,
-        &player_xz,
+        if amortizing {
+            &[]
+        } else {
+            player_xz.as_slice()
+        },
         march_dest,
         keep_dest,
         keep_rect,
@@ -5967,6 +5971,10 @@ fn overlay_flag_dest(
         return outermost_gate_dest(gates, flag_dest);
     }
     if breached || capturing {
+        let dist = (x - f64::from(flag_dest.x)).hypot(z - f64::from(flag_dest.z));
+        if dist <= STUCK_STORM_RANGE {
+            return flag_dest;
+        }
         return inward_siege_dest(x, z, gates, gatehouse, inner, flag_dest);
     }
     dest
@@ -6592,6 +6600,13 @@ fn tick_town_flag(
                 hold_ticks()
             );
         }
+    } else if presence.attackers_on_plate > 0 && tick.is_multiple_of(20) {
+        tracing::info!(
+            "kingdoms capture blocked town={town_id} plate_r={} plate_d={} need={occupy_need} paused={}",
+            presence.attackers_on_plate,
+            presence.defenders_on_plate,
+            update.paused
+        );
     }
     let flag = war.scene.flag();
     let fx = f64::from(flag.x);
@@ -7726,7 +7741,7 @@ mod tests {
         assert_eq!(SPAWNS_PER_WORLD_TICK, 12);
         assert_eq!(ROUT_TAGS_PER_TICK, 8);
         assert_eq!(DESPAWNS_PER_TICK, 12);
-        assert_eq!(GHOST_SPAWNS_PER_TICK, 40);
+        assert_eq!(GHOST_SPAWNS_PER_TICK, 8);
         assert_eq!(REPAIR_SCAN_COLUMNS, 4);
         assert_eq!(REPAIR_PLACE_PER_TICK, 2);
         assert_eq!(TICKETS_PER_TICK, 1);
@@ -7993,6 +8008,24 @@ mod tests {
         assert!(
             inner.contains(dest.x, dest.z) && !gatehouse.contains(dest.x, dest.z),
             "after the breach the column walks through the gatehouse, dest={dest:?}"
+        );
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Pillager,
+            false,
+            f64::from(flag.x) + 10.5,
+            f64::from(flag.z) + 0.5,
+            inner,
+            gatehouse,
+            &[],
+            true,
+            false,
+            flag,
+        );
+        assert_eq!(
+            (dest.x, dest.z),
+            (flag.x, flag.z),
+            "raiders already inside {STUCK_STORM_RANGE} of the mast walk the plate"
         );
     }
 
