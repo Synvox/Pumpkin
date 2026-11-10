@@ -1520,9 +1520,9 @@ impl World {
     }
 
     /// Full vanilla mob tick within this player distance.
-    const VANILLA_FULL_RANGE: f64 = 32.0;
+    const VANILLA_FULL_RANGE: f64 = 16.0;
     /// 5 Hz vanilla tick out to this, then 1 Hz beyond.
-    const VANILLA_SIM_RANGE: f64 = 64.0;
+    const VANILLA_SIM_RANGE: f64 = 32.0;
     const VANILLA_FAR_PERIOD: u32 = 20;
 
     fn nearest_player_xz(x: f64, z: f64, players: &[(f64, f64)]) -> Option<f64> {
@@ -7716,11 +7716,11 @@ mod tests {
     #[test]
     fn vanilla_mobs_full_tick_near_a_player() {
         assert!(!World::skip_vanilla_activation(Some(8.0), 3));
-        assert!(!World::skip_vanilla_activation(Some(32.0), 7));
-        assert!(World::skip_vanilla_activation(Some(33.0), 1));
-        assert!(!World::skip_vanilla_activation(Some(48.0), 4));
-        assert!(World::skip_vanilla_activation(Some(96.0), 1));
-        assert!(!World::skip_vanilla_activation(Some(96.0), 20));
+        assert!(!World::skip_vanilla_activation(Some(16.0), 7));
+        assert!(World::skip_vanilla_activation(Some(17.0), 1));
+        assert!(!World::skip_vanilla_activation(Some(32.0), 4));
+        assert!(World::skip_vanilla_activation(Some(48.0), 1));
+        assert!(!World::skip_vanilla_activation(Some(48.0), 20));
         assert!(World::skip_vanilla_activation(None, 1));
     }
 

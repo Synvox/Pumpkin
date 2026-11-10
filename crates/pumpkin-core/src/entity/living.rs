@@ -4709,7 +4709,7 @@ mod ai_step_tests {
     }
 
     #[tokio::test]
-    async fn director_driven_sparse_tick_skips_three_of_four() -> TestResult {
+    async fn director_driven_bodies_skip_every_vanilla_tick() -> TestResult {
         let folder = tempfile::tempdir()?;
         let world = world(&folder);
         let mob = probe(world.clone(), Arc::new(AtomicUsize::new(0)));
@@ -4726,7 +4726,7 @@ mod ai_step_tests {
             .filter(|skip| *skip)
             .count();
         world.level.shutdown().await;
-        assert_eq!(skipped, 6);
+        assert_eq!(skipped, 8);
         Ok(())
     }
 
