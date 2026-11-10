@@ -1933,9 +1933,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
     } else {
         tick_abstract_raid(world, town_id, tick);
-        if town_has_player_within(world, town_id, PLAYER_APPROACH_RANGE) {
-            queue_raid_warmup(town_id);
-        }
+        // Tickets only for a scheduled raid. Warming idle towns on approach
+        // was the 200–470 ms first-contact hitch (209 tickets at join).
         tick_raid_warmup(world, town_id, tick);
         if !near || tickets_pending(town_id) {
             return;
@@ -3217,7 +3216,6 @@ fn tick_raid_warmup(world: &Arc<World>, town_id: &str, tick: u32) {
     if batch.is_empty() {
         return;
     }
-    apply_force_tickets(world, &batch, true);
     flush_tickets_off_tick(world, batch.clone(), true);
     let n = batch.len();
     tracing::info!(
@@ -3267,19 +3265,19 @@ fn apply_force_tickets(world: &World, chunks: &[Vector2<i32>], add: bool) {
     }
 }
 
-/// Flush ticket changes and fetch chunks off the director tick.
-/// `send_change` on the tick was the 200–470 ms first-contact hitch.
-fn flush_tickets_off_tick(world: &Arc<World>, chunks: Vec<Vector2<i32>>, fetch: bool) {
+/// Apply tickets, `send_change`, and fetch chunks off the director tick.
+/// Locking `chunk_loading` on the tick was the 200–470 ms first-contact hitch.
+fn flush_tickets_off_tick(world: &Arc<World>, chunks: Vec<Vector2<i32>>, add: bool) {
     if chunks.is_empty() {
         return;
     }
     let loaded_world = Arc::clone(world);
-    let level = Arc::clone(&world.level);
     world.level.spawn_task(async move {
-        send_ticket_change(&level);
-        if fetch {
+        apply_force_tickets(&loaded_world, &chunks, add);
+        send_ticket_change(&loaded_world.level);
+        if add {
             for pos in &chunks {
-                level.get_or_fetch_chunk(*pos, |_| ()).await;
+                loaded_world.level.get_or_fetch_chunk(*pos, |_| ()).await;
             }
         }
         loaded_world.update_active_chunks();
@@ -3682,7 +3680,6 @@ fn drain_pending_work(world: &Arc<World>, town_id: &str) {
         (despawn, tickets)
     };
     despawn_entities(world, &despawn);
-    apply_force_tickets(world, &tickets, false);
     flush_tickets_off_tick(world, tickets, false);
 }
 
@@ -5415,7 +5412,6 @@ fn dematerialize_raid(world: &Arc<World>, town_id: &str) {
         (despawn, tickets)
     };
     despawn_entities(world, &despawn);
-    apply_force_tickets(world, &tickets, false);
     flush_tickets_off_tick(world, tickets, false);
     tracing::info!(
         town = town_id,
@@ -5510,7 +5506,6 @@ fn finish_abstract_victory(world: &Arc<World>, town_id: &str, tick: u32) {
         });
         tickets
     };
-    apply_force_tickets(world, &tickets, false);
     flush_tickets_off_tick(world, tickets, false);
     tracing::info!(town = town_id, "kingdoms abstract raid defeated");
 }
@@ -5777,7 +5772,6 @@ pub fn stop_raid(town_id: Option<&str>) -> u32 {
     let (n, tickets, despawn) = lock().stop_raid(town_id);
     for world in worlds {
         despawn_entities(&world, &despawn);
-        apply_force_tickets(&world, &tickets, false);
         flush_tickets_off_tick(&world, tickets.clone(), false);
     }
     n
