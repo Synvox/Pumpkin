@@ -146,6 +146,8 @@ const HEAVY_TOWNS_PER_TICK: u32 = 1;
 const STORMING_RANGE: f64 = 8.0;
 /// This many pillagers at the portcullis count as a breach even without the ram.
 const STORMING_COUNT: usize = 8;
+/// Allied bodies this close to the plate rush it once capture starts.
+const DEFENDER_RUSH_RANGE: f64 = 48.0;
 
 static WORST_MSPT_CENTS: AtomicU32 = AtomicU32::new(0);
 static WORST_DIRECTOR_CENTS: AtomicU32 = AtomicU32::new(0);
@@ -419,6 +421,7 @@ struct TownWar {
     punch_repair_at: u32,
     punch_break: Vec<engines::PunchHit>,
     pending_bars: Vec<BlockPos>,
+    pending_breach: Vec<BlockPos>,
     crossed_curtain: bool,
     logged_archer: bool,
     logged_sally: bool,
@@ -724,6 +727,7 @@ impl Director {
             war.punch_repair_at = 0;
             war.punch_break.clear();
             war.pending_bars.clear();
+            war.pending_breach.clear();
             war.crossed_curtain = false;
             war.logged_archer = false;
             war.logged_sally = false;
@@ -1195,6 +1199,7 @@ impl TownWar {
             punch_repair_at: 0,
             punch_break: Vec::new(),
             pending_bars: Vec::new(),
+            pending_breach: Vec::new(),
             crossed_curtain: false,
             logged_archer: false,
             logged_sally: false,
@@ -2374,6 +2379,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     }
     if !amortizing {
         apply_pending_bars(world, town_id);
+        apply_pending_breach(world, town_id);
     }
 
     // Director-owned combat: NoAI + flow-field slide. Vanilla melee/bow/path
@@ -2880,6 +2886,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
     }
     tick_moving_ram(world, town_id, tick, &snapshots, breached, &mut ram_at_gate);
+    if amortizing {
+        prewarm_siege_columns(world, town_id);
+        continue_engine_spawns(world, town_id);
+    }
     let run_heavy = !amortizing && take_heavy_town();
     if run_heavy {
         let engines_started = Instant::now();
@@ -2906,21 +2916,28 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     .zip(w.scene.gates().first().copied())
             })
         };
+        let cells = if let Some((post, gate)) = gate {
+            siege::gate_bar_cells(world, gate, standing_y(world, post))
+        } else {
+            Vec::new()
+        };
+        let n = cells.len();
         {
             let mut dir = lock();
             if let Some(war) = dir.towns.get_mut(town_id) {
                 war.gate_breached = true;
+                if war.pending_breach.is_empty() {
+                    war.pending_breach = cells;
+                }
             }
-        }
-        if let Some((post, gate)) = gate {
-            let cleared = siege::breach_gate(world, gate, standing_y(world, post));
-            let mut dir = lock();
-            if cleared > 0 || storming {
+            if let Some((_, gate)) = gate
+                && (n > 0 || storming)
+            {
                 dir.push_event(CombatEvent {
                     tick,
                     kind: CombatKind::Breach,
                     actor: 0,
-                    other: Some(cleared as i32),
+                    other: Some(n as i32),
                     x: f64::from(gate.x),
                     z: f64::from(gate.z),
                     note: if ram_at_gate {
@@ -3134,10 +3151,12 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         }
         let origin = ladders.first().copied().unwrap_or(camp);
         let y = f64::from(standing_y(world, origin));
-        let tower = engines::spawn_tower(
-            world,
-            Vector3::new(f64::from(origin.x) + 0.5, y, f64::from(origin.z) + 0.5),
-        );
+        let mut tower = engines::empty_tower(Vector3::new(
+            f64::from(origin.x) + 0.5,
+            y,
+            f64::from(origin.z) + 0.5,
+        ));
+        engines::append_tower_parts(world, &mut tower, engines::ENGINE_PARTS_PER_TICK);
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
             war.siege_tower = Some(tower);
@@ -3161,10 +3180,12 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         }
         let origin = rams[0];
         let y = f64::from(standing_y(world, origin));
-        let ram = crate::ram::spawn_ram(
-            world,
-            Vector3::new(f64::from(origin.x) + 0.5, y, f64::from(origin.z) + 0.5),
-        );
+        let mut ram = crate::ram::empty_ram(Vector3::new(
+            f64::from(origin.x) + 0.5,
+            y,
+            f64::from(origin.z) + 0.5,
+        ));
+        crate::ram::append_ram_parts(world, &mut ram, crate::ram::RAM_PARTS_PER_TICK);
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
             war.ram = Some(ram);
@@ -4338,7 +4359,125 @@ fn tick_moving_ram(
     }
 }
 
+fn continue_engine_spawns(world: &Arc<World>, town_id: &str) -> bool {
+    let mut tower = {
+        let mut dir = lock();
+        dir.towns
+            .get_mut(town_id)
+            .and_then(|w| w.siege_tower.take())
+    };
+    if let Some(t) = tower.as_mut()
+        && !engines::tower_complete(t)
+    {
+        let n = engines::append_tower_parts(world, t, engines::ENGINE_PARTS_PER_TICK);
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.siege_tower = tower;
+        }
+        return n > 0;
+    }
+    if tower.is_some() {
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.siege_tower = tower;
+        }
+    }
+    let mut ram = {
+        let mut dir = lock();
+        dir.towns.get_mut(town_id).and_then(|w| w.ram.take())
+    };
+    if let Some(r) = ram.as_mut()
+        && !r.destroyed
+        && !crate::ram::ram_complete(r)
+    {
+        let n = crate::ram::append_ram_parts(world, r, crate::ram::RAM_PARTS_PER_TICK);
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.ram = ram;
+        }
+        return n > 0;
+    }
+    if ram.is_some() {
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.ram = ram;
+        }
+    }
+    false
+}
+
+fn prewarm_siege_columns(world: &World, town_id: &str) {
+    let posts = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        let camp = war
+            .raid
+            .as_ref()
+            .map_or_else(|| war.scene.keep(), |r| r.camp);
+        let wall = treb_wall_target(&war.scene, war.threatened, camp);
+        let mut posts = vec![camp, wall];
+        posts.extend(war.scene.trebuchet_posts().iter().copied());
+        posts.extend(war.scene.ram_posts().iter().copied());
+        posts.extend(war.scene.ladder_posts().iter().copied());
+        posts
+    };
+    for post in posts {
+        let y = standing_y(world, post);
+        let pos = BlockPos::new(post.x, y, post.z);
+        if world.is_loaded(&pos) {
+            let _ = world.get_block_and_state(&pos);
+        }
+    }
+}
+
 fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool) {
+    if continue_engine_spawns(world, town_id) {
+        return;
+    }
+    let spawn_missing_tower = {
+        let dir = lock();
+        dir.towns.get(town_id).is_some_and(|w| {
+            alarm && w.raid.as_ref().is_some_and(|r| !r.tower_spawned) && w.siege_tower.is_none()
+        })
+    };
+    if spawn_missing_tower {
+        let origin = {
+            let dir = lock();
+            dir.towns.get(town_id).map_or_else(
+                || ScenePost::new(0, 0),
+                |w| {
+                    w.scene
+                        .ladder_posts()
+                        .first()
+                        .copied()
+                        .or_else(|| w.scene.raid_camps().first().copied())
+                        .unwrap_or_else(|| w.scene.keep())
+                },
+            )
+        };
+        let y = f64::from(standing_y(world, origin));
+        let mut tower = engines::empty_tower(Vector3::new(
+            f64::from(origin.x) + 0.5,
+            y,
+            f64::from(origin.z) + 0.5,
+        ));
+        engines::append_tower_parts(world, &mut tower, engines::ENGINE_PARTS_PER_TICK);
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.siege_tower = Some(tower);
+            if let Some(raid) = &mut war.raid {
+                raid.tower_spawned = true;
+            }
+        }
+        return;
+    }
+    if apply_punch_break(world, town_id) {
+        apply_punch_repair(world, town_id, tick);
+        return;
+    }
+
     let (camp, wall, origin, should_fire, mut shot, tower, ladders_done, keep) = {
         let mut dir = lock();
         let Some(war) = dir.towns.get_mut(town_id) else {
@@ -4371,39 +4510,9 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
             war.scene.keep_rect(),
         )
     };
-    let spawn_missing_tower = {
-        let dir = lock();
-        dir.towns.get(town_id).is_some_and(|w| {
-            alarm && w.raid.as_ref().is_some_and(|r| !r.tower_spawned) && w.siege_tower.is_none()
-        })
-    };
-    if spawn_missing_tower {
-        let origin = {
-            let dir = lock();
-            dir.towns.get(town_id).map_or(camp, |w| {
-                w.scene
-                    .ladder_posts()
-                    .first()
-                    .copied()
-                    .or_else(|| w.scene.raid_camps().first().copied())
-                    .unwrap_or(camp)
-            })
-        };
-        let y = f64::from(standing_y(world, origin));
-        let tower = engines::spawn_tower(
-            world,
-            Vector3::new(f64::from(origin.x) + 0.5, y, f64::from(origin.z) + 0.5),
-        );
-        let mut dir = lock();
-        if let Some(war) = dir.towns.get_mut(town_id) {
-            war.siege_tower = Some(tower);
-            if let Some(raid) = &mut war.raid {
-                raid.tower_spawned = true;
-            }
-        }
-    }
     let wall_top = standing_y(world, wall);
     let ladder_floor = wall_top.saturating_sub(WALL_WALK_LIFT);
+    let mut wrote = should_fire;
 
     if should_fire {
         let oy = f64::from(standing_y(world, origin) + 8);
@@ -4456,7 +4565,7 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
 
     if let Some(mut moving) = tower {
         let arrived = engines::tick_tower(world, &mut moving, wall);
-        if arrived && !ladders_done {
+        if arrived && !ladders_done && !wrote {
             let n = raise_ladders(world, wall, camp, ladder_floor);
             let mut dir = lock();
             if let Some(war) = dir.towns.get_mut(town_id) {
@@ -4464,6 +4573,7 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
                 war.siege_tower = Some(moving);
             }
             note_ladders_raised(&mut dir, town_id, tick, wall, n);
+            wrote = true;
         } else {
             let mut dir = lock();
             if let Some(war) = dir.towns.get_mut(town_id) {
@@ -4472,7 +4582,7 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
         }
     }
 
-    if alarm && !ladders_done {
+    if alarm && !ladders_done && !wrote {
         let crew_at_wall = {
             let dir = lock();
             dir.towns.get(town_id).is_some_and(|w| {
@@ -4487,11 +4597,13 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
                     war.ladders_placed = true;
                 }
                 note_ladders_raised(&mut dir, town_id, tick, wall, n);
+                wrote = true;
             }
         }
     }
-    apply_punch_break(world, town_id);
-    apply_punch_repair(world, town_id, tick);
+    if !wrote {
+        apply_punch_repair(world, town_id, tick);
+    }
 }
 
 fn treb_wall_target(
@@ -4569,14 +4681,14 @@ fn enqueue_punch_break(town_id: &str, hits: Vec<engines::PunchHit>, tick: u32) {
     }
 }
 
-fn apply_punch_break(world: &Arc<World>, town_id: &str) {
+fn apply_punch_break(world: &Arc<World>, town_id: &str) -> bool {
     let hits = {
         let mut dir = lock();
         let Some(war) = dir.towns.get_mut(town_id) else {
-            return;
+            return false;
         };
         if war.punch_break.is_empty() {
-            return;
+            return false;
         }
         let n = war.punch_break.len().min(PUNCH_BREAK_PER_TICK);
         war.punch_break.drain(..n).collect::<Vec<_>>()
@@ -4590,6 +4702,7 @@ fn apply_punch_break(world: &Arc<World>, town_id: &str) {
     if placed > 0 {
         tracing::info!("kingdoms trebuchet punched wall holes={placed} town={town_id}");
     }
+    placed > 0
 }
 
 fn enqueue_punch_repair(town_id: &str, hits: &[engines::PunchHit], tick: u32) {
@@ -4647,6 +4760,29 @@ fn apply_punch_repair(world: &Arc<World>, town_id: &str, tick: u32) {
         tracing::info!(
             "kingdoms repair-by-diff refilled trebuchet hole placed={placed} town={town_id}"
         );
+    }
+}
+
+fn apply_pending_breach(world: &Arc<World>, town_id: &str) {
+    let cells = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        if war.pending_breach.is_empty() {
+            return;
+        }
+        let n = war.pending_breach.len().min(PUNCH_BREAK_PER_TICK);
+        war.pending_breach.drain(..n).collect::<Vec<_>>()
+    };
+    let mut cleared = 0u32;
+    for pos in cells {
+        if siege::clear_gate_bar(world, pos) {
+            cleared += 1;
+        }
+    }
+    if cleared > 0 {
+        tracing::info!(town = town_id, cleared, "kingdoms ram cleared gate bars");
     }
 }
 
@@ -5497,7 +5633,9 @@ fn dest_for(
             patrol_dest
         }
         Faction::Kingdom(_) if alarm || in_combat => {
-            if capturing || breached {
+            if capturing {
+                march_dest
+            } else if breached {
                 keep_dest
             } else {
                 march_dest
@@ -5538,7 +5676,11 @@ fn overlay_flag_dest(
         };
     }
     if capturing && !raider {
-        return inward_siege_dest(x, z, gates, gatehouse, inner, flag_dest);
+        let dist = (x - f64::from(flag_dest.x)).hypot(z - f64::from(flag_dest.z));
+        if dist <= DEFENDER_RUSH_RANGE {
+            return inward_siege_dest(x, z, gates, gatehouse, inner, flag_dest);
+        }
+        return dest;
     }
     if !raider {
         return dest;
@@ -7481,7 +7623,11 @@ mod tests {
             patrol,
             6_000,
         );
-        assert_eq!((dest.x, dest.z), (keep.x, keep.z));
+        assert_eq!(
+            (dest.x, dest.z),
+            (march.x, march.z),
+            "capturing guards hold the gate; overlay rushes those near the plate"
+        );
         let dest = dest_for(
             &Faction::Kingdom(KingdomId::new("alder")),
             MarchJob::Assault,
@@ -7535,6 +7681,25 @@ mod tests {
             (militia.x, militia.z),
             (keep.x, keep.z),
             "militia leave the inner gate for the plate"
+        );
+        assert!((DEFENDER_RUSH_RANGE - 48.0).abs() < f64::EPSILON);
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Kingdom(KingdomId::new("alder")),
+            false,
+            f64::from(keep.x) + 0.5,
+            f64::from(keep.z) + 60.5,
+            inner,
+            gatehouse,
+            &[],
+            true,
+            true,
+            keep,
+        );
+        assert_eq!(
+            (dest.x, dest.z),
+            (march.x, march.z),
+            "defenders beyond 48 blocks of the plate keep their post"
         );
     }
 
@@ -7650,6 +7815,9 @@ mod tests {
         assert_eq!(PUNCH_REPAIR_PER_TICK, 2);
         assert_eq!(PUNCH_BREAK_PER_TICK, 2);
         assert_eq!(PORTCULLIS_BARS_PER_TICK, 2);
+        assert_eq!(engines::ENGINE_PARTS_PER_TICK, 2);
+        assert_eq!(crate::ram::RAM_PARTS_PER_TICK, 2);
+        assert!((DEFENDER_RUSH_RANGE - 48.0).abs() < f64::EPSILON);
         assert!((PHASE_WARN_MS - 20.0).abs() < f64::EPSILON);
         assert_eq!(resolve_stand_y(117, None, 63), 117);
     }

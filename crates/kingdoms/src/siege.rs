@@ -613,13 +613,38 @@ pub fn place_portcullis_bar(world: &Arc<World>, pos: BlockPos) -> bool {
     true
 }
 
-/// Ram a threatened gate: iron bars become air so the courtyard is open.
-pub fn breach_gate(world: &Arc<World>, gate: GateInfo, floor_y: i32) -> u32 {
-    let mut cleared = 0u32;
+/// Iron-bar cells in a gate opening, for amortised ram writes.
+#[must_use]
+pub fn gate_bar_cells(world: &World, gate: GateInfo, floor_y: i32) -> Vec<BlockPos> {
+    let mut out = Vec::new();
     for pos in gate_cells(&gate, floor_y) {
+        if !world.is_loaded(&pos) {
+            continue;
+        }
         let (block, _) = world.get_block_and_state(&pos);
         if block.id == Block::IRON_BARS.id {
-            world.set_block_state(&pos, Block::AIR.default_state.id, SIEGE_PLACE_FLAGS);
+            out.push(pos);
+        }
+    }
+    out
+}
+
+/// Clear one iron-bar portcullis cell. Returns whether the world changed.
+pub fn clear_gate_bar(world: &Arc<World>, pos: BlockPos) -> bool {
+    let (block, _) = world.get_block_and_state(&pos);
+    if block.id != Block::IRON_BARS.id {
+        return false;
+    }
+    world.set_block_state(&pos, Block::AIR.default_state.id, SIEGE_PLACE_FLAGS);
+    true
+}
+
+/// Ram a threatened gate: iron bars become air so the courtyard is open.
+pub fn breach_gate(world: &Arc<World>, gate: GateInfo, floor_y: i32) -> u32 {
+    let cells = gate_bar_cells(world, gate, floor_y);
+    let mut cleared = 0u32;
+    for pos in cells {
+        if clear_gate_bar(world, pos) {
             cleared += 1;
         }
     }
