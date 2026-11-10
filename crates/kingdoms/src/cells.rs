@@ -146,6 +146,8 @@ pub enum CellKind {
     Shrine,
     /// Dry-stone field wall along a farm or road.
     FieldWall,
+    /// Keep-courtyard flag plinth (pedestal, mast, pressure plates).
+    FlagPlinth,
 }
 
 impl CellKind {
@@ -167,6 +169,7 @@ impl CellKind {
                 | Self::CastleCourt
                 | Self::CastleMoat
                 | Self::CastleInnerWall
+                | Self::FlagPlinth
         )
     }
 

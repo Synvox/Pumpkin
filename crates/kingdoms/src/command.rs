@@ -403,7 +403,7 @@ impl CommandExecutor for KingdomRankSetExecutor {
             );
             return Ok(0);
         };
-        if player.permission_lvl.load() < PermissionLvl::Two {
+        if !rank_set_allowed(player.permission_lvl.load()) {
             context.source.send_feedback(
                 TextComponent::text("op required to set rank").color_named(NamedColor::Red),
                 false,
@@ -591,4 +591,24 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
             .executes(WarExecutor)
             .then(literal("stats").executes(WarStatsExecutor)),
     );
+}
+
+/// `/kingdom rank set` is command-permission Allow so levy can invoke it,
+/// then the executor requires permission level 2 (gamemaster) or higher.
+fn rank_set_allowed(level: PermissionLvl) -> bool {
+    level >= PermissionLvl::Two
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rank_set_is_op_only() {
+        assert!(!rank_set_allowed(PermissionLvl::Zero));
+        assert!(!rank_set_allowed(PermissionLvl::One));
+        assert!(rank_set_allowed(PermissionLvl::Two));
+        assert!(rank_set_allowed(PermissionLvl::Three));
+        assert!(rank_set_allowed(PermissionLvl::Four));
+    }
 }

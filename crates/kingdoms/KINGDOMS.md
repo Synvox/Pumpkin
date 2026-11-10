@@ -57,11 +57,11 @@ let beds: Vec<_> = info.spawns.iter().filter(|s| s.role == SpawnRole::VillagerBe
 let camp: Vec<_> = info.spawns.iter().filter(|s| s.role == SpawnRole::PillagerSpawn).collect();
 ```
 
-Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `Gate`, `PillagerSpawn`, `PillagerRally`, `SiegeRam`, `SiegeLadder`, `SiegeTreb`.
+Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `Flag`, `Gate`, `PillagerSpawn`, `PillagerRally`, `SiegeRam`, `SiegeLadder`, `SiegeTreb`.
 
 `TownInfo` stays geometry only. Capture, siege jobs, and AI live in the director (`siege.rs`). Town ownership is `kingdoms-ownership.json` in the world folder and shows up on `battle_state.owner`.
 
-A town flips only when attackers hold the keep courtyard **and** defenders there are wiped out or routed. The hold needs `max(8, 10% of the surviving raid)` attackers in the keep for 200 ticks (~10 s). Nearby players see a boss-bar and actionbar capture meter (`Capture 12/40 hold 80/200`). `/raid stop` and battle end (`Victory` / capture / retake) despawn leftover raid soldiers, extra defenders tagged `kingdoms:temp`, and ram display entities so a later fight does not stack bodies.
+Each castle keeps a flag plinth in the inner bailey (never the gatehouse): a 3×3 stone pedestal, oak-fence mast, owner banner, and a ring of stone pressure plates. A town flips when attackers (players of the attacking kingdom, or the raid's bot standard-bearer) stand on that plate with **no defenders within 4 blocks** for 200 ticks (~10 s, `KINGDOMS_HOLD_TICKS`). The hold needs `max(3, 5% of the surviving raid)` on the plate. A defender on the plate or within 4 blocks **pauses** the clock; an empty plate **decays** progress. Hiding in a wall or cellar does nothing. Defenders reclaim the same way. Nearby players see a boss-bar (`Flag 3/3 hold 80/200`); captains shout on start/pause/flip. `/raid stop` and battle end (`Victory` / capture / retake) despawn leftover raid soldiers, extra defenders tagged `kingdoms:temp`, and ram display entities so a later fight does not stack bodies. The plate, mast, and banner are indestructible to players, trebuchet punches, and repair.
 
 A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). It either breaches the iron-bar gate or is destroyed. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks) or their captain dies; a living captain rallies routed soldiers within 16 blocks.
 
@@ -205,6 +205,66 @@ Bodies over 16 KiB return 413. More than 20 requests/second return 429. A succes
 
 Webhook body is JSON. Header `X-Kingdoms-Signature: sha256=<hex>` is HMAC-SHA256 of the raw body. The full request/response contract is below so a Sails war-map can be built against it.
 
+### Sails quickstart
+
+Pumpkin binds the director on localhost. Sails reaches it through a Cloudflare Tunnel. Observational `GET /war` does not pause the in-game war clock; `POST /raids` and other mutating calls do for 30 s.
+
+**Token.** Generate at least 32 characters and put the same value on both sides:
+
+```bash
+export TOKEN="$(openssl rand -hex 24)"   # 48 chars
+# pumpkin.toml world:
+KINGDOMS_HTTP=1
+KINGDOMS_HTTP_TOKEN=$TOKEN
+KINGDOMS_HTTP_BIND=127.0.0.1:8742
+KINGDOMS_HTTP_WEBHOOK=https://war.example.com/kingdoms/events
+KINGDOMS_HTTP_WEBHOOK_SECRET=$TOKEN      # optional; defaults to the bearer token
+```
+
+**Tunnel.** `cloudflared` ingress to the bind address only; do not expose 8742 on a public NIC.
+
+```yaml
+# ~/.cloudflared/config.yml
+tunnel: <tunnel-id>
+credentials-file: /home/pumpkin/.cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: kingdoms.example.com
+    service: http://127.0.0.1:8742
+  - service: http_status:404
+```
+
+Sails then calls `https://kingdoms.example.com` with `Authorization: Bearer $TOKEN`.
+
+**Webhook signing.** Every POST to `KINGDOMS_HTTP_WEBHOOK` has header `X-Kingdoms-Signature: sha256=<hex>` over the raw body bytes (HMAC-SHA256, secret = `KINGDOMS_HTTP_WEBHOOK_SECRET` or the bearer token). Verify the bytes you received; do not re-encode the JSON. Reject 401/413/429 the same way the server does (token, body > 16 KiB, > 20 req/s).
+
+```python
+import hmac, hashlib
+def check(secret: str, body: bytes, header: str) -> bool:
+    expect = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expect, header.strip().lower())
+```
+
+`kingdoms-mock-director` is the in-repo client (`GET /war`, `POST /raids`, webhook listener).
+
+**Director loop.** Poll `/war` (clock stays on), pick a quiet owned town, `POST /raids`, then wait for `town_captured` / `raid_ended` on the webhook before the next front:
+
+```bash
+BASE=https://kingdoms.example.com
+AUTH="Authorization: Bearer $TOKEN"
+# 1. front-line map
+curl -sS -H "$AUTH" "$BASE/war"
+# 2. open a front (pauses the in-game clock for 30 s)
+curl -sS -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"town":"20261025:0:0","size":40,"side":"pillager"}' "$BASE/raids"
+# 3. optional: name a marshal, shout, stop
+curl -sS -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"kingdom":"alder","name":"Sir Aldric","title":"marshal","line":"Hold the gate."}' \
+  "$BASE/heroes"
+curl -sS -H "$AUTH" -X POST "$BASE/raids/1/stop"
+```
+
+On Sails, run that in a 2–5 s loop: `GET /war` → if `fronts` is under the cap and a town has `raid_active: false`, POST a raid; on webhook `town_captured` or `gate_breached`, shout via `POST /heroes/<kingdom>/shout`. Full JSON shapes are in the contract below.
+
 ```bash
 export TOKEN=dev-token-must-be-32-chars-min
 # pumpkin.toml world already running, with KINGDOMS_HTTP=1 KINGDOMS_HTTP_TOKEN=$TOKEN
@@ -261,24 +321,29 @@ Front-line snapshot. Does not pause the clock.
     "keep": { "x": 1268, "z": 665 },
     "gate": { "x": 1504, "z": 597 },
     "occupy_hold": 40,
-    "occupy_need": 8,
+    "occupy_need": 3,
     "defenders": 20,
     "raiders": 40,
     "raid_side": "pillager",
     "repair_until": 0,
-    "live": true
+    "live": true,
+    "flag": { "x": 1268, "z": 665 },
+    "flag_status": "capturing",
+    "flag_paused": false,
+    "flag_attackers": 4,
+    "flag_defenders": 0
   }]
 }
 ```
 
 #### `GET /state`
 
-Pauses the clock. Towns use the battle schema (`id`, `kingdom`, `owner`, `alarm`, `raid_active`, `wave`, `waves`, `defenders_alive`, `raiders_alive`, `defenders_killed`, `raiders_killed`, `threatened_gate`, `gate_breached`, `occupy_hold`, `occupy_need`, `ram_hp`) plus logged-in players and troop totals.
+Pauses the clock. Towns use the battle schema (`id`, `kingdom`, `owner`, `alarm`, `raid_active`, `wave`, `waves`, `defenders_alive`, `raiders_alive`, `defenders_killed`, `raiders_killed`, `threatened_gate`, `gate_breached`, `occupy_hold`, `occupy_need`, `ram_hp`, `flag`, `flag_status`, `flag_paused`, `flag_attackers`, `flag_defenders`) plus logged-in players and troop totals.
 
 ```json
 {
   "tick": 4800,
-  "towns": [{ "id": "20261025:0:0", "kingdom": "alder", "owner": "alder", "alarm": true, "raid_active": true, "wave": 0, "waves": 1, "defenders_alive": 20, "raiders_alive": 40, "defenders_killed": 0, "raiders_killed": 0, "threatened_gate": [1504, 597], "gate_breached": false, "occupy_hold": 0, "occupy_need": 8, "ram_hp": 80.0 }],
+  "towns": [{ "id": "20261025:0:0", "kingdom": "alder", "owner": "alder", "alarm": true, "raid_active": true, "wave": 0, "waves": 1, "defenders_alive": 20, "raiders_alive": 40, "defenders_killed": 0, "raiders_killed": 0, "threatened_gate": [1504, 597], "gate_breached": false, "occupy_hold": 0, "occupy_need": 3, "ram_hp": 80.0, "flag": { "x": 1268, "z": 665 }, "flag_status": "idle", "flag_paused": false, "flag_attackers": 0, "flag_defenders": 0 }],
   "players": [{ "name": "alder1", "uuid": "937abb5d-9fc8-61f3-9ebc-41f786b9d29c", "kingdom": "alder", "x": 1504.5, "y": 80.0, "z": 597.5 }],
   "troops": { "defenders": 20, "raiders": 40 },
   "war_clock": true
@@ -331,6 +396,10 @@ Pauses the clock. `{ "name": "Herald", "message": "The gate is down" }` → `{ "
 | `ladders_raised` | assault ladders placed on the wall | `actor` is blocks placed |
 | `ram_destroyed` | defenders wreck the ram | |
 | `rout` | a side breaks | |
+| `capture_started` | attackers on the plate begin the hold | `actor` is on-plate count |
+| `capture_progress` | hold advances (every 40 ticks) | `actor` is hold ticks, `other` is need |
+| `capture_paused` | a defender is on or near the plate | |
+| `flag_changed` | the pole banner swaps on flip | |
 | `town_captured` | occupy or retake hold completes | capture and retake share this name; `note` says who |
 | `war_clock` | the clock starts a front | |
 | `player_joined_a_kingdom` | `/kingdom join` | `{ "event", "player", "kingdom" }` only |
@@ -565,6 +634,25 @@ Round 11 (this PR) splits the tick-23119 629 ms punch-repair dump: trebuchet hol
 The 629 ms repair dump is gone from the CSV (director max 8 ms). Remaining hitches are chunk-ticket apply on first contact (phase `town:…`) and `set_block_state(NOTIFY)` for two punch/ladder blocks (~50–110 ms engines, down from 45 writes). Bottleneck toward 300 live bodies is entity/chunk sim (MSPT ~55 with ~330 entities) plus ticket apply, not targeting or follower pathing (director p50 0.8–2.2 ms with 220 live). Three raids started; two fronts stayed materialized on the branch soaks (third had tickets but 0 ticking bodies). Master held three live fronts and peaked at 270 bodies. Named NPC chat on the bell: `speaker="captain"|"blacksmith"|"priest"`. Squad orders need a Freeman in-game (levy bots cannot `/kingdom rally`).
 
 Plots: `/opt/cursor/artifacts/soak-r11-branch-summary.json`, `soak-r11-branch2-summary.json`, `soak-r11-master-summary.json`.
+
+Round 12 (this PR) captures at the keep flag plinth, not by clearing the whole inner bailey. Attackers stand on the plate; defenders within 4 blocks pause; hiders in walls do not. After the ram breaches or eight raiders storm the portcullis, the column paths through the gatehouse to the plate. Distant combatants skip targeting outside 48 blocks of a player; materialized raids snapshot by entity id; item/XP orbs despawn 8/tick; engines run on one town per tick. The first 40 live ticks of a town skip engines and repair scan. `/kingdom rank set` is permission level 2+. `PLAN_CACHE_VERSION` is 13. The plinth sits on the paved keep-hall court from PR #32. `KINGDOMS.md` has a Sails quickstart (token, cloudflared, HMAC, director loop).
+
+10-min identical-load soak (seed `20261025`, 3 fronts, `/raid start` 120 40, `KINGDOMS_BODY_BUDGET=600`, debug, plan cache v10) vs master `7bab6500` (v9). The branch has since been rebased onto `28f9bee7f` (PRs #31–#33) with `PLAN_CACHE_VERSION` 13; the soak numbers below are still that v10-vs-v9 run. The plinth now sits on PR #32's paved keep-hall court. War clock off so the three 120+40 gate raids stay the load. After the ram / storm breach, this branch paths the column through the gatehouse onto the plate.
+
+| | branch (this PR) | master `7bab6500` |
+| --- | ---: | ---: |
+| MSPT p50 / p95 / max | **81.69** / 103.72 / 114.11 | 102.66 / 146.55 / 190.43 |
+| director_ms p50 / p95 / max | **2.74** / 10.27 / 155.62 | 8.30 / 16.27 / 32.07 |
+| first-town-tick hitch (director_ms) | **214.5** (`towns` 214.35) | **625.18** (`towns` 624.84) |
+| live fronts / bodies max | 3 / **480** | 3 / 456 |
+| captures / plate_r max | **2** / **109** | 0 / 0 (keep_r max 94; soak still skips hold) |
+| `Can't keep up` | 28 | 45 |
+
+p50 is still above the 50 ms budget; leftover cost is vanilla entity/chunk sim of ~480 NoAI soldiers. Two of the three 120-raider sieges walked the gatehouse, stacked on the plate (`plate_r=109` and `60`, need=6), and flipped. Capital `0:0` stayed at the town gate (`keep_r=0`) for that run.
+
+A shorter war-clock pass (size 24, three fronts) also reached the plate: `plate_r=4`, three flips, hitch 0.
+
+Plots: `/opt/cursor/artifacts/soak-r12-branch480-summary.json`, `soak-r12-master480-summary.json`, `soak-r12-branch-clock24-summary.json`. Flag crops: `flag-plinth-se.png`, `flag-plinth-se-flipped.png`, `flag-plinth-court.png`.
 
 ### Commands
 

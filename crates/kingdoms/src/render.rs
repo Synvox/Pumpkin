@@ -12,7 +12,7 @@ use crate::interior::keep_storey_label;
 use crate::palette::PaletteKind;
 use crate::plan::TownPlan;
 use crate::scenes::SceneKind;
-use crate::stamp::{VolumeSink, fill_volume, ridge_floor};
+use crate::stamp::{BlockSink, VolumeSink, fill_volume, ridge_floor};
 
 /// Planner-only renders (no chunk generation).
 pub fn write_planner_renders(
@@ -104,7 +104,140 @@ pub fn write_renders(
     }
     write_cutaways(plan, volume, out_dir, stem)?;
     write_scene_renders(plan, volume, out_dir, stem)?;
+    write_flag_renders(plan, volume, out_dir, stem)?;
     Ok(())
+}
+
+fn write_flag_renders(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<()> {
+    let (fx, fz) = plan.castle.flag;
+    let castle = &plan.castle;
+    let plinth_col = |x: i32, z: i32| {
+        (x - fx).abs() <= 2
+            && (z - fz).abs() <= 2
+            && castle.keep_mass_at(x, z).is_none()
+            && !castle.hall.contains(x, z)
+            && !castle.chapel.contains(x, z)
+            && !castle.kitchen.contains(x, z)
+    };
+    let mut owned = clone_volume(volume);
+    paint_flag_cloth(&mut owned, fx, fz, None);
+    let crop = render_iso_view(
+        &owned,
+        fx - 3,
+        fz - 3,
+        fx + 3,
+        fz + 3,
+        24,
+        1,
+        |x, _, z| plinth_col(x, z),
+        Some("Keep flag plinth · pedestal, mast, plates"),
+        false,
+        0,
+    );
+    save(&out_dir.join(format!("{stem}-flag-se.png")), &crop)?;
+    let (kx, kz) = castle.keep.center();
+    let mast_top = owned.top(fx, fz).map_or(80, |(y, _)| y);
+    let slab_y = mast_top - 4;
+    let mut rot = 0u8;
+    let mut best = i32::MIN;
+    for candidate in 0u8..4 {
+        let (lx, lz) = iso_local(
+            candidate,
+            fx,
+            fz,
+            kx.min(fx),
+            kz.min(fz),
+            kx.max(fx),
+            kz.max(fz),
+        );
+        let score = lx + lz;
+        if score > best {
+            best = score;
+            rot = candidate;
+        }
+    }
+    let court = render_iso_view(
+        &owned,
+        fx - 8,
+        fz - 8,
+        fx + 8,
+        fz + 8,
+        16,
+        1,
+        |x, y, z| {
+            if castle.keep_mass_at(x, z).is_some() || castle.hall.contains(x, z) {
+                y <= slab_y
+            } else {
+                plinth_col(x, z) || y <= slab_y
+            }
+        },
+        Some("Inner bailey · flag in courtyard context"),
+        false,
+        rot,
+    );
+    save(&out_dir.join(format!("{stem}-flag-court-se.png")), &court)?;
+    let mut flipped = clone_volume(volume);
+    paint_flag_cloth(&mut flipped, fx, fz, Some(Block::BLACK_WOOL.default_state));
+    let after = render_iso_view(
+        &flipped,
+        fx - 3,
+        fz - 3,
+        fx + 3,
+        fz + 3,
+        24,
+        1,
+        |x, _, z| plinth_col(x, z),
+        Some("Keep flag plinth · after capture"),
+        false,
+        0,
+    );
+    save(&out_dir.join(format!("{stem}-flag-se-flipped.png")), &after)?;
+    Ok(())
+}
+
+fn clone_volume(volume: &VolumeSink) -> VolumeSink {
+    VolumeSink {
+        min_x: volume.min_x,
+        min_y: volume.min_y,
+        min_z: volume.min_z,
+        sx: volume.sx,
+        sy: volume.sy,
+        sz: volume.sz,
+        voxels: volume.voxels.clone(),
+    }
+}
+
+fn paint_flag_cloth(volume: &mut VolumeSink, fx: i32, fz: i32, cloth: Option<&BlockState>) {
+    for y in volume.min_y..volume.min_y + volume.sy {
+        let Some(state) = volume.get(fx, y, fz) else {
+            continue;
+        };
+        let id = Block::from_state_id(state.id).id;
+        let mapped = if id == Block::GREEN_BANNER.id {
+            Block::GREEN_WOOL.default_state
+        } else if id == Block::BLUE_BANNER.id {
+            Block::BLUE_WOOL.default_state
+        } else if id == Block::BLACK_BANNER.id {
+            Block::BLACK_WOOL.default_state
+        } else {
+            continue;
+        };
+        volume.put(fx, y, fz, cloth.unwrap_or(mapped));
+        return;
+    }
+    if let Some((top, _)) = volume.top(fx, fz) {
+        volume.put(
+            fx,
+            top + 1,
+            fz,
+            cloth.unwrap_or(Block::GREEN_WOOL.default_state),
+        );
+    }
 }
 
 fn write_scene_renders(

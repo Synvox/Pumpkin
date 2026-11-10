@@ -524,6 +524,7 @@ pub fn stamp_column(
         }
         CellKind::Shrine => place_shrine(sink, plan, x, ground, z, &palette),
         CellKind::FieldWall => place_field_wall(sink, x, ground, z, &palette),
+        CellKind::FlagPlinth => place_flag_plinth(sink, plan, x, ground, z),
     }
     apply_column_damage(sink, plan, x, z, kind, floor, ground, &palette);
     // Harbour cranes used to punch mill walls. Restamp the mill envelope on
@@ -2681,6 +2682,27 @@ fn clear_hill_above_roof(
         return;
     }
     clear_above(sink, x, roof_y + 1, ground + 2, z);
+}
+
+fn place_flag_plinth(sink: &mut impl BlockSink, plan: &TownPlan, x: i32, ground: i32, z: i32) {
+    let (fx, fz) = plan.castle.flag;
+    sink.put(x, ground, z, Block::STONE_BRICKS.default_state);
+    clear_above(sink, x, ground + 1, ground + 6, z);
+    if x == fx && z == fz {
+        for y in 1..=4 {
+            sink.put(x, ground + y, z, Block::OAK_FENCE.default_state);
+        }
+        let banner =
+            match crate::faction::KingdomId::for_cell(plan.origin.cell_x, plan.origin.cell_z)
+                .as_str()
+            {
+                "raven" => Block::BLUE_BANNER.default_state,
+                _ => Block::GREEN_BANNER.default_state,
+            };
+        sink.put(x, ground + 5, z, banner);
+    } else {
+        sink.put(x, ground + 1, z, Block::STONE_PRESSURE_PLATE.default_state);
+    }
 }
 
 fn place_court(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {

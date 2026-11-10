@@ -33,7 +33,8 @@ use pumpkin_util::Difficulty;
 use pumpkin_util::math::vector3::Vector3;
 
 use crate::faction::{
-    TAG_CAPTAIN, TAG_CITIZEN, TAG_GOLEM, TAG_RAIDER, TAG_WIRED, kingdom_tag, role_tag, town_tag,
+    TAG_BEARER, TAG_CAPTAIN, TAG_CITIZEN, TAG_GOLEM, TAG_RAIDER, TAG_WIRED, kingdom_tag, role_tag,
+    town_tag,
 };
 use crate::flow::{DIRECT_RANGE, is_squad_leader, should_refresh_path};
 use crate::roles::VillagerRole;
@@ -779,6 +780,7 @@ pub fn bind_raider(
     strip_vanilla_combat(mob);
     if captain {
         tag(entity, TAG_CAPTAIN);
+        tag(entity, TAG_BEARER);
         if let Some(raider) = mob.as_raider() {
             raider.set_patrol_leader(true);
         }

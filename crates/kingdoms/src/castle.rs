@@ -125,6 +125,8 @@ pub struct CastlePlan {
     pub capital: bool,
     /// Palace mass inside the inner bailey (capital only).
     pub palace: Rect,
+    /// Flag plinth in the inner bailey (never the gatehouse).
+    pub flag: (i32, i32),
 }
 
 impl CastlePlan {
@@ -325,6 +327,16 @@ pub fn paint_castle(
     paint_moat(occ, grid, &outer_ring.verts, gate_pt, gate_dir);
 
     let towers = tower_specs.iter().map(|t| t.bounds()).collect();
+    paint_keep_forecourt(occ, inner, keep, hall, &keep_masses);
+    let flag = site_flag_plinth(
+        occ,
+        inner,
+        &inner_ring.verts,
+        keep,
+        hall,
+        gatehouse,
+        &keep_masses,
+    );
 
     CastlePlan {
         bounds,
@@ -346,7 +358,169 @@ pub fn paint_castle(
         keep_masses,
         capital,
         palace,
+        flag,
     }
+}
+
+/// Paved inner-bailey pad between keep and hall so a flag plinth has a court.
+pub(crate) fn paint_keep_forecourt(
+    occ: &mut Occupancy,
+    inner: Rect,
+    keep: Rect,
+    hall: Rect,
+    keep_masses: &[KeepMass],
+) {
+    let Some((cx, cz)) = keep_forecourt_center(occ, inner, keep, hall, keep_masses) else {
+        return;
+    };
+    for dz in -2..=2 {
+        for dx in -2..=2 {
+            let x = cx + dx;
+            let z = cz + dz;
+            if !occ.bounds.contains(x, z) {
+                continue;
+            }
+            if keep_masses.iter().any(|mass| mass.spec.contains(x, z)) {
+                continue;
+            }
+            if matches!(
+                occ.kind(x, z),
+                CellKind::Green | CellKind::Empty | CellKind::CastleCourt | CellKind::Plaza
+            ) {
+                occ.set(x, z, CellKind::CastleCourt, false);
+            }
+        }
+    }
+}
+
+fn keep_forecourt_center(
+    occ: &Occupancy,
+    inner: Rect,
+    keep: Rect,
+    hall: Rect,
+    keep_masses: &[KeepMass],
+) -> Option<(i32, i32)> {
+    let (kx, kz) = keep.center();
+    let (hx, hz) = hall.center();
+    let search = inner.inflate(8);
+    let mut best = None;
+    let mut best_score = i32::MAX;
+    for z in search.min_z..=search.max_z {
+        for x in search.min_x..=search.max_x {
+            if !occ.bounds.contains(x, z) {
+                continue;
+            }
+            if keep_masses.iter().any(|mass| mass.spec.contains(x, z)) {
+                continue;
+            }
+            if !matches!(
+                occ.kind(x, z),
+                CellKind::Green
+                    | CellKind::Empty
+                    | CellKind::CastleCourt
+                    | CellKind::Plaza
+                    | CellKind::FlagPlinth
+            ) {
+                continue;
+            }
+            let score = (x - kx).abs() + (z - kz).abs() + (x - hx).abs() + (z - hz).abs();
+            if score < best_score {
+                best_score = score;
+                best = Some((x, z));
+            }
+        }
+    }
+    best
+}
+
+fn roofed_flag_cell(kind: CellKind) -> bool {
+    kind.is_shell()
+        || matches!(
+            kind,
+            CellKind::CastleKitchen
+                | CellKind::CastleStables
+                | CellKind::CastleBarracks
+                | CellKind::Building
+                | CellKind::Eave
+        )
+}
+
+fn flag_pad_open(
+    occ: &Occupancy,
+    x: i32,
+    z: i32,
+    gatehouse: Rect,
+    keep_masses: &[KeepMass],
+) -> bool {
+    !gatehouse.contains(x, z)
+        && !keep_masses.iter().any(|mass| mass.spec.contains(x, z))
+        && !roofed_flag_cell(occ.kind(x, z))
+        && matches!(
+            occ.kind(x, z),
+            CellKind::CastleCourt
+                | CellKind::Green
+                | CellKind::Plaza
+                | CellKind::Empty
+                | CellKind::FlagPlinth
+        )
+}
+
+pub(crate) fn site_flag_plinth(
+    occ: &mut Occupancy,
+    inner: Rect,
+    inner_ring: &[(i32, i32)],
+    keep: Rect,
+    hall: Rect,
+    gatehouse: Rect,
+    keep_masses: &[KeepMass],
+) -> (i32, i32) {
+    let (cx, cz) = inner.center();
+    let flag = keep_forecourt_center(occ, inner, keep, hall, keep_masses)
+        .filter(|&(x, z)| flag_pad_open(occ, x, z, gatehouse, keep_masses))
+        .or_else(|| {
+            let mut found = None;
+            let mut found_score = i32::MAX;
+            let (kx, kz) = keep.center();
+            let (hx, hz) = hall.center();
+            for z in inner.min_z..=inner.max_z {
+                for x in inner.min_x..=inner.max_x {
+                    if !flag_pad_open(occ, x, z, gatehouse, keep_masses)
+                        || !point_in_poly(x, z, inner_ring)
+                    {
+                        continue;
+                    }
+                    let score = (x - kx).abs() + (z - kz).abs() + (x - hx).abs() + (z - hz).abs();
+                    if score < found_score {
+                        found_score = score;
+                        found = Some((x, z));
+                    }
+                }
+            }
+            found
+        })
+        .unwrap_or_else(|| {
+            let (gx, gz) = gatehouse.center();
+            let dx = (cx - gx).signum();
+            let dz = (cz - gz).signum();
+            (gx + dx * 8, gz + dz * 8)
+        });
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let x = flag.0 + dx;
+            let z = flag.1 + dz;
+            if flag_pad_open(occ, x, z, gatehouse, keep_masses) {
+                occ.set(x, z, CellKind::FlagPlinth, true);
+            }
+        }
+    }
+    if !roofed_flag_cell(occ.kind(flag.0, flag.1))
+        && !keep_masses
+            .iter()
+            .any(|mass| mass.spec.contains(flag.0, flag.1))
+    {
+        occ.set(flag.0, flag.1, CellKind::FlagPlinth, true);
+    }
+    flag
 }
 
 fn pick_archetype(grid: &HeightGrid, bounds: Rect, rng: &mut TownRng) -> CastleArchetype {

@@ -50,7 +50,11 @@ impl ShoutKind {
             "gate_breached" | "breach" => Some(Self::GateBreached),
             "rally" | "raid_started" | "war_clock" => Some(Self::Rally),
             "retreat" | "rout" => Some(Self::Retreat),
-            "victory" | "town_captured" | "capture" | "retake" => Some(Self::Victory),
+            "victory" | "town_captured" | "capture" | "retake" | "flag_changed" => {
+                Some(Self::Victory)
+            }
+            "capture_started" => Some(Self::Charge),
+            "capture_paused" => Some(Self::Hold),
             "charge" | "advance" => Some(Self::Charge),
             "hold" => Some(Self::Hold),
             "fallen" | "captain_down" => Some(Self::Fallen),
