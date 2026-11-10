@@ -342,11 +342,15 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             | SceneKind::Riverside
             | SceneKind::Vineyard
             | SceneKind::StaveChurch
-            | SceneKind::Caravanserai => {
+            | SceneKind::Caravanserai
+            | SceneKind::MarketQuarter
+            | SceneKind::CraftsmenRow
+            | SceneKind::DocksQuarter
+            | SceneKind::LumberCamp => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::Workstation, cx, cz));
             }
-            SceneKind::Frontier | SceneKind::Manor | SceneKind::Gorge => {
+            SceneKind::Frontier | SceneKind::Manor | SceneKind::Gorge | SceneKind::NobleQuarter => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));
             }
