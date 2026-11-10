@@ -236,7 +236,7 @@ pub fn stamp_column(
     let floor = terrace_floor(ground, planned);
     if occupy_raises(kind) {
         let cap = if is_cathedral_mass(kind) || kind == CellKind::CathedralButtress {
-            ground + 42
+            ground + 56
         } else if kind == CellKind::WindSail {
             ground + 36
         } else if matches!(
@@ -253,6 +253,7 @@ pub fn stamp_column(
                 | CellKind::Crane
                 | CellKind::Breakwater
                 | CellKind::SiegeTrench
+                | CellKind::CityDitch
         ) || plan.strips_trees(x, z)
         {
             ground + 40
@@ -368,9 +369,10 @@ pub fn stamp_column(
                 place_collapsed_tower(sink, plan, x, floor, ground, z, &palette);
             } else if in_caravanserai(plan, x, z) {
                 place_minaret(sink, plan, x, floor, ground, z, &palette);
+            } else if plan.capital {
+                place_round_city_tower(sink, plan, x, floor, ground, z, &palette);
             } else {
-                let height = if plan.capital { 16 } else { 14 };
-                place_tower(sink, plan, x, floor, ground, z, &palette, 5, height);
+                place_tower(sink, plan, x, floor, ground, z, &palette, 5, 14);
             }
         }
         CellKind::TownGate => {
@@ -530,6 +532,7 @@ pub fn stamp_column(
         CellKind::Shrine => place_shrine(sink, plan, x, ground, z, &palette),
         CellKind::FieldWall => place_field_wall(sink, x, ground, z, &palette),
         CellKind::FlagPlinth => place_flag_plinth(sink, plan, x, ground, z),
+        CellKind::CityDitch => place_city_ditch(sink, x, ground, z, &palette),
     }
     apply_column_damage(sink, plan, x, z, kind, floor, ground, &palette);
     // Harbour cranes used to punch mill walls. Restamp the mill envelope on
@@ -594,6 +597,7 @@ fn occupy_raises(kind: CellKind) -> bool {
             | CellKind::Breakwater
             | CellKind::Lighthouse
             | CellKind::SiegeTrench
+            | CellKind::CityDitch
             | CellKind::WaterWheel
             | CellKind::MillRace
             | CellKind::Sluice
@@ -1806,7 +1810,7 @@ fn wall_is_outer(plan: &TownPlan, x: i32, z: i32) -> bool {
                 | CellKind::FarmEdge
                 | CellKind::Orchard
                 | CellKind::Pasture
-                | CellKind::Plaza
+                | CellKind::CityDitch
                 | CellKind::Grave
                 | CellKind::Ruin
                 | CellKind::Palisade
@@ -1840,9 +1844,52 @@ fn outer_facing(plan: &TownPlan, x: i32, z: i32) -> Option<Dir> {
                 | CellKind::FarmEdge
                 | CellKind::Orchard
                 | CellKind::Pasture
-                | CellKind::Plaza
+                | CellKind::CityDitch
         )
     })
+}
+
+fn place_round_city_tower(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    foundation(sink, x, floor, ground, z, palette);
+    let top = floor + 22;
+    for y in floor..=top {
+        sink.put(
+            x,
+            y,
+            z,
+            palette.masonry(((x.wrapping_mul(5) + y) as u8) & 15),
+        );
+    }
+    let rim = Dir::ALL
+        .iter()
+        .any(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) != CellKind::TownTower);
+    if rim {
+        if ((x + z) & 1) == 0 {
+            sink.put(x, top + 1, z, palette.masonry(2));
+            sink.put(x, top + 2, z, palette.brick_wall);
+        }
+        if (x + z) % 3 == 0 {
+            sink.put(x, floor + 8, z, Block::IRON_BARS.default_state);
+            sink.put(x, floor + 14, z, Block::IRON_BARS.default_state);
+        }
+        if (x + z) % 11 == 0 {
+            sink.put(x, top + 3, z, Block::RED_BANNER.default_state);
+        }
+    } else {
+        sink.put(x, top + 1, z, palette.path);
+        let (cx, cz) = blob_of(plan, x, z, CellKind::TownTower).center();
+        if x == cx && z == cz {
+            sink.put(x, top + 2, z, Block::LANTERN.default_state);
+        }
+    }
 }
 
 fn place_tower(
@@ -2550,6 +2597,34 @@ fn place_roof_pitched(
     overhang: i32,
     pitch: i32,
 ) {
+    write_pitched_roof(
+        sink,
+        rect,
+        x,
+        eaves_y,
+        z,
+        palette,
+        overhang,
+        pitch,
+        palette.roof,
+        palette.roof_slab,
+        roof_cap_block(palette),
+    );
+}
+
+fn write_pitched_roof(
+    sink: &mut impl BlockSink,
+    rect: Rect,
+    x: i32,
+    eaves_y: i32,
+    z: i32,
+    palette: &Palette,
+    overhang: i32,
+    pitch: i32,
+    roof: &Block,
+    roof_slab: &'static BlockState,
+    cap: &'static BlockState,
+) {
     let along_x = rect.width() >= rect.depth();
     let ridge = if along_x {
         rect.min_z.midpoint(rect.max_z)
@@ -2568,16 +2643,47 @@ fn place_roof_pitched(
         sink.put(x, roof_y - 1, z, palette.planks);
     }
     if dist <= 1 {
-        sink.put(x, roof_y, z, roof_cap_block(palette));
-        sink.put(x, roof_y + 1, z, palette.roof_slab);
+        sink.put(x, roof_y, z, cap);
+        sink.put(x, roof_y + 1, z, roof_slab);
     } else {
-        sink.put(x, roof_y, z, stair_state(palette.roof, roof_dir));
+        sink.put(x, roof_y, z, stair_state(roof, roof_dir));
     }
     if palette.kind == PaletteKind::Spruce {
         sink.put(x, roof_y + 1, z, Block::SNOW.default_state);
         if dist == 0 {
             sink.put(x, roof_y + 2, z, Block::SNOW.default_state);
         }
+    }
+}
+
+fn house_stone_ground(lot: &Lot) -> bool {
+    matches!(
+        lot.kind,
+        BuildingKind::Townhouse
+            | BuildingKind::Timber
+            | BuildingKind::Tavern
+            | BuildingKind::Cottage
+    ) && lot.seed % 3 == 0
+}
+
+fn house_red_tile(lot: &Lot, palette: &Palette) -> bool {
+    palette.kind == PaletteKind::Oak
+        && matches!(
+            lot.kind,
+            BuildingKind::Townhouse | BuildingKind::Timber | BuildingKind::Tavern
+        )
+        && lot.seed % 5 == 0
+}
+
+fn house_plaster(lot: &Lot, palette: &Palette) -> &'static BlockState {
+    match (lot.seed % 7) as u8 {
+        0 => Block::WHITE_TERRACOTTA.default_state,
+        1 => Block::LIGHT_GRAY_TERRACOTTA.default_state,
+        2 => Block::YELLOW_TERRACOTTA.default_state,
+        3 => Block::ORANGE_TERRACOTTA.default_state,
+        4 => Block::BROWN_TERRACOTTA.default_state,
+        5 => Block::RED_TERRACOTTA.default_state,
+        _ => palette.infill((lot.seed as u8) & 7),
     }
 }
 
@@ -2821,13 +2927,24 @@ fn place_house(
         gable_roof_y_pitch(r, x, z, eaves, 1, pitch)
     };
     let timber = lot.kind.timber_frame() && !desert;
+    let stone_ground = house_stone_ground(lot);
+    let plaster = house_plaster(lot, palette);
     let edge = r.on_edge(x, z);
     let front = is_front(lot, x, z);
     let door = front && x == door_x(lot) && z == door_z(lot);
     let wall_top = if desert { eaves } else { roof_y };
     if edge {
         sink.put(x, floor, z, palette.cobble);
-        sink.put(x, floor + 1, z, palette.foundation((x + z) % 5 == 0));
+        sink.put(
+            x,
+            floor + 1,
+            z,
+            if stone_ground {
+                palette.bricks
+            } else {
+                palette.foundation((x + z) % 5 == 0)
+            },
+        );
         for y in floor + 2..=wall_top {
             let storey_seam = !desert && (y - floor) % 4 == 0;
             let stud = match lot.facing {
@@ -2845,7 +2962,7 @@ fn place_house(
             } else if window_here(lot, x, z, y - floor) {
                 Block::GLASS_PANE.default_state
             } else if timber {
-                palette.infill(((x + y) as u8) & 7)
+                plaster
             } else if lot.kind == BuildingKind::Blacksmith
                 || lot.kind == BuildingKind::Barn
                 || lot.kind == BuildingKind::Watermill
@@ -2904,6 +3021,26 @@ fn place_house(
         place_flat_roof(sink, r, x, eaves, z, palette, lot.kind);
     } else {
         place_roof_pitched(sink, r, x, eaves, z, palette, 1, pitch);
+        if house_red_tile(lot, palette) && r.on_edge(x, z) {
+            let (roof_y, roof_dir) = gable_roof_y_pitch(r, x, z, eaves, 1, pitch);
+            let along_x = r.width() >= r.depth();
+            let ridge = if along_x {
+                r.min_z.midpoint(r.max_z)
+            } else {
+                r.min_x.midpoint(r.max_x)
+            };
+            let dist = if along_x {
+                (z - ridge).abs()
+            } else {
+                (x - ridge).abs()
+            };
+            if dist <= 1 {
+                sink.put(x, roof_y, z, Block::BRICKS.default_state);
+                sink.put(x, roof_y + 1, z, Block::BRICK_SLAB.default_state);
+            } else {
+                sink.put(x, roof_y, z, stair_state(&Block::BRICK_STAIRS, roof_dir));
+            }
+        }
     }
     clear_hill_above_roof(sink, x, roof_y, ground, z, r.is_corner(x, z) && !front);
     if r.is_corner(x, z) && !front {
@@ -3474,7 +3611,7 @@ fn place_gothic_tower(
     z: i32,
     palette: &Palette,
 ) {
-    let top = floor + 28;
+    let top = floor + 36;
     let (cx, cz) = rect.center();
     let cheb = (x - cx).abs().max((z - cz).abs());
     let edge = gothic_shell_edge(plan, x, z) || rect.on_edge(x, z);
@@ -3502,21 +3639,29 @@ fn place_gothic_tower(
                 z,
                 Block::PURPLE_STAINED_GLASS_PANE.default_state,
             );
+            sink.put(
+                x,
+                floor + 24,
+                z,
+                Block::PURPLE_STAINED_GLASS_PANE.default_state,
+            );
         }
     } else {
         clear_above(sink, x, floor + 1, top - 1, z);
         sink.put(x, floor, z, Block::SMOOTH_STONE.default_state);
         sink.put(x, floor + 8, z, palette.planks);
         sink.put(x, floor + 16, z, palette.planks);
+        sink.put(x, floor + 24, z, palette.planks);
         sink.put(x, top, z, Block::STONE_BRICKS.default_state);
         if x == cx && z == cz {
             sink.put(x, floor + 1, z, Block::LADDER.default_state);
             sink.put(x, floor + 9, z, Block::LADDER.default_state);
             sink.put(x, floor + 17, z, Block::LADDER.default_state);
+            sink.put(x, floor + 25, z, Block::LADDER.default_state);
             sink.put(x, top - 1, z, Block::LANTERN.default_state);
         }
     }
-    let spire_top = top + 1 + (2 - cheb).max(0) * 4;
+    let spire_top = top + 1 + (3 - cheb).max(0) * 5;
     for y in top + 1..=spire_top {
         if y == spire_top {
             sink.put(
@@ -3552,9 +3697,8 @@ fn place_flying_buttress(
         }
     }
     foundation(sink, x, mass_floor, ground, z, palette);
-    let against_mass = Dir::ALL
-        .iter()
-        .any(|dir| is_cathedral_mass(plan.occ.kind(x + dir.dx(), z + dir.dz())));
+    let dist = dist_to_cathedral_mass(plan, x, z);
+    let against_mass = dist <= 2;
     let base = ground.min(mass_floor);
     if against_mass {
         sink.put(x, mass_floor, z, Block::ANDESITE.default_state);
@@ -3586,6 +3730,18 @@ fn place_flying_buttress(
             stair_state(&Block::DEEPSLATE_TILE_STAIRS, Dir::South),
         );
     }
+}
+
+fn dist_to_cathedral_mass(plan: &TownPlan, x: i32, z: i32) -> i32 {
+    let mut best = 8;
+    for dz in -4..=4 {
+        for dx in -4..=4 {
+            if is_cathedral_mass(plan.occ.kind(x + dx, z + dz)) {
+                best = best.min(dx.abs().max(dz.abs()));
+            }
+        }
+    }
+    best
 }
 
 fn place_cathedral(
@@ -3674,6 +3830,7 @@ fn near_extractive(plan: &TownPlan, x: i32, z: i32) -> bool {
                     | CellKind::Crane
                     | CellKind::Breakwater
                     | CellKind::SiegeTrench
+                    | CellKind::CityDitch
                     | CellKind::WaterWheel
                     | CellKind::MillRace
                     | CellKind::Sluice
@@ -4175,6 +4332,19 @@ fn place_siege_trench(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, pa
         sink.put(x, ground - 1, z, Block::COBBLESTONE.default_state);
     }
     clear_above(sink, x, ground + 1, ground + 6, z);
+}
+
+fn place_city_ditch(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+    sink.put(x, ground - 3, z, palette.andesite);
+    sink.put(x, ground - 2, z, Block::COARSE_DIRT.default_state);
+    sink.put(x, ground - 1, z, Block::COARSE_DIRT.default_state);
+    sink.put(x, ground, z, Block::AIR.default_state);
+    if (x + z) % 4 == 0 {
+        sink.put(x, ground - 1, z, palette.cobble);
+    } else if (x + z) % 4 == 2 {
+        sink.put(x, ground - 1, z, palette.mossy);
+    }
+    clear_above(sink, x, ground + 1, ground + 8, z);
 }
 
 fn in_frontier(plan: &TownPlan, x: i32, z: i32) -> bool {

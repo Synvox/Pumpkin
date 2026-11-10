@@ -1379,6 +1379,11 @@ mod tests {
                                 if let Some(state) = volume.get(x, y, z) {
                                     let id = Block::from_state_id(state.id).id;
                                     if id == Block::WHITE_TERRACOTTA.id
+                                        || id == Block::LIGHT_GRAY_TERRACOTTA.id
+                                        || id == Block::YELLOW_TERRACOTTA.id
+                                        || id == Block::ORANGE_TERRACOTTA.id
+                                        || id == Block::BROWN_TERRACOTTA.id
+                                        || id == Block::RED_TERRACOTTA.id
                                         || id == Block::CALCITE.id
                                         || id == Block::BIRCH_PLANKS.id
                                     {
