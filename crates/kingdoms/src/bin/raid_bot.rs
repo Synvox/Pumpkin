@@ -49,7 +49,7 @@ use pumpkin_protocol::java::server::handshake::SHandShake;
 use pumpkin_protocol::java::server::login::{SLoginAcknowledged, SLoginStart};
 use pumpkin_protocol::java::server::play::{
     SAttack, SChatCommand, SClientCommand, SConfirmTeleport, SKeepAlive, SPlayerLoaded,
-    SPlayerPosition, SPlayerPositionRotation, SSwingArm,
+    SPlayerPosition, SPlayerPositionRotation, SSwingArm, SUseItem,
 };
 use pumpkin_protocol::packet::MultiVersionJavaPacket;
 use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
@@ -90,7 +90,7 @@ struct Args {
     y: f64,
     z: f64,
     seconds: u64,
-    command: Option<String>,
+    commands: Vec<String>,
     fight: bool,
     prove: bool,
     kingdom: String,
@@ -103,7 +103,7 @@ fn parse_args() -> Result<Args, String> {
     let mut y = 80.0;
     let mut z = 0.0;
     let mut seconds = 180u64;
-    let mut command = None;
+    let mut commands = Vec::new();
     let mut fight = false;
     let mut prove = false;
     let mut kingdom = "alder".to_owned();
@@ -121,13 +121,13 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--seconds: {e}"))?;
             }
-            "--command" => command = Some(next("--command")?),
+            "--command" => commands.push(next("--command")?),
             "--fight" => fight = true,
             "--prove" => prove = true,
             "--kingdom" => kingdom = next("--kingdom")?,
             "-h" | "--help" => {
                 println!(
-                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command \"kingdom join alder\"] [--fight|--prove --kingdom alder]"
+                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command CMD]... [--fight|--prove --kingdom alder]"
                 );
                 std::process::exit(0);
             }
@@ -142,7 +142,7 @@ fn parse_args() -> Result<Args, String> {
         y,
         z,
         seconds,
-        command,
+        commands,
         fight,
         prove,
         kingdom,
@@ -268,7 +268,7 @@ impl Bot {
 
         bot.send_packet(&SClientInformationConfig {
             locale: "en_us",
-            view_distance: 12,
+            view_distance: 4,
             chat_mode: VarInt(0),
             chat_colors: true,
             skin_parts: 0x7F,
@@ -295,6 +295,7 @@ impl Bot {
 
         let play_login_id = CLogin::to_id(CURRENT_MC_VERSION);
         let player_pos_id = CPlayerPosition::to_id(CURRENT_MC_VERSION);
+        let keep_id = CKeepAlive::to_id(CURRENT_MC_VERSION);
         let mut saw_play_login = false;
         let mut saw_initial_pos = false;
         while !(saw_play_login && saw_initial_pos) {
@@ -310,13 +311,20 @@ impl Bot {
                     ]);
                     println!("SELF id={}", bot.self_id);
                 }
+                // Do not wait for CPlayerPosition: the server may hold that
+                // packet until SPlayerLoaded, which deadlocks a second client.
+                let _ = bot.send_packet(&SPlayerLoaded).await;
             }
-            if saw_play_login {
+            // Keep-alives and the spawn teleport can arrive before CLogin.
+            if pkt.id == keep_id || pkt.id == player_pos_id || saw_play_login {
                 bot.handle_play_packet(&pkt).await?;
-                if pkt.id == player_pos_id {
-                    let _ = bot.send_packet(&SPlayerLoaded).await;
-                    saw_initial_pos = true;
-                }
+            }
+            if pkt.id == player_pos_id {
+                saw_initial_pos = true;
+            }
+            if saw_play_login && !saw_initial_pos && bot.self_id >= 0 {
+                // Position never arrived; enter play anyway so /tp can run.
+                saw_initial_pos = true;
             }
         }
         Ok(bot)
@@ -1118,6 +1126,10 @@ async fn main() -> ExitCode {
         bot.position.x, bot.position.y, bot.position.z
     );
     let stand = Vector3::new(args.x, args.y, args.z);
+    let skip_walk = args
+        .commands
+        .iter()
+        .any(|c| c.starts_with("tp ") || c.starts_with("wait:"));
     if args.prove {
         if let Err(err) = prove_loop(&mut bot, &args.kingdom, args.seconds).await {
             eprintln!("{err}");
@@ -1126,16 +1138,58 @@ async fn main() -> ExitCode {
         println!("done");
         return ExitCode::SUCCESS;
     }
-    if let Err(err) = bot.move_to(stand).await {
+    if skip_walk {
+        println!("standing at login; soak will /tp");
+    } else if let Err(err) = bot.move_to(stand).await {
         eprintln!("move failed: {err}");
         return ExitCode::from(1);
+    } else {
+        println!("standing; holding for {}s", args.seconds);
     }
-    println!("standing; holding for {}s", args.seconds);
-    if let Some(cmd) = args.command.as_deref()
-        && let Err(err) = bot.chat_command(cmd).await
-    {
-        eprintln!("command failed: {err}");
-        return ExitCode::from(1);
+    for cmd in &args.commands {
+        if let Some(secs) = cmd.strip_prefix("wait:") {
+            let n: u64 = match secs.parse() {
+                Ok(n) => n,
+                Err(err) => {
+                    eprintln!("wait: {err}");
+                    return ExitCode::from(2);
+                }
+            };
+            println!("WAIT {n}s");
+            if let Err(err) = bot.pump(Duration::from_secs(n)).await {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+            continue;
+        }
+        if cmd == "horn" {
+            println!("HORN");
+            if let Err(err) = bot
+                .send_packet(&SUseItem {
+                    hand: VarInt(0),
+                    sequence: VarInt(1),
+                    yaw: bot.yaw,
+                    pitch: bot.pitch,
+                })
+                .await
+            {
+                eprintln!("horn failed: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = bot.pump(Duration::from_secs(2)).await {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+            continue;
+        }
+        if let Err(err) = bot.chat_command(cmd).await {
+            eprintln!("command failed: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = bot.pump(Duration::from_millis(1500)).await {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
     }
     if args.fight {
         if let Err(err) = fight_loop(&mut bot, &args.kingdom, args.seconds, stand).await {

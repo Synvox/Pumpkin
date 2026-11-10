@@ -22,6 +22,10 @@ path = "src/bin/siege_bench.rs"
 name = "kingdoms-raid-bot"
 path = "src/bin/raid_bot.rs"
 
+[[bin]]
+name = "kingdoms-mock-director"
+path = "src/bin/mock_director.rs"
+
 [dependencies]
 pumpkin-core.workspace = true
 pumpkin-data = { workspace = true, features = ["default"] }

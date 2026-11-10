@@ -48,7 +48,7 @@ const MELEE_SPEED: f64 = 1.1;
 const DIRECT_RANGE_SQ: f64 = DIRECT_RANGE * DIRECT_RANGE;
 
 /// Destination a post-walking goal is heading toward.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PostTarget {
     pub x: i32,
     pub y: i32,
@@ -613,7 +613,8 @@ fn strip_vanilla_combat(mob: &dyn Mob) {
     goals.remove_goal::<WanderAroundGoal>(mob);
 }
 
-fn equip(mob: &dyn Mob, slot: EquipmentSlot, item: &'static Item) {
+/// Put `item` in `slot` and sync equipment to watchers.
+pub fn equip(mob: &dyn Mob, slot: EquipmentSlot, item: &'static Item) {
     mob.get_mob_entity()
         .set_item_slot(&slot, ItemStack::new(1, item));
 }

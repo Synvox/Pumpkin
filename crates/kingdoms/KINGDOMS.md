@@ -224,6 +224,13 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"text":"Alder to the wall."}' http://127.0.0.1:8742/heroes/alder/shout
 ```
 
+Sails can drive that contract with `kingdoms-mock-director` (GET `/war`, choose a town, POST `/raids`, optional webhook listener that checks `X-Kingdoms-Signature`):
+
+```bash
+cargo run -p pumpkin-kingdoms --bin kingdoms-mock-director -- \
+  --base http://127.0.0.1:8742 --token "$TOKEN" --town 0,0 --listen 127.0.0.1:8743
+```
+
 Observational GETs (`/war`, `/lines`, `/heroes`) authenticate but **do not** pause the war clock. Everything else that succeeds with a bearer token does.
 
 ### HTTP and webhook contract (Sails war-map)
@@ -539,6 +546,26 @@ Steady MSPT is within noise of master (p50 +0.23, p95 better). Director p95/max 
 
 Plots: `/opt/cursor/artifacts/soak-r23-branch.csv`, `soak-r23-master.csv`, `raid-bot-prove-live-final.txt`, `soak-r23-branch.log`.
 
+Round 11 (this PR) splits the tick-23119 629 ms punch-repair dump: trebuchet holes and plan refill both apply **2 blocks/tick**, per-block hole logs are gone, and any director phase over 20 ms logs `kingdoms phase tick=… phase=… ms=…`. Targeting reuses one `SpatialBuckets::nearest_hostile` scan; followers `slide_direct` instead of refreshing a path. Militia (even entity ids) take a wooden sword from the armoury and line the inner gate; others carry buckets to the well; named `captain` / `blacksmith` / `priest` shout on the bell. `/kingdom rally [follow|hold|charge]` and a goat horn (Freeman+) order nearby bot soldiers. `kingdoms-mock-director` plus `sails_http_contract_war_raid_and_hmac` drive GET `/war`, POST `/raids`, and HMAC `X-Kingdoms-Signature` for Sails.
+
+3-front raid-bot soak (seed `20261025`, bots at `(0,0)` / `(1,0)` / `(0,1)` gates, `/raid start here 80 50`, `KINGDOMS_BODY_BUDGET=400`, debug, sequential vs master `14ed819d`):
+
+| | branch (8 min) | branch (3 min, 2-block punch) | master `14ed819d` (3 min) |
+| --- | ---: | ---: | ---: |
+| MSPT p50 / p95 / max | 53.67 / 67.29 / 112.03 | **54.48 / 68.28 / 102.73** | 67.38 / 77.37 / 111.12 |
+| director_ms p50 / p95 / max (CSV) | **0.79 / 2.25 / 8.05** | 2.21 / 3.10 / 8.10 | 1.26 / 4.08 / 12.20 |
+| director ticks ≥ 50 ms (CSV) | **0** | **0** | **0** |
+| hitch log max (director_ms) | 471.59 (ticket apply, town `1:0`) | 290.54 (first-contact tickets) | 177.71 (first-contact tickets) |
+| phase > 20 ms (engines / towns max) | 118 / 471 | 110 / 290 | n/a (no phase log) |
+| live fronts max | 2 | 2 | **3** |
+| live bodies max | 220 | 224 | 270 |
+| `Can't keep up` | 24 | **9** | 10 |
+| soldier shouts | 379 | 93 | 26 |
+
+The 629 ms repair dump is gone from the CSV (director max 8 ms). Remaining hitches are chunk-ticket apply on first contact (phase `town:…`) and `set_block_state(NOTIFY)` for two punch/ladder blocks (~50–110 ms engines, down from 45 writes). Bottleneck toward 300 live bodies is entity/chunk sim (MSPT ~55 with ~330 entities) plus ticket apply, not targeting or follower pathing (director p50 0.8–2.2 ms with 220 live). Three raids started; two fronts stayed materialized on the branch soaks (third had tickets but 0 ticking bodies). Master held three live fronts and peaked at 270 bodies. Named NPC chat on the bell: `speaker="captain"|"blacksmith"|"priest"`. Squad orders need a Freeman in-game (levy bots cannot `/kingdom rally`).
+
+Plots: `/opt/cursor/artifacts/soak-r11-branch-summary.json`, `soak-r11-branch2-summary.json`, `soak-r11-master-summary.json`.
+
 ### Commands
 
 | Command | |
@@ -550,6 +577,8 @@ Plots: `/opt/cursor/artifacts/soak-r23-branch.csv`, `soak-r23-master.csv`, `raid
 | `/kingdom deploy [town]` | teleport to the threatened gate (live surface Y, not the keep roof); abstract fronts materialise on a staggered warmup |
 | `/kingdom stats` | your rank, renown, kills, captures, defenses |
 | `/kingdom fire` | loose a camp trebuchet at the threatened wall (stand at the anvil) |
+| `/kingdom rally [follow\|hold\|charge]` | Freeman+ orders nearby bot soldiers (default follow). A goat horn or `/kingdom horn` cycles the same orders. |
+| `/kingdom rank set <rank>` | op: grant levy/freeman/sergeant/knight/banneret without farming kills |
 | `/raid start <town> [size] [defenders]` | start a pillager raid. Optional `defenders` is how many kingdom combatants to field (extras spawn at the threatened gate). |
 | `/raid retake <town> [size]` | kingdom counter-raid to retake a pillager-owned town |
 | `/raid stop` | stop all kingdoms raids |

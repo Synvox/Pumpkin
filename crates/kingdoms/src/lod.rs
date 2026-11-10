@@ -100,6 +100,22 @@ pub struct BucketEntry {
     pub faction: Faction,
 }
 
+impl BucketEntry {
+    /// Squared horizontal distance to `(x, z)`.
+    #[must_use]
+    pub fn dist2(&self, x: f64, z: f64) -> f64 {
+        let dx = self.x - x;
+        let dz = self.z - z;
+        dx * dx + dz * dz
+    }
+
+    /// True when this entry is within `range` blocks of `(x, z)`.
+    #[must_use]
+    pub fn within(&self, x: f64, z: f64, range: f64) -> bool {
+        self.dist2(x, z) <= range * range
+    }
+}
+
 /// 16×16 column buckets for O(k) neighbour queries.
 #[derive(Clone, Debug, Default)]
 pub struct SpatialBuckets {
@@ -217,5 +233,13 @@ mod tests {
         assert!(!LodTier::Alert.should_tick(2, 3));
         assert_eq!(LodTier::Far.period(), 40);
         assert_eq!(CIVILIAN_SLEEP_RANGE, 64.0);
+    }
+
+    #[test]
+    fn bucket_entry_range_check_avoids_a_second_scan() {
+        let e = entry(2, 8.0, 0.0, Faction::Pillager);
+        assert!(e.within(0.0, 0.0, 16.0));
+        assert!(!e.within(0.0, 0.0, 4.0));
+        assert!((e.dist2(0.0, 0.0) - 64.0).abs() < f64::EPSILON);
     }
 }

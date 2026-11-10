@@ -12,6 +12,7 @@ use pumpkin_util::text::color::NamedColor;
 use crate::director;
 use crate::plan::cached_plan;
 use crate::raid::{RaidSide, RaidSpec};
+use crate::siege;
 use crate::town::nearest_town;
 
 const LOCATE_NAME: &str = "locatetown";
@@ -19,7 +20,7 @@ const LOCATE_DESC: &str = "Reports the nearest planned kingdoms town.";
 const LOCATE_PERM: &str = "kingdoms:command.locatetown";
 
 const KINGDOM_NAME: &str = "kingdom";
-const KINGDOM_DESC: &str = "Kingdom info, join, fronts, deploy, and stats.";
+const KINGDOM_DESC: &str = "Kingdom info, join, fronts, deploy, rally, rank, and stats.";
 const KINGDOM_PERM: &str = "kingdoms:command.kingdom";
 
 const RAID_NAME: &str = "raid";
@@ -333,6 +334,108 @@ impl CommandExecutor for KingdomDeployExecutor {
     }
 }
 
+struct KingdomRallyExecutor {
+    order: director::SquadOrder,
+}
+
+impl CommandExecutor for KingdomRallyExecutor {
+    fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
+        let Some(player) = context.as_player() else {
+            context.source.send_feedback(
+                TextComponent::text("Only players can rally a squad").color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        };
+        match director::try_rally(&player, self.order) {
+            Ok(msg) => {
+                context
+                    .source
+                    .send_feedback(TextComponent::text(msg).color_named(NamedColor::Gold), true);
+                Ok(1)
+            }
+            Err(err) => {
+                context
+                    .source
+                    .send_feedback(TextComponent::text(err).color_named(NamedColor::Red), false);
+                Ok(0)
+            }
+        }
+    }
+}
+
+struct KingdomHornExecutor;
+
+impl CommandExecutor for KingdomHornExecutor {
+    fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
+        let Some(player) = context.as_player() else {
+            context.source.send_feedback(
+                TextComponent::text("Only players can blow a horn").color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        };
+        match director::try_horn(&player) {
+            Ok(msg) => {
+                context
+                    .source
+                    .send_feedback(TextComponent::text(msg).color_named(NamedColor::Gold), true);
+                Ok(1)
+            }
+            Err(err) => {
+                context
+                    .source
+                    .send_feedback(TextComponent::text(err).color_named(NamedColor::Red), false);
+                Ok(0)
+            }
+        }
+    }
+}
+
+struct KingdomRankSetExecutor;
+
+impl CommandExecutor for KingdomRankSetExecutor {
+    fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
+        let Some(player) = context.as_player() else {
+            context.source.send_feedback(
+                TextComponent::text("Only players can set a rank").color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        };
+        if player.permission_lvl.load() < PermissionLvl::Two {
+            context.source.send_feedback(
+                TextComponent::text("op required to set rank").color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        }
+        let name = StringArgumentType::get(context, "rank")?;
+        let Some(rank) = siege::Rank::parse(name) else {
+            context.source.send_feedback(
+                TextComponent::text(format!("unknown rank {name}")).color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        };
+        match director::set_player_rank(&player, rank) {
+            Ok(msg) => {
+                context.source.send_feedback(
+                    TextComponent::text(msg).color_named(NamedColor::Green),
+                    true,
+                );
+                Ok(1)
+            }
+            Err(err) => {
+                context
+                    .source
+                    .send_feedback(TextComponent::text(err).color_named(NamedColor::Red), false);
+                Ok(0)
+            }
+        }
+    }
+}
+
 struct KingdomFireExecutor;
 
 impl CommandExecutor for KingdomFireExecutor {
@@ -421,7 +524,26 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
                     ),
             )
             .then(literal("stats").executes(WarStatsExecutor))
-            .then(literal("fire").executes(KingdomFireExecutor)),
+            .then(literal("fire").executes(KingdomFireExecutor))
+            .then(
+                literal("rally")
+                    .executes(KingdomRallyExecutor {
+                        order: director::SquadOrder::Follow,
+                    })
+                    .then(literal("follow").executes(KingdomRallyExecutor {
+                        order: director::SquadOrder::Follow,
+                    }))
+                    .then(literal("hold").executes(KingdomRallyExecutor {
+                        order: director::SquadOrder::Hold,
+                    }))
+                    .then(literal("charge").executes(KingdomRallyExecutor {
+                        order: director::SquadOrder::Charge,
+                    })),
+            )
+            .then(literal("horn").executes(KingdomHornExecutor))
+            .then(literal("rank").then(literal("set").then(
+                argument("rank", StringArgumentType::SingleWord).executes(KingdomRankSetExecutor),
+            ))),
     );
 
     dispatcher.register(

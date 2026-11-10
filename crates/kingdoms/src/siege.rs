@@ -23,6 +23,14 @@ use std::sync::Arc;
 pub const HOLD_TICKS: u32 = 200;
 /// Extra Y so ladder crews and archers stand on the wall walk, not the dirt.
 pub const WALL_WALK_LIFT: i32 = 6;
+/// Cheap place/break: skip neighbour shape, added, and drop callbacks.
+/// `NOTIFY_LISTENERS` still sends the hole to clients; callers amortise those
+/// writes (2 punch/repair/portcullis cells per town tick).
+pub const SIEGE_PLACE_FLAGS: BlockFlags = BlockFlags::NOTIFY_LISTENERS
+    .union(BlockFlags::SKIP_DROPS)
+    .union(BlockFlags::SKIP_BLOCK_ADDED_CALLBACK)
+    .union(BlockFlags::SKIP_BLOCK_ENTITY_REPLACED_CALLBACK)
+    .union(BlockFlags::UPDATE_KNOWN_SHAPE);
 /// Scan around a gate column when closing or ramming.
 const GATE_SCAN: i32 = 3;
 const GATE_HEIGHT: i32 = 5;
@@ -144,6 +152,30 @@ impl Rank {
             Self::Sergeant => "sergeant",
             Self::Knight => "knight",
             Self::Banneret => "banneret",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "levy" => Some(Self::Levy),
+            "freeman" => Some(Self::Freeman),
+            "sergeant" => Some(Self::Sergeant),
+            "knight" => Some(Self::Knight),
+            "banneret" => Some(Self::Banneret),
+            _ => None,
+        }
+    }
+
+    /// Kills needed for [`Self::from_renown`] when captures and defenses are 0.
+    #[must_use]
+    pub const fn min_kills(self) -> u32 {
+        match self {
+            Self::Levy => 0,
+            Self::Freeman => 10,
+            Self::Sergeant => 25,
+            Self::Knight => 50,
+            Self::Banneret => 100,
         }
     }
 }
@@ -399,20 +431,45 @@ pub struct HoldUpdate {
 
 /// Close the portcullis: fill air in each gate opening with iron bars.
 pub fn close_gates(world: &Arc<World>, gates: &[GateInfo], floor_y: impl Fn(i32, i32) -> i32) {
+    for pos in portcullis_cells(world, gates, floor_y) {
+        let _ = place_portcullis_bar(world, pos);
+    }
+    for gate in gates {
+        tracing::info!("kingdoms gate closed x={} z={}", gate.x, gate.z);
+    }
+}
+
+/// Air cells in each gate opening, for amortised portcullis writes.
+#[must_use]
+pub fn portcullis_cells(
+    world: &World,
+    gates: &[GateInfo],
+    floor_y: impl Fn(i32, i32) -> i32,
+) -> Vec<BlockPos> {
+    let mut out = Vec::new();
     for gate in gates {
         let y0 = floor_y(gate.x, gate.z);
         for pos in gate_cells(gate, y0) {
+            if !world.is_loaded(&pos) {
+                continue;
+            }
             let (block, _) = world.get_block_and_state(&pos);
             if block.id == Block::AIR.id {
-                world.set_block_state(
-                    &pos,
-                    Block::IRON_BARS.default_state.id,
-                    BlockFlags::NOTIFY_LISTENERS | BlockFlags::SKIP_DROPS,
-                );
+                out.push(pos);
             }
         }
-        tracing::info!("kingdoms gate closed x={} z={}", gate.x, gate.z);
     }
+    out
+}
+
+/// Place one iron-bar portcullis cell. Returns whether the world changed.
+pub fn place_portcullis_bar(world: &Arc<World>, pos: BlockPos) -> bool {
+    let (block, _) = world.get_block_and_state(&pos);
+    if block.id != Block::AIR.id {
+        return false;
+    }
+    world.set_block_state(&pos, Block::IRON_BARS.default_state.id, SIEGE_PLACE_FLAGS);
+    true
 }
 
 /// Ram a threatened gate: iron bars become air so the courtyard is open.
@@ -421,11 +478,7 @@ pub fn breach_gate(world: &Arc<World>, gate: GateInfo, floor_y: i32) -> u32 {
     for pos in gate_cells(&gate, floor_y) {
         let (block, _) = world.get_block_and_state(&pos);
         if block.id == Block::IRON_BARS.id {
-            world.set_block_state(
-                &pos,
-                Block::AIR.default_state.id,
-                BlockFlags::NOTIFY_LISTENERS | BlockFlags::SKIP_DROPS,
-            );
+            world.set_block_state(&pos, Block::AIR.default_state.id, SIEGE_PLACE_FLAGS);
             cleared += 1;
         }
     }
@@ -876,6 +929,8 @@ mod tests {
         let levy = PlayerStats::default();
         assert_eq!(levy.renown(), 0);
         assert_eq!(levy.rank(), Rank::Levy);
+        assert_eq!(Rank::parse("Freeman"), Some(Rank::Freeman));
+        assert_eq!(Rank::Freeman.min_kills(), 10);
         let freeman = PlayerStats {
             kills: 10,
             ..PlayerStats::default()
