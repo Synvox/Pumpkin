@@ -268,7 +268,7 @@ impl Bot {
 
         bot.send_packet(&SClientInformationConfig {
             locale: "en_us",
-            view_distance: 12,
+            view_distance: 4,
             chat_mode: VarInt(0),
             chat_colors: true,
             skin_parts: 0x7F,
@@ -1118,6 +1118,10 @@ async fn main() -> ExitCode {
         bot.position.x, bot.position.y, bot.position.z
     );
     let stand = Vector3::new(args.x, args.y, args.z);
+    let skip_walk = args
+        .commands
+        .iter()
+        .any(|c| c.starts_with("tp ") || c.starts_with("wait:"));
     if args.prove {
         if let Err(err) = prove_loop(&mut bot, &args.kingdom, args.seconds).await {
             eprintln!("{err}");
@@ -1126,11 +1130,14 @@ async fn main() -> ExitCode {
         println!("done");
         return ExitCode::SUCCESS;
     }
-    if let Err(err) = bot.move_to(stand).await {
+    if skip_walk {
+        println!("standing at login; soak will /tp");
+    } else if let Err(err) = bot.move_to(stand).await {
         eprintln!("move failed: {err}");
         return ExitCode::from(1);
+    } else {
+        println!("standing; holding for {}s", args.seconds);
     }
-    println!("standing; holding for {}s", args.seconds);
     for cmd in &args.commands {
         if let Some(secs) = cmd.strip_prefix("wait:") {
             let n: u64 = match secs.parse() {

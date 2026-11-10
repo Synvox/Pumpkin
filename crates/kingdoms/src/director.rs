@@ -6050,8 +6050,31 @@ fn retry_keep_teleports(world: &World) {
 
 pub fn join_kingdom(player: &Player, name: &str) -> KingdomId {
     let id = lock().join_kingdom(player, KingdomId::new(name));
-    teleport_to_keep(player);
+    if !player_already_in_home_town(player) {
+        teleport_to_keep(player);
+    }
     id
+}
+
+fn player_already_in_home_town(player: &Player) -> bool {
+    let pos = player.get_entity().pos.load();
+    let dir = lock();
+    let uuid = player.gameprofile.id.to_string();
+    let Some(kingdom) = dir.player_kingdom(&uuid) else {
+        return false;
+    };
+    let Some(plan) = keep_stand_plan(kingdom, &dir.towns) else {
+        return false;
+    };
+    let Some(war) = dir.towns.get(&plan.town_id) else {
+        return false;
+    };
+    let keep = war.scene.keep();
+    let mut posts = vec![keep];
+    posts.extend(war.scene.gates().iter().map(|g| ScenePost::new(g.x, g.z)));
+    posts.iter().any(|post| {
+        (pos.x - f64::from(post.x)).hypot(pos.z - f64::from(post.z)) <= PLAYER_APPROACH_RANGE
+    })
 }
 
 fn teleport_to_keep(player: &Player) {
