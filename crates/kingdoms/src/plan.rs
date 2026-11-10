@@ -34,7 +34,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 7;
+pub const PLAN_CACHE_VERSION: u32 = 8;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -1385,10 +1385,10 @@ fn paint_outbound_roads(
             .unwrap_or_else(|| bresenham(start.0, start.1, route_goal.0, route_goal.1));
         if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
             paint_path(occ, overlay, grid, &path);
-            stamp_road_cell(occ, overlay, goal.0, goal.1, CellKind::Road);
+            stamp_road_cell(occ, overlay, grid, goal.0, goal.1, CellKind::Road);
             for dz in -1..=1 {
                 for dx in -1..=1 {
-                    stamp_road_cell(occ, overlay, goal.0 + dx, goal.1 + dz, CellKind::Road);
+                    stamp_road_cell(occ, overlay, grid, goal.0 + dx, goal.1 + dz, CellKind::Road);
                 }
             }
             roads.push(RoadInfo {
@@ -1430,15 +1430,15 @@ fn paint_path(
                 } else {
                     CellKind::Road
                 };
-                stamp_road_cell(occ, overlay, x + dx, z + dz, kind);
+                stamp_road_cell(occ, overlay, grid, x + dx, z + dz, kind);
             }
         }
     }
     if let Some(&(x, z)) = path.last() {
-        stamp_road_cell(occ, overlay, x, z, CellKind::Road);
+        stamp_road_cell(occ, overlay, grid, x, z, CellKind::Road);
         for dz in -1..=1 {
             for dx in -1..=1 {
-                stamp_road_cell(occ, overlay, x + dx, z + dz, CellKind::Road);
+                stamp_road_cell(occ, overlay, grid, x + dx, z + dz, CellKind::Road);
             }
         }
     }
@@ -1447,10 +1447,24 @@ fn paint_path(
 fn stamp_road_cell(
     occ: &mut Occupancy,
     overlay: &mut HashMap<(i32, i32), CellKind>,
+    grid: &HeightGrid,
     x: i32,
     z: i32,
     kind: CellKind,
 ) {
+    let kind = if !grid.is_dry(x, z)
+        && matches!(
+            kind,
+            CellKind::Road
+                | CellKind::RoadStairN
+                | CellKind::RoadStairS
+                | CellKind::RoadStairE
+                | CellKind::RoadStairW
+        ) {
+        CellKind::Bridge
+    } else {
+        kind
+    };
     if occ.bounds.contains(x, z) {
         let cell = occ.kind(x, z);
         if !cell.is_castle() && cell != CellKind::Well {
@@ -1466,6 +1480,7 @@ fn stamp_road_cell(
                         | CellKind::Market
                         | CellKind::Plaza
                         | CellKind::Green
+                        | CellKind::Harbor
                 ),
             );
         }
@@ -1820,7 +1835,7 @@ fn paint_water_uses(occ: &mut Occupancy, grid: &HeightGrid, bounds: Rect, castle
                 | CellKind::RoadStairW => {
                     occ.set(x, z, CellKind::Bridge, true);
                 }
-                CellKind::Eave | CellKind::Hedge => {
+                CellKind::Eave | CellKind::Hedge | CellKind::Shrine | CellKind::FieldWall => {
                     occ.set(x, z, CellKind::Harbor, true);
                 }
                 CellKind::WindSail | CellKind::Building => {}
@@ -2024,7 +2039,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 7);
+        assert_eq!(PLAN_CACHE_VERSION, 8);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -2062,8 +2077,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 7;
-    const PLAN_LAYOUT_HASH: u64 = 0xdd3d_be2b_0aeb_ec90;
+    const PLAN_LAYOUT_VERSION: u32 = 8;
+    const PLAN_LAYOUT_HASH: u64 = 0xdb4f_e8e9_9ca5_f553;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

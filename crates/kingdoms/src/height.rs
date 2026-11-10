@@ -167,6 +167,44 @@ impl HeightGrid {
         }
     }
 
+    /// Steep V-shaped gorge with a river along `river_z`.
+    #[must_use]
+    pub fn synthetic_gorge(
+        min_x: i32,
+        min_z: i32,
+        max_x: i32,
+        max_z: i32,
+        step: i32,
+        base: i32,
+        river_z: i32,
+    ) -> Self {
+        let step = step.max(1);
+        let nx = ((max_x - min_x) / step) + 1;
+        let nz = ((max_z - min_z) / step) + 1;
+        let mut heights = Vec::with_capacity((nx * nz) as usize);
+        for iz in 0..nz {
+            for _ix in 0..nx {
+                let z = min_z + iz * step;
+                let dist = (z - river_z).abs();
+                let y = if dist <= 6 {
+                    58
+                } else {
+                    (base + (dist - 6) * 4).min(base + 36)
+                };
+                heights.push(y);
+            }
+        }
+        Self {
+            min_x,
+            min_z,
+            step,
+            nx,
+            nz,
+            heights,
+            sea_level: 63,
+        }
+    }
+
     /// Synthetic coast: columns west of `shore_x` sit below sea level.
     #[must_use]
     pub fn synthetic_coast(

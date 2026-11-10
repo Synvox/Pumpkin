@@ -210,6 +210,8 @@ fn planned_timber(kind: CellKind) -> bool {
             | CellKind::WaterWheel
             | CellKind::Sluice
             | CellKind::Vine
+            | CellKind::Shrine
+            | CellKind::FieldWall
     )
 }
 
@@ -1729,35 +1731,74 @@ mod tests {
         let mut rim = 0;
         let mut below = 0;
         let mut spokes = 0;
+        let mut axle = 0;
+        let mut min_x = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut min_z = i32::MAX;
+        let mut max_z = i32::MIN;
         let sea = plan.heights.sea_level;
+        let mill = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Watermill)
+            .expect("watermill lot");
         for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
             for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
                 if plan.occ.kind(x, z) != CellKind::WaterWheel {
                     continue;
                 }
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_z = min_z.min(z);
+                max_z = max_z.max(z);
                 for y in sea - 7..=sea + 7 {
                     let Some(state) = volume.get(x, y, z) else {
                         continue;
                     };
                     let id = Block::from_state_id(state.id).id;
-                    if id == Block::STRIPPED_OAK_LOG.id || id == Block::OAK_PLANKS.id {
+                    if id == Block::STRIPPED_DARK_OAK_LOG.id
+                        || id == Block::DARK_OAK_LOG.id
+                        || id == Block::DARK_OAK_PLANKS.id
+                    {
                         rim += 1;
                         if y < sea {
                             below += 1;
                         }
                     }
-                    if id == Block::OAK_FENCE.id {
+                    if id == Block::BIRCH_PLANKS.id {
                         spokes += 1;
+                    }
+                    if id == Block::STRIPPED_OAK_LOG.id {
+                        axle += 1;
                     }
                 }
             }
         }
+        let across = if matches!(mill.facing, crate::geom::Dir::East | crate::geom::Dir::West) {
+            max_z - min_z + 1
+        } else {
+            max_x - min_x + 1
+        };
+        let stand_out = if matches!(mill.facing, crate::geom::Dir::East | crate::geom::Dir::West) {
+            max_x - min_x + 1
+        } else {
+            max_z - min_z + 1
+        };
+        assert!(
+            across >= 9,
+            "wheel should be at least 9 across, got {across}"
+        );
+        assert!(
+            stand_out >= 3,
+            "wheel should stand out from the mill wall, thickness {stand_out}"
+        );
         assert!(rim > 30, "wheel rim/paddles {rim}");
         assert!(
             below >= rim / 3 && below * 2 <= rim + rim / 4,
             "about half the wheel should sit below the waterline, rim={rim} below={below}"
         );
         assert!(spokes >= 4, "wheel spokes {spokes}");
+        assert!(axle >= 1, "visible axle {axle}");
     }
 
     struct DamageGuard(String);
