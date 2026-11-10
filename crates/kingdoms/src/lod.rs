@@ -21,6 +21,8 @@ pub const ALARM_RANGE: f64 = 48.0;
 pub const CIVILIAN_SLEEP_RANGE: f64 = 64.0;
 /// Outside this, combatants skip targeting, pathing, and collision.
 pub const PLAYER_SIM_RANGE: f64 = 64.0;
+/// Outside this, raid bodies despawn to a sliding ghost (back to LOD).
+pub const PLAYER_CULL_RANGE: f64 = 96.0;
 
 /// How often a combatant should run AI this tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,6 +238,7 @@ mod tests {
         assert_eq!(LodTier::Far.period(), 40);
         assert_eq!(CIVILIAN_SLEEP_RANGE, 64.0);
         assert!((PLAYER_SIM_RANGE - 64.0).abs() < f64::EPSILON);
+        assert!((PLAYER_CULL_RANGE - 96.0).abs() < f64::EPSILON);
     }
 
     #[test]

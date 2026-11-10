@@ -154,7 +154,21 @@ impl TrackedEntity {
 
     /// Vanilla `ServerEntity.sendChanges`. Non-player entities only.
     pub fn send_changes(&self, world: &World) {
+        let director_driven = self
+            .entity
+            .get_mob()
+            .is_some_and(|mob| mob.get_mob_entity().is_director_driven());
+        if director_driven && !self.has_viewers() {
+            return;
+        }
         let entity = self.entity.get_entity();
+        if director_driven {
+            let tick = self.tick_count.load(Relaxed);
+            if !tick.is_multiple_of(crate::entity::mob::MobEntity::SPARSE_TICK_PERIOD) {
+                self.tick_count.fetch_add(1, Relaxed);
+                return;
+            }
+        }
         self.send_bedrock_move(entity, world);
         let tick = self.tick_count.fetch_add(1, Relaxed);
         let needs_sync = entity.velocity_dirty.swap(false, Ordering::SeqCst);
