@@ -29,9 +29,9 @@ pub const TOWN_TREE_MARGIN: i32 = 8;
 /// Extra stamp strip so hanging Features canopies cannot sit on the fosse.
 pub const TREE_STRIP_MARGIN: i32 = 16;
 
-/// Cog hull along the keel. Beam is 5.
-const COG_LEN: i32 = 15;
-const COG_BEAM: i32 = 5;
+/// Cog hull along the keel. Beam is 7 so the bow can taper to a point.
+const COG_LEN: i32 = 19;
+const COG_BEAM: i32 = 7;
 
 /// What a hinterland rect is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -89,6 +89,8 @@ pub enum SceneKind {
     StoneCircle,
     /// Gallows at a hinterland road junction.
     Gallows,
+    /// Broken curtain and keep stump on a rise.
+    CastleRuin,
 }
 
 impl SceneKind {
@@ -130,6 +132,7 @@ impl SceneKind {
             Self::HermitTower => "Hermit's tower",
             Self::StoneCircle => "Stone circle",
             Self::Gallows => "Crossroads gallows",
+            Self::CastleRuin => "Castle ruin",
         }
     }
 }
@@ -304,6 +307,7 @@ fn place_wayside_pois(
     scenes: &mut Vec<Scene>,
 ) {
     place_ruined_abbey(occ, grid, search, town, keep_out, rng, scenes);
+    place_castle_ruin(occ, grid, search, town, keep_out, rng, scenes);
     place_bandit_hideout(occ, grid, search, town, keep_out, rng, scenes);
     place_hermit_tower(occ, grid, search, town, keep_out, rng, scenes);
     place_stone_circle(occ, grid, search, town, keep_out, rng, scenes);
@@ -319,42 +323,128 @@ fn place_ruined_abbey(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
-    let Some(yard) = find_site(occ, grid, search, town, keep_out, 28, 24, true, rng)
-        .or_else(|| find_site(occ, grid, search, town, keep_out, 24, 20, true, rng))
+    let Some(yard) = find_site(occ, grid, search, town, keep_out, 32, 26, true, rng)
+        .or_else(|| find_site(occ, grid, search, town, keep_out, 28, 22, true, rng))
     else {
         return;
     };
     occ.fill(yard, CellKind::Green, true);
     let nave = Rect::new(
         yard.min_x + 4,
-        yard.min_z + 3,
-        yard.max_x - 4,
-        yard.min_z + 12,
+        yard.min_z + 5,
+        yard.max_x - 9,
+        yard.min_z + 16,
     );
-    occ.fill(nave, CellKind::Ruin, true);
-    let cloister = Rect::new(
-        yard.min_x + 6,
-        yard.min_z + 14,
-        yard.max_x - 6,
-        yard.max_z - 3,
-    );
-    occ.fill(cloister, CellKind::Arcade, true);
-    occ.fill(cloister.deflate(2), CellKind::Green, true);
-    let (cx, cz) = cloister.center();
-    occ.set(cx, cz, CellKind::Fountain, true);
-    for z in cloister.min_z..=cloister.max_z {
-        if (z + yard.min_x) % 5 == 0 {
-            occ.set(cloister.min_x, z, CellKind::Ruin, true);
-            occ.set(cloister.max_x, z, CellKind::Ruin, true);
+    stroke_rect_edges(occ, nave, CellKind::Ruin);
+    for x in nave.min_x + 3..=nave.max_x - 3 {
+        if x % 4 == 0 {
+            occ.set(x, nave.min_z + 3, CellKind::Ruin, true);
+            occ.set(x, nave.max_z - 3, CellKind::Ruin, true);
         }
     }
-    for x in nave.min_x + 2..=nave.max_x - 2 {
-        if x % 3 == 0 {
-            occ.set(x, nave.min_z - 1, CellKind::Grave, true);
+    let stump = Rect::new(
+        nave.max_x + 2,
+        nave.min_z,
+        (nave.max_x + 6).min(yard.max_x - 1),
+        nave.min_z + 4,
+    );
+    stroke_rect_edges(occ, stump, CellKind::Ruin);
+    occ.set(stump.center().0, stump.center().1, CellKind::Green, true);
+    let cloister = Rect::new(
+        nave.min_x + 2,
+        nave.max_z + 2,
+        nave.max_x - 2,
+        (nave.max_z + 8).min(yard.max_z - 2),
+    );
+    for x in (cloister.min_x..=cloister.max_x).step_by(3) {
+        occ.set(x, cloister.min_z, CellKind::Arcade, true);
+        occ.set(x, cloister.max_z, CellKind::Arcade, true);
+    }
+    for z in (cloister.min_z..=cloister.max_z).step_by(3) {
+        occ.set(cloister.min_x, z, CellKind::Arcade, true);
+        occ.set(cloister.max_x, z, CellKind::Arcade, true);
+    }
+    let graves = Rect::new(nave.min_x, yard.min_z + 1, nave.max_x, nave.min_z - 2);
+    for x in graves.min_x..=graves.max_x {
+        for z in graves.min_z..=graves.max_z {
+            if (x + z) % 2 == 0 {
+                occ.set(x, z, CellKind::Grave, true);
+            }
+        }
+    }
+    occ.set(graves.min_x, graves.center().1, CellKind::Lychgate, true);
+    scenes.push(Scene {
+        kind: SceneKind::RuinedAbbey,
+        rect: yard,
+    });
+}
+
+fn stroke_rect_edges(occ: &mut Occupancy, rect: Rect, kind: CellKind) {
+    for x in rect.min_x..=rect.max_x {
+        occ.set(x, rect.min_z, kind, true);
+        occ.set(x, rect.max_z, kind, true);
+    }
+    for z in rect.min_z..=rect.max_z {
+        occ.set(rect.min_x, z, kind, true);
+        occ.set(rect.max_x, z, kind, true);
+    }
+}
+
+fn place_castle_ruin(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    rng: &mut TownRng,
+    scenes: &mut Vec<Scene>,
+) {
+    let Some(yard) = find_peak_site(occ, grid, search, town, keep_out, 22, 18, 2, rng)
+        .or_else(|| find_site(occ, grid, search, town, keep_out, 22, 18, true, rng))
+        .or_else(|| find_site(occ, grid, search, town, keep_out, 18, 16, true, rng))
+    else {
+        return;
+    };
+    occ.fill(yard, CellKind::Green, true);
+    let curtain = yard.deflate(1);
+    stroke_rect_edges(occ, curtain, CellKind::Ruin);
+    let (cx, cz) = curtain.center();
+    for x in cx - 1..=cx + 1 {
+        occ.set(x, curtain.max_z, CellKind::Green, true);
+    }
+    let keep = Rect::new(cx - 3, cz - 3, cx + 3, cz + 3);
+    stroke_rect_edges(occ, keep, CellKind::Ruin);
+    occ.fill(keep.deflate(1), CellKind::Green, true);
+    let towers = [
+        Rect::new(
+            curtain.min_x,
+            curtain.min_z,
+            curtain.min_x + 2,
+            curtain.min_z + 2,
+        ),
+        Rect::new(
+            curtain.max_x - 2,
+            curtain.min_z,
+            curtain.max_x,
+            curtain.min_z + 2,
+        ),
+        Rect::new(
+            curtain.min_x,
+            curtain.max_z - 2,
+            curtain.min_x + 2,
+            curtain.max_z,
+        ),
+    ];
+    for tower in towers {
+        stroke_rect_edges(occ, tower, CellKind::Ruin);
+    }
+    for x in curtain.min_x + 2..=curtain.max_x - 2 {
+        if x % 5 == 0 {
+            occ.set(x, curtain.min_z - 1, CellKind::SiegeTrench, true);
         }
     }
     scenes.push(Scene {
-        kind: SceneKind::RuinedAbbey,
+        kind: SceneKind::CastleRuin,
         rect: yard,
     });
 }
@@ -399,25 +489,34 @@ fn place_bandit_hideout(
         occ.set(x, camp.max_z, CellKind::Palisade, true);
     }
     occ.set(camp.max_x, cz, CellKind::PalisadeGate, true);
+    let look = Rect::new(
+        camp.min_x + 1,
+        camp.min_z + 1,
+        camp.min_x + 2,
+        camp.min_z + 2,
+    );
+    occ.fill(look, CellKind::WatchPost, true);
+    occ.set(camp.min_x + 2, cz, CellKind::WarTent, true);
     let tents = [
         Rect::new(
             camp.min_x + 2,
-            camp.min_z + 2,
+            camp.min_z + 4,
             camp.min_x + 3,
-            camp.min_z + 3,
+            camp.min_z + 5,
         ),
-        Rect::new(camp.min_x + 2, cz - 1, camp.min_x + 3, cz),
         Rect::new(
             camp.min_x + 2,
-            camp.max_z - 3,
+            camp.max_z - 5,
             camp.min_x + 3,
-            camp.max_z - 2,
+            camp.max_z - 4,
         ),
     ];
     for tent in tents {
         occ.fill(tent, CellKind::Tent, true);
     }
-    occ.set(camp.min_x + 2, camp.max_z - 1, CellKind::Cage, true);
+    occ.set(camp.min_x + 2, camp.max_z - 2, CellKind::Cage, true);
+    occ.set(camp.min_x + 3, camp.max_z - 1, CellKind::Cage, true);
+    occ.set(cx, cz, CellKind::CampCourt, true);
     scenes.push(Scene {
         kind: SceneKind::BanditHideout,
         rect: yard,
@@ -433,16 +532,20 @@ fn place_hermit_tower(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
-    let Some(rect) = find_peak_site(occ, grid, search, town, keep_out, 5, 5, 2, rng) else {
+    let Some(rect) = find_peak_site(occ, grid, search, town, keep_out, 7, 7, 2, rng)
+        .or_else(|| find_peak_site(occ, grid, search, town, keep_out, 5, 5, 2, rng))
+    else {
         return;
     };
     let (cx, cz) = rect.center();
-    for dz in -2..=2 {
-        for dx in -2..=2 {
-            if dx * dx + dz * dz > 5 {
-                continue;
+    for dz in -3..=3 {
+        for dx in -3..=3 {
+            let dist2 = dx * dx + dz * dz;
+            if dist2 <= 8 {
+                occ.set(cx + dx, cz + dz, CellKind::WatchPost, true);
+            } else if dist2 <= 13 && dz >= 2 {
+                occ.set(cx + dx, cz + dz, CellKind::Orchard, true);
             }
-            occ.set(cx + dx, cz + dz, CellKind::WatchPost, true);
         }
     }
     scenes.push(Scene {
@@ -466,28 +569,47 @@ fn place_stone_circle(
         search,
         town,
         keep_out.inflate(8),
-        13,
-        13,
+        17,
+        17,
         false,
         rng,
-    ) else {
+    )
+    .or_else(|| {
+        find_site(
+            occ,
+            grid,
+            search,
+            town,
+            keep_out.inflate(8),
+            13,
+            13,
+            false,
+            rng,
+        )
+    }) else {
         return;
     };
     occ.fill(yard, CellKind::Green, true);
     let (cx, cz) = yard.center();
-    occ.set(cx, cz, CellKind::Plaza, true);
+    occ.set(cx, cz, CellKind::Fountain, true);
     for (dx, dz) in [
-        (0, -4),
-        (3, -3),
-        (4, 0),
-        (3, 3),
-        (0, 4),
-        (-3, 3),
-        (-4, 0),
-        (-3, -3),
+        (0, -6),
+        (4, -5),
+        (6, 0),
+        (4, 5),
+        (0, 6),
+        (-4, 5),
+        (-6, 0),
+        (-4, -5),
+        (0, -2),
+        (2, 0),
+        (0, 2),
+        (-2, 0),
     ] {
         occ.set(cx + dx, cz + dz, CellKind::StandingStone, true);
     }
+    occ.set(cx + 5, cz - 5, CellKind::StandingStone, true);
+    occ.set(cx + 6, cz - 5, CellKind::StandingStone, true);
     scenes.push(Scene {
         kind: SceneKind::StoneCircle,
         rect: yard,
@@ -1226,7 +1348,7 @@ fn place_harbour_cog(
             for offset in [0, 2, -2, 3, -3, 4, -4] {
                 let sx = x + dir.dx() * step + side.dx() * offset;
                 let sz = z + dir.dz() * step + side.dz() * offset;
-                for &(len, beam) in &[(COG_LEN, COG_BEAM), (COG_LEN, 3)] {
+                for &(len, beam) in &[(COG_LEN, COG_BEAM), (COG_LEN, 5), (15, 5), (15, 3)] {
                     let hull = hull_rect(sx, sz, dir, len, beam);
                     if !hull_cells_ok(occ, grid, search, hull) {
                         continue;
@@ -2726,6 +2848,8 @@ fn landmark_blocked(scenes: &[Scene], rect: Rect) -> bool {
                 | SceneKind::Gorge
                 | SceneKind::StaveChurch
                 | SceneKind::Caravanserai
+                | SceneKind::RuinedAbbey
+                | SceneKind::CastleRuin
         ) && scene.rect.deflate(2).intersects(rect)
     })
 }
@@ -9535,5 +9659,397 @@ mod tests {
             "dome {wide}×{wide} h={tall} n={}",
             gold.len()
         );
+    }
+
+    #[test]
+    fn round27_cog_has_pointed_bow_yard_and_billow() {
+        let origin = town_in_cell(314_159, 0, 0);
+        let coast = HeightGrid::synthetic_coast(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            58,
+            origin.x + 40,
+        );
+        let plan = build_plan(314_159, origin, coast, PaletteKind::Oak);
+        let mut ship_cells = Vec::new();
+        for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
+            for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
+                if plan.occ.kind(x, z) == CellKind::Ship {
+                    ship_cells.push((x, z));
+                }
+            }
+        }
+        let min_x = ship_cells.iter().map(|c| c.0).min().unwrap_or(0);
+        let max_x = ship_cells.iter().map(|c| c.0).max().unwrap_or(0);
+        let min_z = ship_cells.iter().map(|c| c.1).min().unwrap_or(0);
+        let max_z = ship_cells.iter().map(|c| c.1).max().unwrap_or(0);
+        let keel = (max_x - min_x + 1).max(max_z - min_z + 1);
+        assert!(
+            (15..=19).contains(&keel),
+            "cog keel should be 15–19, got {keel}"
+        );
+        let volume = crate::stamp::fill_volume(&plan);
+        let sea = plan.heights.sea_level;
+        let mut wool = Vec::new();
+        let mut spruce = 0;
+        let mut dark = 0;
+        let mut banner = 0;
+        let mut mast_top = sea;
+        let mut chain = 0;
+        let along_x = (max_x - min_x) >= (max_z - min_z);
+        let bow_along = if along_x { min_x } else { min_z };
+        let mut bow_beam = 0;
+        for &(x, z) in &ship_cells {
+            let along = if along_x { x } else { z };
+            for y in sea - 3..=sea + 22 {
+                let Some(state) = volume.get(x, y, z) else {
+                    continue;
+                };
+                let id = pumpkin_data::Block::from_state_id(state.id).id;
+                if id == pumpkin_data::Block::WHITE_WOOL.id {
+                    wool.push((x, y, z));
+                }
+                if id == pumpkin_data::Block::SPRUCE_PLANKS.id {
+                    spruce += 1;
+                }
+                if id == pumpkin_data::Block::DARK_OAK_PLANKS.id {
+                    dark += 1;
+                }
+                if id == pumpkin_data::Block::WHITE_BANNER.id {
+                    banner += 1;
+                }
+                if id == pumpkin_data::Block::SPRUCE_LOG.id {
+                    mast_top = mast_top.max(y);
+                }
+                if id == pumpkin_data::Block::IRON_CHAIN.id {
+                    chain += 1;
+                }
+                if along == bow_along
+                    && y >= sea
+                    && (id == pumpkin_data::Block::DARK_OAK_PLANKS.id
+                        || id == pumpkin_data::Block::SPRUCE_PLANKS.id
+                        || id == pumpkin_data::Block::DARK_OAK_LOG.id)
+                {
+                    bow_beam += 1;
+                }
+            }
+        }
+        let wool_along: std::collections::BTreeSet<i32> = wool
+            .iter()
+            .map(|c| if along_x { c.0 } else { c.2 })
+            .collect();
+        assert!(
+            spruce >= 8 && dark >= 8,
+            "two wood tones spruce={spruce} dark={dark}"
+        );
+        assert!(banner >= 1, "masthead flag {banner}");
+        assert!(mast_top >= sea + 12, "mast {mast_top} sea={sea}");
+        assert!(chain >= 2, "rigging chains {chain}");
+        assert!(
+            wool_along.len() >= 2,
+            "billowed sail should occupy offset columns {wool_along:?}"
+        );
+        assert!(
+            bow_beam <= 6,
+            "pointed bow should be a few cells, {bow_beam}"
+        );
+        let mut forecastle = 0;
+        let mut high_log = 0;
+        for &(x, z) in &ship_cells {
+            for y in sea + 4..=sea + 12 {
+                let Some(state) = volume.get(x, y, z) else {
+                    continue;
+                };
+                let id = pumpkin_data::Block::from_state_id(state.id).id;
+                if id == pumpkin_data::Block::DARK_OAK_PLANKS.id
+                    || id == pumpkin_data::Block::SPRUCE_PLANKS.id
+                    || id == pumpkin_data::Block::SPRUCE_SLAB.id
+                {
+                    forecastle += 1;
+                }
+                if id == pumpkin_data::Block::DARK_OAK_LOG.id {
+                    high_log += 1;
+                }
+            }
+        }
+        assert!(
+            forecastle + high_log >= 6,
+            "sheer/forecastle planks={forecastle} logs={high_log}"
+        );
+    }
+
+    #[test]
+    fn round27_abbey_is_roofless_gothic_nave() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            6,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let abbey = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::RuinedAbbey)
+            .expect("ruined abbey");
+        let mut ruin = 0;
+        let mut interior_ruin = 0;
+        let mut graves = 0;
+        let mut arcade = 0;
+        for z in abbey.rect.min_z..=abbey.rect.max_z {
+            for x in abbey.rect.min_x..=abbey.rect.max_x {
+                match plan.occ.kind(x, z) {
+                    CellKind::Ruin => {
+                        ruin += 1;
+                        let edge = crate::geom::Dir::ALL
+                            .iter()
+                            .any(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) != CellKind::Ruin);
+                        if !edge {
+                            interior_ruin += 1;
+                        }
+                    }
+                    CellKind::Grave | CellKind::Lychgate => graves += 1,
+                    CellKind::Arcade => arcade += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(ruin >= 40, "nave walls {ruin}");
+        assert!(
+            interior_ruin * 3 < ruin,
+            "nave should be walls not a filled box interior={interior_ruin} ruin={ruin}"
+        );
+        assert!(graves >= 6, "abbey graveyard {graves}");
+        assert!(arcade >= 6, "cloister arcade {arcade}");
+        let volume = crate::stamp::fill_volume(&plan);
+        let mut wall_h = Vec::new();
+        let mut vines = 0;
+        let mut bars = 0;
+        let mut slabs = 0;
+        for z in abbey.rect.min_z..=abbey.rect.max_z {
+            for x in abbey.rect.min_x..=abbey.rect.max_x {
+                if plan.occ.kind(x, z) != CellKind::Ruin {
+                    continue;
+                }
+                let ground = plan.heights.height(x, z) - 1;
+                let mut top = ground;
+                for y in ground..=ground + 22 {
+                    let Some(state) = volume.get(x, y, z) else {
+                        continue;
+                    };
+                    let id = pumpkin_data::Block::from_state_id(state.id).id;
+                    if id == pumpkin_data::Block::VINE.id {
+                        vines += 1;
+                    }
+                    if id == pumpkin_data::Block::IRON_BARS.id {
+                        bars += 1;
+                    }
+                    if id == pumpkin_data::Block::STONE_SLAB.id
+                        || id == pumpkin_data::Block::COBBLESTONE_SLAB.id
+                        || id == pumpkin_data::Block::SPRUCE_SLAB.id
+                    {
+                        slabs += 1;
+                    }
+                    if !state.is_air()
+                        && id != pumpkin_data::Block::VINE.id
+                        && id != pumpkin_data::Block::IRON_BARS.id
+                    {
+                        top = y;
+                    }
+                }
+                wall_h.push(top - ground);
+            }
+        }
+        let tall = wall_h.iter().copied().max().unwrap_or(0);
+        let short = wall_h.iter().copied().min().unwrap_or(0);
+        assert!(tall >= 10, "broken gable should be tall, {tall}");
+        assert!(tall - short >= 4, "jagged ruin heights {short}..{tall}");
+        assert!(vines >= 8, "ivy {vines}");
+        assert!(bars >= 2, "tracery bars {bars}");
+        assert!(slabs <= 4, "nave should stay roofless, slabs={slabs}");
+        let arcade_h: Vec<_> = {
+            let mut hs = Vec::new();
+            for z in abbey.rect.min_z..=abbey.rect.max_z {
+                for x in abbey.rect.min_x..=abbey.rect.max_x {
+                    if plan.occ.kind(x, z) != CellKind::Arcade {
+                        continue;
+                    }
+                    let ground = plan.heights.height(x, z) - 1;
+                    let mut top = ground;
+                    for y in ground..=ground + 14 {
+                        if volume.get(x, y, z).is_some_and(|s| !s.is_air()) {
+                            top = y;
+                        }
+                    }
+                    hs.push(top - ground);
+                }
+            }
+            hs
+        };
+        let amax = arcade_h.iter().copied().max().unwrap_or(0);
+        let amin = arcade_h.iter().copied().min().unwrap_or(0);
+        assert!(amax - amin >= 2, "arcade column heights {amin}..{amax}");
+    }
+
+    #[test]
+    fn round27_castle_ruin_and_richer_pois() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            6,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let kinds: Vec<_> = plan.scenes.iter().map(|s| s.kind).collect();
+        for need in [
+            SceneKind::CastleRuin,
+            SceneKind::HermitTower,
+            SceneKind::BanditHideout,
+            SceneKind::StoneCircle,
+        ] {
+            assert!(kinds.contains(&need), "missing {need:?} in {kinds:?}");
+        }
+        let castle = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::CastleRuin)
+            .unwrap();
+        let mut curtain = 0;
+        let mut keep_ring = 0;
+        for z in castle.rect.min_z..=castle.rect.max_z {
+            for x in castle.rect.min_x..=castle.rect.max_x {
+                if plan.occ.kind(x, z) != CellKind::Ruin {
+                    continue;
+                }
+                curtain += 1;
+                let blob_w = {
+                    let mut x0 = x;
+                    let mut x1 = x;
+                    while plan.occ.kind(x0 - 1, z) == CellKind::Ruin {
+                        x0 -= 1;
+                    }
+                    while plan.occ.kind(x1 + 1, z) == CellKind::Ruin {
+                        x1 += 1;
+                    }
+                    x1 - x0 + 1
+                };
+                if blob_w <= 9 {
+                    keep_ring += 1;
+                }
+            }
+        }
+        assert!(curtain >= 40, "castle ruin curtain {curtain}");
+        assert!(keep_ring >= 12, "keep stump ring {keep_ring}");
+        let hermit = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::HermitTower)
+            .unwrap();
+        let mut posts = 0;
+        let mut garden = 0;
+        for z in hermit.rect.min_z..=hermit.rect.max_z {
+            for x in hermit.rect.min_x..=hermit.rect.max_x {
+                match plan.occ.kind(x, z) {
+                    CellKind::WatchPost => posts += 1,
+                    CellKind::Orchard => garden += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(posts >= 9, "hermit drum {posts}");
+        assert!(garden >= 2, "hermit garden {garden}");
+        let stones = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::StoneCircle)
+            .map_or(0, |s| {
+                let mut n = 0;
+                for z in s.rect.min_z..=s.rect.max_z {
+                    for x in s.rect.min_x..=s.rect.max_x {
+                        if plan.occ.kind(x, z) == CellKind::StandingStone {
+                            n += 1;
+                        }
+                    }
+                }
+                n
+            });
+        assert!(stones >= 12, "stone circle menhirs {stones}");
+        let bandit = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::BanditHideout)
+            .unwrap();
+        let mut look = 0;
+        let mut tents = 0;
+        let mut trench = 0;
+        for z in bandit.rect.min_z..=bandit.rect.max_z {
+            for x in bandit.rect.min_x..=bandit.rect.max_x {
+                match plan.occ.kind(x, z) {
+                    CellKind::WatchPost => look += 1,
+                    CellKind::Tent | CellKind::WarTent => tents += 1,
+                    CellKind::SiegeTrench => trench += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(look >= 4, "bandit lookout {look}");
+        assert!(tents >= 3, "bandit tents {tents}");
+        assert!(trench >= 20, "bandit ravine {trench}");
+        let volume = crate::stamp::fill_volume(&plan);
+        let hermit_h = {
+            let mut h = 0;
+            for z in hermit.rect.min_z..=hermit.rect.max_z {
+                for x in hermit.rect.min_x..=hermit.rect.max_x {
+                    if plan.occ.kind(x, z) != CellKind::WatchPost {
+                        continue;
+                    }
+                    let ground = plan.heights.height(x, z) - 1;
+                    for y in ground..=ground + 24 {
+                        if volume.get(x, y, z).is_some_and(|s| !s.is_air()) {
+                            h = h.max(y - ground);
+                        }
+                    }
+                }
+            }
+            h
+        };
+        assert!(hermit_h >= 14, "hermit tower {hermit_h}");
+        let stone_h = {
+            let mut h = 0;
+            let scene = plan
+                .scenes
+                .iter()
+                .find(|s| s.kind == SceneKind::StoneCircle)
+                .unwrap();
+            for z in scene.rect.min_z..=scene.rect.max_z {
+                for x in scene.rect.min_x..=scene.rect.max_x {
+                    if plan.occ.kind(x, z) != CellKind::StandingStone {
+                        continue;
+                    }
+                    let ground = plan.heights.height(x, z) - 1;
+                    for y in ground..=ground + 12 {
+                        if volume.get(x, y, z).is_some_and(|s| !s.is_air()) {
+                            h = h.max(y - ground);
+                        }
+                    }
+                }
+            }
+            h
+        };
+        assert!(stone_h >= 5, "menhirs {stone_h}");
     }
 }
