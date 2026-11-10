@@ -515,12 +515,17 @@ fn check_columns(
     let seed = find_seed(&columns, volume);
     let leak = seed.and_then(|s| flood_leak(s, &set, volume, plan));
     let floating_roofs = count_floating_roofs(&columns, volume);
+    let keep_or_hall = name.contains("keep") || name.contains("hall");
     let sky_open = if check_sky {
-        count_sky_open(&set, volume)
+        let mut n = count_sky_open(&set, volume);
+        if name.contains("keep-mass") || name == "hall" || name == "fortress-keep" {
+            n += count_roof_wells(&set, volume, Some(plan));
+        }
+        n
     } else {
         0
     };
-    let open_ridges = if check_sky && (name.contains("keep") || name.contains("hall")) {
+    let open_ridges = if check_sky && keep_or_hall {
         count_open_ridges(&set, volume)
     } else {
         0
@@ -821,6 +826,50 @@ fn count_sky_open(columns: &std::collections::HashSet<(i32, i32)>, volume: &Volu
     n
 }
 
+/// Interior roof crater: the column sits below the roof around it with no downhill.
+fn count_roof_wells(
+    columns: &std::collections::HashSet<(i32, i32)>,
+    volume: &VolumeSink,
+    plan: Option<&TownPlan>,
+) -> usize {
+    let mut n = 0;
+    for &(x, z) in columns {
+        if !is_strict_interior(x, z, columns) {
+            continue;
+        }
+        let Some((top, _)) = volume.top(x, z) else {
+            n += 1;
+            continue;
+        };
+        let this_mass = plan.and_then(|p| p.castle.keep_mass_at(x, z));
+        let mut higher = 0;
+        let mut lower = 0;
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let nx = x + dx;
+            let nz = z + dz;
+            if !columns.contains(&(nx, nz)) {
+                continue;
+            }
+            if let (Some(here), Some(there)) =
+                (this_mass, plan.and_then(|p| p.castle.keep_mass_at(nx, nz)))
+                && (here.spec.cx != there.spec.cx || here.spec.cz != there.spec.cz)
+            {
+                continue;
+            }
+            match volume.top(nx, nz) {
+                Some((n_top, _)) if n_top >= top + 3 => higher += 1,
+                Some((n_top, _)) if n_top + 3 <= top => lower += 1,
+                None => lower += 1,
+                Some(_) => {}
+            }
+        }
+        if higher >= 2 && lower == 0 {
+            n += 1;
+        }
+    }
+    n
+}
+
 fn count_open_ridges(
     columns: &std::collections::HashSet<(i32, i32)>,
     volume: &VolumeSink,
@@ -1109,6 +1158,16 @@ mod tests {
             ridge.is_empty(),
             "keep/hall roofs should be enclosed at the ridge: {ridge:?}"
         );
+        let sky: Vec<_> = check
+            .buildings
+            .iter()
+            .filter(|b| (b.name.contains("keep") || b.name.contains("hall")) && b.sky_open > 0)
+            .map(|b| format!("{} sky={}", b.name, b.sky_open))
+            .collect();
+        assert!(
+            sky.is_empty(),
+            "keep/hall interiors must not see the sky: {sky:?}"
+        );
         let named = check
             .buildings
             .iter()
@@ -1234,6 +1293,54 @@ mod tests {
             count_sky_open(&cols, &volume),
             0,
             "closed roof must pass sky-visibility"
+        );
+    }
+
+    #[test]
+    fn keep_roof_well_fails_sky_to_interior() {
+        let mut volume = crate::stamp::VolumeSink::for_bounds(0, 0, 8, 8, 0, 24);
+        let planks = Block::OAK_PLANKS.default_state;
+        let masonry = Block::STONE_BRICKS.default_state;
+        let cap = Block::DARK_OAK_PLANKS.default_state;
+        for z in 0..=8 {
+            for x in 0..=8 {
+                volume.put(x, 5, z, planks);
+                if x == 0 || x == 8 || z == 0 || z == 8 {
+                    for y in 6..=12 {
+                        volume.put(x, y, z, masonry);
+                    }
+                } else {
+                    volume.put(x, 12, z, cap);
+                }
+            }
+        }
+        let cols: std::collections::HashSet<(i32, i32)> =
+            (0..=8).flat_map(|z| (0..=8).map(move |x| (x, z))).collect();
+        assert_eq!(
+            count_roof_wells(&cols, &volume, None),
+            0,
+            "a flat keep cap must not look like a well"
+        );
+        for z in 2..=6 {
+            for x in 2..=6 {
+                volume.put(x, 12, z, Block::AIR.default_state);
+                volume.put(x, 11, z, Block::AIR.default_state);
+                volume.put(x, 10, z, Block::AIR.default_state);
+            }
+        }
+        assert!(
+            count_roof_wells(&cols, &volume, None) > 0,
+            "a sunken keep roof well must fail"
+        );
+        for z in 2..=6 {
+            for x in 2..=6 {
+                volume.put(x, 12, z, cap);
+            }
+        }
+        assert_eq!(
+            count_roof_wells(&cols, &volume, None),
+            0,
+            "filling the well must pass"
         );
     }
 

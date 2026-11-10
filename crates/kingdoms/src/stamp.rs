@@ -1936,11 +1936,6 @@ fn place_shaped_tower(
         if matches!(spec.roof, RoofKind::Crenellated) {
             sink.put(x, top, z, palette.path);
         }
-        if !matches!(spec.roof, RoofKind::Crenellated) && roof_y > top + 1 {
-            for y in top + 1..roof_y {
-                sink.put(x, y, z, palette.roof_slab);
-            }
-        }
         interior::furnish_keep_mass(sink, spec, x, floor, z, top, palette, cellar);
     }
     place_mass_roof(sink, spec, x, z, top, palette);
@@ -2037,8 +2032,6 @@ fn mass_roof_needs_cap(spec: TowerSpec, x: i32, z: i32) -> bool {
     match spec.roof {
         RoofKind::Crenellated => false,
         RoofKind::Hip => {
-            // The height clamp flattens a plateau of outward stairs; a full
-            // cap there closes the dark ridge slot.
             dist <= spec.radius.saturating_sub(6).max(3)
                 || (dx.abs().min(dz.abs()) == 0 && dist <= spec.radius.min(6))
         }
@@ -2050,7 +2043,7 @@ fn mass_roof_needs_cap(spec: TowerSpec, x: i32, z: i32) -> bool {
             };
             d <= 2
         }
-        RoofKind::Cone | RoofKind::Spire => dist <= 1,
+        RoofKind::Cone | RoofKind::Spire => dist <= 2,
     }
 }
 
@@ -2066,18 +2059,21 @@ fn place_mass_roof(
     match spec.roof {
         RoofKind::Crenellated => {}
         RoofKind::Cone | RoofKind::Hip | RoofKind::Gable { .. } | RoofKind::Spire => {
-            // Interior rafter only. Planks on the rim turned keep roofs into
-            // brown wedges and hid the masonry eaves.
-            if !on_shell(spec, x, z) {
-                sink.put(x, roof_y - 1, z, palette.planks);
-            }
             let dx = x - spec.cx;
             let dz = z - spec.cz;
-            if mass_roof_needs_cap(spec, x, z) {
-                sink.put(x, roof_y, z, roof_cap_block(palette));
-                sink.put(x, roof_y + 1, z, palette.roof_slab);
+            let cap = roof_cap_block(palette);
+            if on_shell(spec, x, z) {
+                if mass_roof_needs_cap(spec, x, z) {
+                    sink.put(x, roof_y, z, cap);
+                } else {
+                    sink.put(x, roof_y, z, stair_state(palette.roof, dir));
+                }
             } else {
-                sink.put(x, roof_y, z, stair_state(palette.roof, dir));
+                // Fill the pyramid so a spire/hip cannot leave a sky well with
+                // oak rafters showing between the two slopes.
+                for y in top + 1..=roof_y {
+                    sink.put(x, y, z, cap);
+                }
             }
             if matches!(spec.roof, RoofKind::Spire) && dx == 0 && dz == 0 {
                 for y in roof_y + 1..=roof_y + 6 {
