@@ -24,6 +24,11 @@ pub const FRONTIER_TREE_MARGIN: i32 = 10;
 /// Keep feature trees this far from a roofed lot so trunks do not punch eaves.
 pub const BUILDING_TREE_MARGIN: i32 = 4;
 
+/// Occupancy keepout around the walled town (curtain, pomerium, fosse).
+pub const TOWN_TREE_MARGIN: i32 = 8;
+/// Extra stamp strip so hanging Features canopies cannot sit on the fosse.
+pub const TREE_STRIP_MARGIN: i32 = 16;
+
 /// Cog hull along the keel. Beam is 5.
 const COG_LEN: i32 = 15;
 const COG_BEAM: i32 = 5;
@@ -133,6 +138,7 @@ pub fn place_scenes(
     seed: u64,
     rng: &mut TownRng,
     palette: PaletteKind,
+    walled_city: bool,
 ) -> Vec<Scene> {
     let mut scenes = Vec::new();
     let search = occ.bounds;
@@ -205,7 +211,7 @@ pub fn place_scenes(
         search,
         lots,
         seed,
-        origin.cell_x == 0 && origin.cell_z == 0,
+        walled_city,
         rng,
         &mut scenes,
     );
@@ -456,7 +462,7 @@ pub fn paint_tree_keepout(
     market: Rect,
     town: Rect,
 ) {
-    let mut pads = vec![market.inflate(16), town];
+    let mut pads = vec![market.inflate(16), town.inflate(TOWN_TREE_MARGIN)];
     for lot in lots {
         if matches!(lot.kind, BuildingKind::Stall) {
             continue;
@@ -4769,7 +4775,21 @@ fn reserve_sail_disc(occ: &mut Occupancy, cx: i32, cz: i32, mill: Rect) {
     }
 }
 
-fn paint_wind_sails(occ: &mut Occupancy, lots: &[Lot]) {
+pub(crate) fn rect_hits_mill_sail(lots: &[Lot], rect: Rect) -> bool {
+    lots.iter().any(|lot| {
+        if lot.kind != BuildingKind::Windmill {
+            return false;
+        }
+        let (cx, cz) = lot.rect.center();
+        let nearest_x = rect.min_x.max(cx.min(rect.max_x));
+        let nearest_z = rect.min_z.max(cz.min(rect.max_z));
+        let dx = nearest_x - cx;
+        let dz = nearest_z - cz;
+        dx * dx + dz * dz <= MILL_SAIL_RADIUS * MILL_SAIL_RADIUS
+    })
+}
+
+pub(crate) fn paint_wind_sails(occ: &mut Occupancy, lots: &[Lot]) {
     for lot in lots {
         if lot.kind != BuildingKind::Windmill {
             continue;
@@ -5723,6 +5743,9 @@ pub(crate) fn try_lot(
         return None;
     }
     if !grid.rect_is_dry(rect) {
+        return None;
+    }
+    if kind != BuildingKind::Windmill && rect_hits_mill_sail(lots, rect) {
         return None;
     }
     for z in rect.min_z..=rect.max_z {
@@ -8207,5 +8230,131 @@ mod tests {
             "extramural suburb missing: {:?}",
             oak.scenes.iter().map(|s| s.kind).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn round24_fosse_and_lanes_strip_trees_and_get_street_life() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+        );
+        let oak = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        assert!(oak.walled_city);
+        let wall = oak.town.inflate(2);
+        let mut ditch = 0;
+        let mut plaza = 0;
+        for z in wall.min_z - 5..=wall.max_z + 5 {
+            for x in wall.min_x - 5..=wall.max_x + 5 {
+                match oak.occ.kind(x, z) {
+                    CellKind::CityDitch => {
+                        ditch += 1;
+                        assert!(
+                            oak.strips_trees(x, z),
+                            "fosse at {x},{z} should strip vanilla trees"
+                        );
+                    }
+                    CellKind::Plaza if oak.town.contains(x, z) => {
+                        plaza += 1;
+                        assert!(oak.strips_trees(x, z), "pomerium at {x},{z}");
+                    }
+                    CellKind::TownWall | CellKind::TownTower => {
+                        assert!(oak.strips_trees(x, z), "curtain at {x},{z}");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(ditch >= 80, "city fosse {ditch}");
+        assert!(plaza >= 80, "pomerium {plaza}");
+        let stalls = oak
+            .lots
+            .iter()
+            .filter(|lot| lot.kind == BuildingKind::Stall)
+            .count();
+        assert!(stalls >= 12, "street and market stalls {stalls}");
+        let mut wells = 0;
+        for z in oak.town.min_z..=oak.town.max_z {
+            for x in oak.town.min_x..=oak.town.max_x {
+                if oak.occ.kind(x, z) == CellKind::Well {
+                    wells += 1;
+                }
+            }
+        }
+        assert!(wells >= 9, "well heads {wells}");
+    }
+
+    #[test]
+    fn round24_coastal_megacity_gets_two_ring() {
+        let origin = town_in_cell(1, -4, 5);
+        let coast = HeightGrid::synthetic_coast(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            58,
+            origin.x + 80,
+        );
+        let plan = build_plan(1, origin, coast, PaletteKind::Oak);
+        assert!(!plan.capital);
+        assert!(plan.walled_city, "coastal harbour should be a walled city");
+        let mut ditch = 0;
+        let mut towers = 0;
+        let wall = plan.town.inflate(2);
+        for z in wall.min_z - 5..=wall.max_z + 5 {
+            for x in wall.min_x - 5..=wall.max_x + 5 {
+                match plan.occ.kind(x, z) {
+                    CellKind::CityDitch => ditch += 1,
+                    CellKind::TownTower => towers += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(ditch >= 40, "harbour fosse/sea wall {ditch}");
+        assert!(towers >= 40, "harbour round towers {towers}");
+    }
+
+    #[test]
+    fn round24_taiga_and_desert_capitals_keep_two_ring() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        for palette in [PaletteKind::Spruce, PaletteKind::Sandstone] {
+            let grid = HeightGrid::synthetic_slope(
+                origin.x - 360,
+                origin.z - 360,
+                origin.x + 360,
+                origin.z + 360,
+                8,
+                80,
+                18,
+                8,
+            );
+            let plan = build_plan(20_261_025, origin, grid, palette);
+            assert!(
+                plan.walled_city,
+                "{palette:?} capital should be a walled city"
+            );
+            let mut ditch = 0;
+            let mut towers = 0;
+            let wall = plan.town.inflate(2);
+            for z in wall.min_z - 5..=wall.max_z + 5 {
+                for x in wall.min_x - 5..=wall.max_x + 5 {
+                    match plan.occ.kind(x, z) {
+                        CellKind::CityDitch => ditch += 1,
+                        CellKind::TownTower => towers += 1,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(ditch >= 80, "{palette:?} fosse {ditch}");
+            assert!(towers >= 40, "{palette:?} round towers {towers}");
+        }
     }
 }
