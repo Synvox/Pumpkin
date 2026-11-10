@@ -626,6 +626,24 @@ The 629 ms repair dump is gone from the CSV (director max 8 ms). Remaining hitch
 
 Plots: `/opt/cursor/artifacts/soak-r11-branch-summary.json`, `soak-r11-branch2-summary.json`, `soak-r11-master-summary.json`.
 
+Round 12 (this PR) captures in the inner bailey minus the gatehouse, so a wave at the portcullis does not flip a town. Distant combatants skip targeting outside 48 blocks of a player; materialized raids snapshot by entity id; item/XP orbs despawn 8/tick; engines run on one town per tick. The first 40 live ticks of a town skip engines and repair scan. `/kingdom rank set` is permission level 2+. `KINGDOMS.md` has a Sails quickstart (token, cloudflared, HMAC, director loop).
+
+10-min identical-load soak (seed `20261025`, 3 fronts, `/raid start` 120 40, `KINGDOMS_BODY_BUDGET=600`, plan cache v7) vs master `c5dbd267`:
+
+| | branch (this PR) | master `c5dbd267` |
+| --- | ---: | ---: |
+| MSPT p50 / p95 / max | **58.27** / 81.00 / 103.65 | 68.20 / 96.95 / 130.79 |
+| director_ms p50 / p95 / max | **4.42** / 5.99 / 12.08 | 7.73 / 9.93 / 25.43 |
+| hitch log max (director_ms) | **0** | **471.72** (first live town ticks 214–222 ms) |
+| phase > 20 ms | **0** | 17 (`towns` 471.55) |
+| live fronts / bodies max | 3 / 480 | 3 / 480 |
+| entities max | **876** | 1029 |
+| `Can't keep up` | 34 | 31 |
+
+Same 480-body load. Director hitch is gone. MSPT p50 is 10 ms better but still above the 50 ms budget; remaining cost is vanilla entity/chunk sim of ~480 NoAI soldiers (packet batching would need pumpkin-core).
+
+Plots: `/opt/cursor/artifacts/soak-r12-branch-summary.json`, `soak-r12-master-summary.json`.
+
 ### Commands
 
 | Command | |
