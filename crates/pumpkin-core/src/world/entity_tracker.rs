@@ -33,6 +33,7 @@ use pumpkin_util::math::{get_section_cord, pack_degrees};
 use rustc_hash::FxHashSet;
 use uuid::Uuid;
 
+use crate::entity::mob::MobEntity;
 use crate::entity::player::Player;
 use crate::entity::{Entity, EntityBase};
 use crate::net::ClientPlatform;
@@ -40,9 +41,21 @@ use crate::net::java::JavaClient;
 use crate::world::World;
 use crate::world::chunker::get_view_distance;
 
+/// Director-driven bodies this close to a viewer send move packets every tick.
+const DIRECTOR_MOVE_VIEW_RANGE: f64 = 32.0;
+
 /// Vanilla `VecDeltaCodec.encode`: Java `Math.round` on the 1/4096
 fn encode_pos(value: f64) -> i64 {
     (value * 4096.0 + 0.5).floor() as i64
+}
+
+/// Sparse move packets only for virtualized or far director-driven bodies.
+/// A viewer within [`DIRECTOR_MOVE_VIEW_RANGE`] keeps the vanilla 20 Hz stream.
+fn director_moves_need_throttle(nearest_viewer_xz: Option<f64>, no_physics: bool) -> bool {
+    if nearest_viewer_xz.is_some_and(|d| d <= DIRECTOR_MOVE_VIEW_RANGE) {
+        return false;
+    }
+    no_physics || nearest_viewer_xz.is_some()
 }
 
 /// Vanilla `ServerEntity.sendChanges` packet choice.
@@ -152,6 +165,29 @@ impl TrackedEntity {
             .contains(uuid)
     }
 
+    fn throttle_director_moves(&self, world: &World, entity: &Entity) -> bool {
+        director_moves_need_throttle(
+            self.nearest_viewer_xz(world, entity),
+            entity.no_physics.load(Relaxed),
+        )
+    }
+
+    fn nearest_viewer_xz(&self, world: &World, entity: &Entity) -> Option<f64> {
+        let pos = entity.pos.load();
+        world
+            .players
+            .load()
+            .iter()
+            .filter_map(|player| {
+                if !self.is_seen_by(&player.gameprofile.id) {
+                    return None;
+                }
+                let pp = player.living_entity.entity.pos.load();
+                Some((pp.x - pos.x).hypot(pp.z - pos.z))
+            })
+            .min_by(f64::total_cmp)
+    }
+
     /// Vanilla `ServerEntity.sendChanges`. Non-player entities only.
     pub fn send_changes(&self, world: &World) {
         let director_driven = self
@@ -162,9 +198,9 @@ impl TrackedEntity {
             return;
         }
         let entity = self.entity.get_entity();
-        if director_driven {
+        if director_driven && self.throttle_director_moves(world, entity) {
             let tick = self.tick_count.load(Relaxed);
-            if !tick.is_multiple_of(crate::entity::mob::MobEntity::SPARSE_TICK_PERIOD) {
+            if !tick.is_multiple_of(MobEntity::SPARSE_TICK_PERIOD) {
                 self.tick_count.fetch_add(1, Relaxed);
                 return;
             }
@@ -1034,5 +1070,28 @@ impl EntityTracker {
                 tracked.entity.get_entity().send_dirty_entity_data();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DIRECTOR_MOVE_VIEW_RANGE, director_moves_need_throttle};
+
+    #[test]
+    fn nearby_director_bodies_are_not_throttled() {
+        assert!(!director_moves_need_throttle(Some(0.0), true));
+        assert!(!director_moves_need_throttle(
+            Some(DIRECTOR_MOVE_VIEW_RANGE),
+            true
+        ));
+        assert!(!director_moves_need_throttle(Some(16.0), false));
+    }
+
+    #[test]
+    fn far_or_virtualized_director_bodies_are_throttled() {
+        assert!(director_moves_need_throttle(Some(32.1), false));
+        assert!(director_moves_need_throttle(Some(96.0), true));
+        assert!(director_moves_need_throttle(None, true));
+        assert!(!director_moves_need_throttle(None, false));
     }
 }
