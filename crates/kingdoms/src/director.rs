@@ -81,9 +81,13 @@ const LIVE_MELEE_DAMAGE: f32 = 4.0;
 const LIVE_MELEE_PERIOD: u32 = 10;
 const LIVE_RANGED_RANGE: f64 = 28.0;
 const LIVE_RANGED_DAMAGE: f32 = 3.0;
+/// Wall archers hit harder so a garrison volley thins a wave at the gate.
+const WALL_ARCHER_DAMAGE: f32 = 5.0;
 const LIVE_RANGED_PERIOD: u32 = 20;
-/// Real arrows when a player can see the shot; director damage beyond this.
+/// Cap visible projectiles. A 50-shot volley of real arrows was ~1k extra
+/// entities on the 3-front soak; director damage is the fight.
 const PLAYER_ARROW_RANGE: f64 = 32.0;
+const VISUAL_ARROWS_PER_VOLLEY: u32 = 2;
 const CAPTURE_METER_RANGE: f64 = 64.0;
 const DEFAULT_WAR_CLOCK_TICKS: u32 = 2400;
 /// Quiet ticks after hold lockout so builders can repair for the new owner.
@@ -583,6 +587,7 @@ impl Director {
                 && let Some(war) = self.towns.get_mut(&id)
             {
                 apply_saved_town(war, saved_town, self.tick);
+                self.owners.insert(id.clone(), war.owner.clone());
             }
         }
         tracing::info!(
@@ -628,8 +633,12 @@ impl Director {
             .iter()
             .map(|(id, war)| (id.clone(), snapshot_town(war, world.as_deref())))
             .collect();
+        let mut towns = self.owners.clone();
+        for (id, war) in &self.towns {
+            towns.insert(id.clone(), war.owner.clone());
+        }
         let state = siege::SavedState {
-            towns: self.owners.clone(),
+            towns,
             players,
             scores: self.scores.clone(),
             clock_tick: self.tick,
@@ -1178,6 +1187,7 @@ impl Director {
         let mut war = TownWar::from_scene(scene, owner);
         if let Some(saved) = self.saved_wars.remove(&id) {
             apply_saved_town(&mut war, saved, self.tick);
+            self.owners.insert(id.clone(), war.owner.clone());
         }
         self.towns.insert(id, war);
     }
@@ -1386,6 +1396,7 @@ fn snapshot_town(war: &TownWar, world: Option<&World>) -> siege::SavedTown {
         ghosts,
     });
     siege::SavedTown {
+        owner: war.owner.as_str().to_owned(),
         occupy_hold: war.occupy_hold,
         retake_hold: war.retake_hold,
         hold_lockout: war.hold_lockout,
@@ -1473,6 +1484,9 @@ fn raid_side_parse(raw: &str) -> RaidSide {
 }
 
 fn apply_saved_town(war: &mut TownWar, saved: siege::SavedTown, now: u32) {
+    if !saved.owner.is_empty() {
+        war.owner = TownOwner::parse(&saved.owner);
+    }
     war.occupy_hold = saved.occupy_hold;
     war.retake_hold = saved.retake_hold;
     war.hold_lockout = saved.hold_lockout;
@@ -3296,18 +3310,24 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             && let Some(h) = ranged_hostile
             && let Some(target) = world.get_entity_by_id(h.entity_id)
         {
-            if player_near(world, pos.x, pos.z, PLAYER_ARROW_RANGE) {
+            let damage = if role == Some(VillagerRole::Archer) {
+                WALL_ARCHER_DAMAGE
+            } else {
+                LIVE_RANGED_DAMAGE
+            };
+            let _ = target.damage_with_context(
+                target.as_ref(),
+                damage,
+                DamageType::ARROW,
+                None,
+                Some(entity.as_ref()),
+                Some(entity.as_ref()),
+            );
+            if n_arrows < VISUAL_ARROWS_PER_VOLLEY
+                && player_near(world, pos.x, pos.z, PLAYER_ARROW_RANGE)
+            {
                 shoot_arrow(mob, &target);
                 n_arrows += 1;
-            } else {
-                let _ = target.damage_with_context(
-                    target.as_ref(),
-                    LIVE_RANGED_DAMAGE,
-                    DamageType::ARROW,
-                    None,
-                    Some(entity.as_ref()),
-                    Some(entity.as_ref()),
-                );
             }
             n_ranged += 1;
         }
@@ -9140,6 +9160,8 @@ mod tests {
         assert_eq!(slot.z, gate.z);
         assert_ne!(slot.x, gate.x);
         assert_eq!(LIVE_RANGED_RANGE, 28.0);
+        assert_eq!(WALL_ARCHER_DAMAGE, 5.0);
+        assert_eq!(VISUAL_ARROWS_PER_VOLLEY, 2);
     }
 
     #[test]

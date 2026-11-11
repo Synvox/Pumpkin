@@ -2157,6 +2157,10 @@ impl World {
     pub fn tick_chunks(self: &Arc<Self>, server: &Arc<Server>) {
         const BATCH_SIZE: usize = 32;
         const INHABITED_TIME_BATCH_SIZE: usize = 1024;
+        // Kingdoms raid tickets keep march-path chunks loaded. Random-tick
+        // only the player's neighbourhood so copper/crops next to a player
+        // still run; scheduled block/fluid ticks are unchanged.
+        const KINGDOMS_RANDOM_TICK_CHUNK_RANGE: i32 = 8;
         let random_tick_speed = self.level_info.load().game_rules.random_tick_speed;
 
         let active_chunks = self
@@ -2164,7 +2168,38 @@ impl World {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let tick_data = self.level.get_tick_data(&active_chunks, random_tick_speed);
+        let random_tick_chunks;
+        let tick_chunks = if crate::server::KINGDOMS_TICK_WORLDS_INLINE.load(Relaxed) {
+            let players = self.players.load();
+            if players.is_empty() {
+                active_chunks.as_ref()
+            } else {
+                let player_chunks: Vec<(i32, i32)> = players
+                    .iter()
+                    .map(|player| {
+                        let pos = player.get_entity().pos.load();
+                        (
+                            get_section_cord(pos.x.floor() as i32),
+                            get_section_cord(pos.z.floor() as i32),
+                        )
+                    })
+                    .collect();
+                random_tick_chunks = active_chunks
+                    .iter()
+                    .copied()
+                    .filter(|pos| {
+                        player_chunks.iter().any(|(px, pz)| {
+                            (pos.x - px).abs() <= KINGDOMS_RANDOM_TICK_CHUNK_RANGE
+                                && (pos.y - pz).abs() <= KINGDOMS_RANDOM_TICK_CHUNK_RANGE
+                        })
+                    })
+                    .collect::<FxHashSet<_>>();
+                &random_tick_chunks
+            }
+        } else {
+            active_chunks.as_ref()
+        };
+        let tick_data = self.level.get_tick_data(tick_chunks, random_tick_speed);
         let handle = server.runtime.clone();
 
         // 1. Parallel Block Ticks via Rayon

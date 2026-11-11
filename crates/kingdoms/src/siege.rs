@@ -341,6 +341,8 @@ pub struct SavedRaid {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct SavedTown {
     #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
     pub occupy_hold: u32,
     #[serde(default)]
     pub retake_hold: u32,
@@ -1434,6 +1436,7 @@ mod tests {
         wars.insert(
             "20261025:0:0".to_owned(),
             SavedTown {
+                owner: "alder".to_owned(),
                 occupy_hold: 40,
                 repair_until: 9000,
                 repair_placed: 12,
@@ -1477,6 +1480,7 @@ mod tests {
         .unwrap();
         let back = load_state(&path);
         let town = back.wars.get("20261025:0:0").expect("town");
+        assert_eq!(town.owner, "alder");
         assert_eq!(town.occupy_hold, 40);
         assert_eq!(town.repair_until, 9000);
         assert_eq!(town.repair_placed, 12);
