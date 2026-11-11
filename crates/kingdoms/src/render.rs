@@ -364,7 +364,11 @@ fn write_scene_renders(
             | SceneKind::MillHamlet
             | SceneKind::Beacon
             | SceneKind::Quarry
-            | SceneKind::SiegeCamp => 6,
+            | SceneKind::SiegeCamp
+            | SceneKind::HuntingLodge
+            | SceneKind::Shipyard
+            | SceneKind::Festival
+            | SceneKind::RidgeMill => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -558,12 +562,21 @@ fn write_scene_renders(
         SceneKind::Quarry,
         SceneKind::SiegeCamp,
         SceneKind::Riverside,
+        SceneKind::Manor,
+        SceneKind::HuntingLodge,
+        SceneKind::Shipyard,
+        SceneKind::Festival,
+        SceneKind::RidgeMill,
     ] {
         let Some(scene) = plan.scenes.iter().find(|scene| scene.kind == kind) else {
             continue;
         };
         let rect = if kind == SceneKind::Quarry {
             quarry_focus_rect(plan, scene.rect)
+        } else if kind == SceneKind::Shipyard {
+            shipyard_focus_rect(plan, scene.rect)
+        } else if kind == SceneKind::Festival {
+            festival_focus_rect(plan, scene.rect)
         } else {
             scene.rect.inflate(2)
         };
@@ -590,6 +603,13 @@ fn write_scene_renders(
                 "Siege camp · trebuchets outside, tent rows, palisade, ditch and bank"
             }
             SceneKind::Riverside => "Riverside village · stone bridge, ford and fishing weirs",
+            SceneKind::Manor => "Motte-and-bailey · raised keep, palisade bailey, hall and stables",
+            SceneKind::HuntingLodge => {
+                "Hunting lodge · deer park, kennels and stables in the forest"
+            }
+            SceneKind::Shipyard => "Shipyard · cog on the slipway, ropewalk and timber stacks",
+            SceneKind::Festival => "Festival square · maypole, market cross and pillory",
+            SceneKind::RidgeMill => "Ridge mill · oak-stock sails fixed to the hub",
             _ => kind.label(),
         };
         save(
@@ -727,6 +747,8 @@ pub fn overview_bounds(plan: &TownPlan) -> Rect {
                 CellKind::Quay,
                 CellKind::Crane,
                 CellKind::Dock,
+                CellKind::Slipway,
+                CellKind::Ropewalk,
             ] {
                 if let Some(blob) = largest_blob(plan, kind) {
                     bounds = union_rect(bounds, blob.inflate(10));
@@ -759,6 +781,8 @@ fn megacity_bounds(plan: &TownPlan) -> Rect {
         CellKind::WaterWheel,
         CellKind::Quay,
         CellKind::MillRace,
+        CellKind::Slipway,
+        CellKind::Ropewalk,
     ] {
         if let Some(blob) = largest_blob(plan, kind) {
             bounds = union_rect(bounds, blob.inflate(10));
@@ -1236,6 +1260,73 @@ fn quarry_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
         }
     }
     rect.unwrap_or(fallback).inflate(3)
+}
+
+fn shipyard_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
+    let mut rect: Option<Rect> = None;
+    let grow = |rect: &mut Option<Rect>, x: i32, z: i32| {
+        *rect = Some(rect.map_or_else(
+            || Rect::new(x, z, x, z),
+            |r| {
+                Rect::new(
+                    r.min_x.min(x),
+                    r.min_z.min(z),
+                    r.max_x.max(x),
+                    r.max_z.max(z),
+                )
+            },
+        ));
+    };
+    for z in fallback.min_z..=fallback.max_z {
+        for x in fallback.min_x..=fallback.max_x {
+            if matches!(
+                plan.occ.kind(x, z),
+                CellKind::Slipway | CellKind::Ropewalk | CellKind::CutStone
+            ) {
+                grow(&mut rect, x, z);
+            }
+            if plan.occ.kind(x, z) == CellKind::Ship
+                && Dir::ALL
+                    .iter()
+                    .any(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) == CellKind::Slipway)
+            {
+                grow(&mut rect, x, z);
+            }
+        }
+    }
+    rect.unwrap_or(fallback).inflate(4)
+}
+
+fn festival_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
+    let mut rect: Option<Rect> = None;
+    let grow = |rect: &mut Option<Rect>, x: i32, z: i32| {
+        *rect = Some(rect.map_or_else(
+            || Rect::new(x, z, x, z),
+            |r| {
+                Rect::new(
+                    r.min_x.min(x),
+                    r.min_z.min(z),
+                    r.max_x.max(x),
+                    r.max_z.max(z),
+                )
+            },
+        ));
+    };
+    for z in fallback.min_z..=fallback.max_z {
+        for x in fallback.min_x..=fallback.max_x {
+            if matches!(
+                plan.occ.kind(x, z),
+                CellKind::Maypole
+                    | CellKind::MarketCross
+                    | CellKind::Pillory
+                    | CellKind::Well
+                    | CellKind::Fountain
+            ) {
+                grow(&mut rect, x, z);
+            }
+        }
+    }
+    rect.unwrap_or(fallback).inflate(8)
 }
 
 fn render_room(

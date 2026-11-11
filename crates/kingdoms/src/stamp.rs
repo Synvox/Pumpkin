@@ -187,6 +187,11 @@ pub(crate) fn keeps_planned_timber(kind: CellKind) -> bool {
             | CellKind::Beacon
             | CellKind::Weir
             | CellKind::HerbGarden
+            | CellKind::Maypole
+            | CellKind::MarketCross
+            | CellKind::Pillory
+            | CellKind::Ropewalk
+            | CellKind::Slipway
     )
 }
 
@@ -433,6 +438,9 @@ pub fn stamp_column(
             Some(crate::scenes::SceneKind::BanditHideout) => {
                 place_bandit_lookout(sink, plan, x, floor, ground, z, &palette);
             }
+            _ if plan.has_scene(x, z, crate::scenes::SceneKind::Manor) => {
+                place_motte_bank(sink, plan, x, ground, z, &palette);
+            }
             _ => place_watch_post(sink, x, floor, ground, z, &palette),
         },
         CellKind::Well => place_well(sink, plan, x, ground, z, &palette),
@@ -578,7 +586,10 @@ pub fn stamp_column(
         }
         CellKind::FortressKeep => {
             let rect = blob_of(plan, x, z, CellKind::FortressKeep);
-            let keep_floor = ridge_floor(plan, rect);
+            let mut keep_floor = ridge_floor(plan, rect);
+            if plan.has_scene(x, z, crate::scenes::SceneKind::Manor) {
+                keep_floor += 5;
+            }
             place_gabled(sink, rect, x, keep_floor, ground, z, &palette, 10, true);
             let (roof_y, _) = gable_roof_y(rect, x, z, keep_floor + 10, 1);
             interior::furnish_hall(sink, rect, x, keep_floor, z, roof_y, &palette);
@@ -641,8 +652,13 @@ pub fn stamp_column(
         CellKind::Beacon => place_beacon(sink, plan, x, ground, z, &palette),
         CellKind::Ford => place_ford(sink, plan, x, ground, z, &palette),
         CellKind::Weir => place_weir(sink, plan, x, ground, z, &palette),
-        CellKind::CutStone => place_cut_stone(sink, x, ground, z, &palette),
+        CellKind::CutStone => place_cut_stone(sink, plan, x, ground, z, &palette),
         CellKind::HerbGarden => place_herb_garden(sink, x, ground, z, &palette),
+        CellKind::Maypole => place_maypole(sink, plan, x, ground, z, &palette),
+        CellKind::MarketCross => place_market_cross(sink, plan, x, ground, z, &palette),
+        CellKind::Pillory => place_pillory(sink, plan, x, ground, z, &palette),
+        CellKind::Ropewalk => place_ropewalk(sink, plan, x, ground, z, &palette),
+        CellKind::Slipway => place_slipway(sink, plan, x, ground, z, &palette),
     }
     apply_column_damage(sink, plan, x, z, kind, floor, ground, &palette);
     // Harbour cranes used to punch mill walls. Restamp the mill envelope on
@@ -726,6 +742,7 @@ fn occupy_raises(kind: CellKind) -> bool {
             | CellKind::Sluice
             | CellKind::Ford
             | CellKind::Weir
+            | CellKind::Slipway
     )
 }
 
@@ -1082,7 +1099,12 @@ fn place_pasture(
     } else if (x + z) % 13 == 0 {
         sink.put(x, ground + 1, z, Block::HAY_BLOCK.default_state);
     } else if (x.wrapping_mul(3) + z).rem_euclid(17) == 0 {
-        sink.put(x, ground + 1, z, Block::WHITE_WOOL.default_state);
+        if plan.has_scene(x, z, crate::scenes::SceneKind::HuntingLodge) {
+            sink.put(x, ground + 1, z, Block::BROWN_TERRACOTTA.default_state);
+            sink.put(x, ground + 2, z, Block::OAK_FENCE.default_state);
+        } else {
+            sink.put(x, ground + 1, z, Block::WHITE_WOOL.default_state);
+        }
     }
 }
 
@@ -1476,7 +1498,18 @@ fn place_weir(
     clear_above(sink, x, water_y + 3, water_y + 8, z);
 }
 
-fn place_cut_stone(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+fn place_cut_stone(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    if plan.has_scene(x, z, crate::scenes::SceneKind::Shipyard) {
+        place_timber_stack(sink, x, ground, z, palette);
+        return;
+    }
     let mix = (x.wrapping_mul(7) + z.wrapping_mul(11)).unsigned_abs();
     let h = 1 + (mix % 4) as i32;
     for y in ground..=ground + h {
@@ -1521,6 +1554,197 @@ fn place_herb_garden(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, pal
         _ => sink.put(x, ground + 1, z, Block::FERN.default_state),
     }
     clear_above(sink, x, ground + 2, ground + 6, z);
+}
+
+fn place_timber_stack(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+    let mix = (x.wrapping_mul(11) + z.wrapping_mul(5)).unsigned_abs();
+    let h = 2 + (mix % 3) as i32;
+    sink.put(x, ground, z, palette.path);
+    for y in 1..=h {
+        sink.put(
+            x,
+            ground + y,
+            z,
+            if mix % 2 == 0 {
+                palette.log
+            } else {
+                Block::STRIPPED_OAK_LOG.default_state
+            },
+        );
+    }
+    clear_above(sink, x, ground + h + 1, ground + h + 4, z);
+}
+
+fn place_maypole(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let rect = blob_of(plan, x, z, CellKind::Maypole);
+    let (cx, cz) = rect.center();
+    sink.put(x, ground, z, palette.grass);
+    clear_above(sink, x, ground + 1, ground + 10, z);
+    if x == cx && z == cz {
+        for y in ground + 1..=ground + 8 {
+            sink.put(x, y, z, palette.log);
+        }
+        sink.put(x, ground + 9, z, Block::YELLOW_WOOL.default_state);
+        return;
+    }
+    sink.put(x, ground + 1, z, palette.fence);
+    let ribbon = match (x + z).rem_euclid(4) {
+        0 => Block::RED_WOOL.default_state,
+        1 => Block::WHITE_WOOL.default_state,
+        2 => Block::YELLOW_WOOL.default_state,
+        _ => Block::BLUE_WOOL.default_state,
+    };
+    sink.put(x, ground + 2, z, ribbon);
+    if rect.on_edge(x, z) {
+        sink.put(x, ground + 3, z, Block::OAK_FENCE.default_state);
+    }
+}
+
+fn place_market_cross(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let rect = blob_of(plan, x, z, CellKind::MarketCross);
+    let (cx, cz) = rect.center();
+    sink.put(x, ground, z, palette.bricks);
+    clear_above(sink, x, ground + 1, ground + 8, z);
+    sink.put(x, ground + 1, z, palette.slab);
+    if x == cx && z == cz {
+        for y in ground + 2..=ground + 5 {
+            sink.put(x, y, z, palette.bricks);
+        }
+        sink.put(x, ground + 6, z, palette.brick_wall);
+        sink.put(x, ground + 7, z, Block::LANTERN.default_state);
+        return;
+    }
+    if x == cx || z == cz {
+        sink.put(x, ground + 2, z, palette.bricks);
+        sink.put(
+            x,
+            ground + 3,
+            z,
+            stair_state(palette.brick_stairs, interior::outward(rect, x, z)),
+        );
+    }
+}
+
+fn place_pillory(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let rect = blob_of(plan, x, z, CellKind::Pillory);
+    sink.put(x, ground, z, palette.cobble);
+    clear_above(sink, x, ground + 1, ground + 5, z);
+    if rect.is_corner(x, z) {
+        sink.put(x, ground + 1, z, palette.log);
+        sink.put(x, ground + 2, z, palette.log);
+        return;
+    }
+    sink.put(x, ground + 1, z, palette.slab);
+    sink.put(x, ground + 2, z, palette.fence);
+    if rect.on_edge(x, z) {
+        sink.put(x, ground + 3, z, palette.log);
+    }
+}
+
+fn place_ropewalk(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let rect = blob_of(plan, x, z, CellKind::Ropewalk);
+    let y = ground.max(plan.heights.sea_level);
+    sink.put(x, y, z, palette.planks);
+    clear_above(sink, x, y + 1, y + 6, z);
+    if rect.on_edge(x, z) {
+        sink.put(x, y + 1, z, palette.fence);
+        sink.put(x, y + 2, z, palette.fence);
+        sink.put(x, y + 3, z, palette.slab);
+        if (x + z) % 4 == 0 {
+            sink.put(x, y + 4, z, Block::LANTERN.default_state);
+        }
+    } else if (x + z) % 3 == 0 {
+        sink.put(x, y + 1, z, Block::WHITE_WOOL.default_state);
+    } else if (x + z) % 5 == 0 {
+        sink.put(x, y + 1, z, Block::OAK_FENCE.default_state);
+    }
+}
+
+fn place_slipway(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let sea = plan.heights.sea_level;
+    let y = ground.max(sea);
+    sink.put(x, y, z, palette.planks);
+    if ground < sea {
+        for yy in ground + 1..=sea {
+            sink.put(x, yy, z, palette.log);
+        }
+        sink.put(x, sea, z, palette.planks);
+    }
+    if (x + z) % 3 == 0 {
+        sink.put(x, y + 1, z, palette.log);
+    }
+    clear_above(sink, x, y + 2, y + 5, z);
+}
+
+fn place_motte_bank(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let rect = blob_of(plan, x, z, CellKind::WatchPost);
+    let (cx, cz) = rect.center();
+    let dist = (x - cx).abs().max((z - cz).abs());
+    let rise = (8 - dist / 2).clamp(4, 8);
+    foundation(sink, x, ground + rise, ground, z, palette);
+    for y in ground..=ground + rise {
+        sink.put(
+            x,
+            y,
+            z,
+            if y == ground + rise {
+                palette.grass
+            } else if (x + z + y) % 3 == 0 {
+                palette.cobble
+            } else {
+                Block::DIRT.default_state
+            },
+        );
+    }
+    clear_above(sink, x, ground + rise + 1, ground + rise + 4, z);
+    if rect.on_edge(x, z) {
+        sink.put(x, ground + rise + 1, z, palette.cobble);
+        if (x + z) % 2 == 0 {
+            sink.put(x, ground + rise + 2, z, palette.cobble_wall);
+        }
+    }
 }
 
 fn place_wagon(
@@ -1663,6 +1887,10 @@ fn place_cage(
 ) {
     sink.put(x, ground, z, palette.cobble);
     let rect = blob_of(plan, x, z, CellKind::Cage);
+    if plan.has_scene(x, z, crate::scenes::SceneKind::HuntingLodge) {
+        place_kennel(sink, rect, x, ground, z, palette);
+        return;
+    }
     if rect.is_corner(x, z) {
         for y in ground + 1..=ground + 3 {
             sink.put(x, y, z, Block::DARK_OAK_LOG.default_state);
@@ -1676,6 +1904,27 @@ fn place_cage(
         sink.put(x, ground + 1, z, Block::IRON_CHAIN.default_state);
     }
     sink.put(x, ground + 4, z, Block::IRON_BARS.default_state);
+}
+
+fn place_kennel(
+    sink: &mut impl BlockSink,
+    rect: Rect,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    sink.put(x, ground, z, palette.path);
+    clear_above(sink, x, ground + 1, ground + 4, z);
+    if rect.on_edge(x, z) {
+        sink.put(x, ground + 1, z, palette.fence);
+        sink.put(x, ground + 2, z, palette.slab);
+        return;
+    }
+    sink.put(x, ground + 1, z, Block::HAY_BLOCK.default_state);
+    if (x + z) % 2 == 0 {
+        sink.put(x, ground + 2, z, palette.slab);
+    }
 }
 
 fn place_palisade_gate(
@@ -5536,6 +5785,11 @@ fn near_extractive(plan: &TownPlan, x: i32, z: i32) -> bool {
                     | CellKind::Weir
                     | CellKind::CutStone
                     | CellKind::HerbGarden
+                    | CellKind::Maypole
+                    | CellKind::MarketCross
+                    | CellKind::Pillory
+                    | CellKind::Ropewalk
+                    | CellKind::Slipway
             ) {
                 return true;
             }
@@ -5861,6 +6115,15 @@ fn dredge_hull(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, sea: i32)
     }
 }
 
+fn ship_on_slipway(plan: &TownPlan, x: i32, z: i32) -> bool {
+    if plan.has_scene(x, z, crate::scenes::SceneKind::Shipyard) {
+        return true;
+    }
+    Dir::ALL
+        .iter()
+        .any(|dir| matches!(plan.occ.kind(x + dir.dx(), z + dir.dz()), CellKind::Slipway))
+}
+
 fn hull_half_beam(along: i32, length: i32, mid: i32) -> i32 {
     let span = (length - 1).max(1);
     let bow_taper = 5.min(span / 2).max(2);
@@ -5895,7 +6158,10 @@ fn place_ship(
 ) {
     let rect = blob_of(plan, x, z, CellKind::Ship);
     let sea = plan.heights.sea_level;
-    dredge_hull(sink, x, ground, z, sea);
+    let slip = ship_on_slipway(plan, x, z);
+    if !slip {
+        dredge_hull(sink, x, ground, z, sea);
+    }
     let y = sea.max(ground);
     let along_x = rect.width() >= rect.depth();
     let length = if along_x { rect.width() } else { rect.depth() };
@@ -5914,7 +6180,11 @@ fn place_ship(
     let from_keel = (across - mid).abs();
     let half = hull_half_beam(along, length, mid);
     if from_keel > half {
-        sink.put(x, y, z, Block::WATER.default_state);
+        if slip {
+            place_slipway(sink, plan, x, ground, z, palette);
+        } else {
+            sink.put(x, y, z, Block::WATER.default_state);
+        }
         return;
     }
     let bow = along <= 4;

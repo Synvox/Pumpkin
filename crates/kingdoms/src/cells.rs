@@ -168,6 +168,16 @@ pub enum CellKind {
     CutStone,
     /// Herb beds in a priory garth.
     HerbGarden,
+    /// Maypole on a festival square.
+    Maypole,
+    /// Stone market cross.
+    MarketCross,
+    /// Stocks / pillory on the square.
+    Pillory,
+    /// Covered rope-walk shed.
+    Ropewalk,
+    /// Timber slipway for a hull under construction.
+    Slipway,
 }
 
 impl CellKind {

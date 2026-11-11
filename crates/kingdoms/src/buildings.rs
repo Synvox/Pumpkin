@@ -33,6 +33,8 @@ pub enum BuildingKind {
     ChapterHouse,
     /// Priory scriptorium with desks and lecterns.
     Scriptorium,
+    /// Timber hunting lodge with a hall and bedchambers.
+    HuntingLodge,
 }
 
 impl BuildingKind {
@@ -61,6 +63,7 @@ impl BuildingKind {
             Self::StaveChurch => (15, 11),
             Self::ChapterHouse => (9, 7),
             Self::Scriptorium => (9, 7),
+            Self::HuntingLodge => (12, 9),
         }
     }
 
@@ -77,7 +80,8 @@ impl BuildingKind {
             | Self::StaveChurch
             | Self::Monastery
             | Self::ChapterHouse
-            | Self::Scriptorium => 1,
+            | Self::Scriptorium
+            | Self::HuntingLodge => 1,
             Self::Longhouse | Self::Blacksmith | Self::Cathedral => 1,
             Self::Tavern | Self::Church => 2,
             Self::Timber
@@ -112,6 +116,7 @@ impl BuildingKind {
             Self::StaveChurch => 8,
             Self::ChapterHouse => 7,
             Self::Scriptorium => 5,
+            Self::HuntingLodge => 7,
         }
     }
 
@@ -127,6 +132,7 @@ impl BuildingKind {
                 | Self::Longhouse
                 | Self::Watermill
                 | Self::Scriptorium
+                | Self::HuntingLodge
         )
     }
 }

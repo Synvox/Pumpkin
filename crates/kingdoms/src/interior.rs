@@ -419,6 +419,9 @@ pub fn furnish_house(
             furnish_chapter_house(sink, rect, x, floor, z, roof_y, palette);
         }
         BuildingKind::Scriptorium => furnish_scriptorium(sink, rect, x, floor, z, roof_y, palette),
+        BuildingKind::HuntingLodge => {
+            furnish_hunting_lodge(sink, rect, x, floor, z, roof_y, palette);
+        }
         _ => furnish_dwelling(sink, rect, x, floor, z, roof_y, stories, palette),
     }
 }
@@ -462,6 +465,51 @@ fn furnish_dwelling(
         }
     }
     if roof_y >= floor + 5 && light_here(x, z, 6) {
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
+    }
+}
+
+fn furnish_hunting_lodge(
+    sink: &mut impl BlockSink,
+    rect: Rect,
+    x: i32,
+    floor: i32,
+    z: i32,
+    roof_y: i32,
+    palette: &Palette,
+) {
+    let (cx, _cz) = rect.center();
+    let lx = x - rect.min_x;
+    let lz = z - rect.min_z;
+    if x == cx {
+        sink.put(x, floor + 1, z, Block::RED_CARPET.default_state);
+    }
+    if lz <= 2 && (x - cx).abs() <= 2 {
+        if x == cx && lz == 1 {
+            sink.put(x, floor + 1, z, stair_state(palette.stairs, Dir::South));
+            sink.put(x, floor + 2, z, Block::GREEN_BANNER.default_state);
+        } else {
+            sink.put(x, floor + 1, z, palette.slab);
+        }
+    } else if (x - cx).abs() == 2 && lz % 3 != 0 {
+        sink.put(x, floor + 1, z, Block::OAK_PLANKS.default_state);
+    } else if (x - cx).abs() == 3 && lz % 3 != 0 {
+        let dir = if x < cx { Dir::East } else { Dir::West };
+        sink.put(x, floor + 1, z, stair_state(palette.stairs, dir));
+    } else if lz == rect.depth() - 3 && x == cx {
+        sink.put(x, floor, z, palette.cobble);
+        sink.put(x, floor + 1, z, Block::CAMPFIRE.default_state);
+        for y in floor + 2..roof_y.min(floor + 6) {
+            sink.put(x, y, z, palette.cobble);
+        }
+    } else if lz >= rect.depth() - 3 && (x - cx).abs() >= 3 {
+        sink.put(x, floor + 1, z, Block::BROWN_BED.default_state);
+    } else if lx == 1 && lz == 4 {
+        sink.put(x, floor + 1, z, Block::CHEST.default_state);
+    } else if lx == rect.width() - 2 && lz == 4 {
+        sink.put(x, floor + 1, z, Block::BARREL.default_state);
+    }
+    if light_here(x, z, 5) && roof_y >= floor + 6 {
         hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
 }
