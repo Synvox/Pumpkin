@@ -160,6 +160,14 @@ pub enum CellKind {
     Wagon,
     /// Hilltop beacon brazier or roadside watch-fire.
     Beacon,
+    /// Shallow cobble ford across a stream.
+    Ford,
+    /// Fishing weir of posts and wattle in river water.
+    Weir,
+    /// Cut ashlar stacks in a quarry yard.
+    CutStone,
+    /// Herb beds in a priory garth.
+    HerbGarden,
 }
 
 impl CellKind {

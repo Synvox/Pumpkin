@@ -224,6 +224,8 @@ fn planned_timber(kind: CellKind) -> bool {
             | CellKind::LootPile
             | CellKind::Wagon
             | CellKind::Beacon
+            | CellKind::Weir
+            | CellKind::HerbGarden
     )
 }
 
@@ -327,6 +329,10 @@ fn flags_as_floating_kind(kind: CellKind) -> bool {
             | CellKind::Fountain
             | CellKind::Wagon
             | CellKind::Beacon
+            | CellKind::Ford
+            | CellKind::Weir
+            | CellKind::CutStone
+            | CellKind::HerbGarden
     )
 }
 

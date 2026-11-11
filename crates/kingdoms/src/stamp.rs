@@ -90,6 +90,8 @@ fn strip_feature_vegetation(
             | CellKind::WaterWheel
             | CellKind::Shrine
             | CellKind::FieldWall
+            | CellKind::Ford
+            | CellKind::Weir
     );
     let flowing = !plan.heights.is_dry(x, z);
     if !plan.strips_trees(x, z) && !wet_use && !flowing {
@@ -183,6 +185,8 @@ pub(crate) fn keeps_planned_timber(kind: CellKind) -> bool {
             | CellKind::LootPile
             | CellKind::Wagon
             | CellKind::Beacon
+            | CellKind::Weir
+            | CellKind::HerbGarden
     )
 }
 
@@ -330,6 +334,8 @@ pub fn stamp_column(
             | CellKind::MillRace
             | CellKind::Sluice
             | CellKind::WaterWheel
+            | CellKind::Ford
+            | CellKind::Weir
     ) {
         let planned = plan.heights.height(x, z);
         let sea = plan.heights.sea_level;
@@ -354,6 +360,8 @@ pub fn stamp_column(
                     | CellKind::Bridge
                     | CellKind::MillRace
                     | CellKind::Sluice
+                    | CellKind::Ford
+                    | CellKind::Weir
             )
         {
             clear_above(sink, x, sea.saturating_sub(4), sea.max(ground) + 24, z);
@@ -631,6 +639,10 @@ pub fn stamp_column(
         CellKind::LootPile => place_loot_pile(sink, x, ground, z, &palette),
         CellKind::Wagon => place_wagon(sink, plan, x, ground, z, &palette),
         CellKind::Beacon => place_beacon(sink, plan, x, ground, z, &palette),
+        CellKind::Ford => place_ford(sink, plan, x, ground, z, &palette),
+        CellKind::Weir => place_weir(sink, plan, x, ground, z, &palette),
+        CellKind::CutStone => place_cut_stone(sink, x, ground, z, &palette),
+        CellKind::HerbGarden => place_herb_garden(sink, x, ground, z, &palette),
     }
     apply_column_damage(sink, plan, x, z, kind, floor, ground, &palette);
     // Harbour cranes used to punch mill walls. Restamp the mill envelope on
@@ -712,6 +724,8 @@ fn occupy_raises(kind: CellKind) -> bool {
             | CellKind::WaterWheel
             | CellKind::MillRace
             | CellKind::Sluice
+            | CellKind::Ford
+            | CellKind::Weir
     )
 }
 
@@ -1289,6 +1303,111 @@ fn place_beacon(
             sink.put(x, y, z, Block::LADDER.default_state);
         }
     }
+}
+
+fn place_ford(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    _ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let sea = plan.heights.sea_level;
+    let water_y = plan.heights.height(x, z).min(sea);
+    let depth = plan.heights.water_depth(x, z).max(1);
+    let bed = (water_y - depth).max(sink.floor_min() + 2);
+    for y in bed..=water_y {
+        sink.put(
+            x,
+            y,
+            z,
+            if y == water_y {
+                palette.path
+            } else if (x + z + y) % 3 == 0 {
+                palette.mossy
+            } else {
+                palette.cobble
+            },
+        );
+    }
+    if (x + z) % 4 == 0 {
+        sink.put(x, water_y + 1, z, palette.cobble_wall);
+    }
+    clear_above(sink, x, water_y + 2, water_y + 8, z);
+}
+
+fn place_weir(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    _ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let sea = plan.heights.sea_level;
+    let water_y = plan.heights.height(x, z).min(sea);
+    let depth = plan.heights.water_depth(x, z).max(1);
+    let bed = (water_y - depth).max(sink.floor_min() + 2);
+    sink.put(x, bed, z, palette.cobble);
+    let post_lo = (water_y - 2).max(bed + 1);
+    for y in post_lo..=water_y + 1 {
+        sink.put(x, y, z, palette.fence);
+    }
+    if (x + z) % 2 == 0 {
+        sink.put(x, water_y + 1, z, Block::OAK_TRAPDOOR.default_state);
+    }
+    if (x + z) % 5 == 0 {
+        sink.put(x, water_y + 2, z, Block::LANTERN.default_state);
+    }
+    clear_above(sink, x, water_y + 3, water_y + 8, z);
+}
+
+fn place_cut_stone(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+    let mix = (x.wrapping_mul(7) + z.wrapping_mul(11)).unsigned_abs();
+    let h = 1 + (mix % 4) as i32;
+    for y in ground..=ground + h {
+        sink.put(
+            x,
+            y,
+            z,
+            match mix % 4 {
+                0 => palette.bricks,
+                1 => palette.mossy_bricks,
+                2 => palette.cracked_bricks,
+                _ => palette.cobble,
+            },
+        );
+    }
+    if mix % 3 == 0 {
+        sink.put(
+            x,
+            ground + h + 1,
+            z,
+            stair_state(palette.brick_stairs, Dir::South),
+        );
+        clear_above(sink, x, ground + h + 2, ground + h + 4, z);
+    } else {
+        clear_above(sink, x, ground + h + 1, ground + h + 4, z);
+    }
+}
+
+fn place_herb_garden(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+    let mix = (x + z * 3).rem_euclid(6);
+    if mix == 0 {
+        sink.put(x, ground, z, palette.path);
+        clear_above(sink, x, ground + 1, ground + 4, z);
+        return;
+    }
+    sink.put(x, ground, z, Block::FARMLAND.default_state);
+    match mix {
+        1 => sink.put(x, ground + 1, z, Block::OAK_TRAPDOOR.default_state),
+        2 => sink.put(x, ground + 1, z, Block::SWEET_BERRY_BUSH.default_state),
+        3 => sink.put(x, ground + 1, z, Block::POPPY.default_state),
+        4 => sink.put(x, ground + 1, z, Block::DANDELION.default_state),
+        _ => sink.put(x, ground + 1, z, Block::FERN.default_state),
+    }
+    clear_above(sink, x, ground + 2, ground + 6, z);
 }
 
 fn place_wagon(
@@ -3903,6 +4022,7 @@ fn place_house(
                 || lot.kind == BuildingKind::Winepress
                 || lot.kind == BuildingKind::Monastery
                 || lot.kind == BuildingKind::Cathedral
+                || lot.kind == BuildingKind::ChapterHouse
             {
                 palette.cobble
             } else {
@@ -5222,6 +5342,10 @@ fn near_extractive(plan: &TownPlan, x: i32, z: i32) -> bool {
                     | CellKind::Vine
                     | CellKind::Lighthouse
                     | CellKind::Beacon
+                    | CellKind::Ford
+                    | CellKind::Weir
+                    | CellKind::CutStone
+                    | CellKind::HerbGarden
             ) {
                 return true;
             }

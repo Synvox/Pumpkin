@@ -37,7 +37,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 23;
+pub const PLAN_CACHE_VERSION: u32 = 24;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -2064,6 +2064,8 @@ fn paint_poi_roads(
         SceneKind::WalledMarket,
         SceneKind::MillHamlet,
         SceneKind::Beacon,
+        SceneKind::Quarry,
+        SceneKind::Monastery,
     ];
     for scene in scenes.iter().filter(|scene| kinds.contains(&scene.kind)) {
         let Some(start) = poi_road_anchor(occ, grid, scene) else {
@@ -2134,6 +2136,7 @@ fn poi_road_anchor(occ: &Occupancy, grid: &HeightGrid, scene: &Scene) -> Option<
                         | CellKind::CampCourt
                         | CellKind::Eave
                         | CellKind::Beacon
+                        | CellKind::CutStone
                 )
             {
                 return Some((x, z));
@@ -3840,7 +3843,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 23);
+        assert_eq!(PLAN_CACHE_VERSION, 24);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -3878,8 +3881,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 23;
-    const PLAN_LAYOUT_HASH: u64 = 0x4da4_60b5_3e14_f593;
+    const PLAN_LAYOUT_VERSION: u32 = 24;
+    const PLAN_LAYOUT_HASH: u64 = 0x0f92_a991_4bfb_ff39;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

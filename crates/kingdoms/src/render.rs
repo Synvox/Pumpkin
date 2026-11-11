@@ -362,7 +362,9 @@ fn write_scene_renders(
             | SceneKind::RoadsideInn
             | SceneKind::WalledMarket
             | SceneKind::MillHamlet
-            | SceneKind::Beacon => 6,
+            | SceneKind::Beacon
+            | SceneKind::Quarry
+            | SceneKind::SiegeCamp => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -549,6 +551,11 @@ fn write_scene_renders(
         SceneKind::MillHamlet,
         SceneKind::Beacon,
         SceneKind::Tourney,
+        SceneKind::Monastery,
+        SceneKind::Vineyard,
+        SceneKind::Quarry,
+        SceneKind::SiegeCamp,
+        SceneKind::Riverside,
     ] {
         let Some(scene) = plan.scenes.iter().find(|scene| scene.kind == kind) else {
             continue;
@@ -568,6 +575,13 @@ fn write_scene_renders(
             SceneKind::MillHamlet => "Mill hamlet · wheel, race, granary",
             SceneKind::Beacon => "Hilltop beacon · brazier and watch-fire",
             SceneKind::Tourney => "Jousting lists · sand lane, stands, pavilions beside the castle",
+            SceneKind::Monastery => {
+                "Priory · cloister garth, chapter house, scriptorium, herb garden"
+            }
+            SceneKind::Vineyard => "Vineyard · terraced hillside rows and press house",
+            SceneKind::Quarry => "Quarry · cranes, cut stone, mason's lodge",
+            SceneKind::SiegeCamp => "Siege camp · trebuchets, tents, palisaded earthworks",
+            SceneKind::Riverside => "Riverside village · stone bridge, ford and fishing weirs",
             _ => kind.label(),
         };
         save(
