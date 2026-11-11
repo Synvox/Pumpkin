@@ -37,7 +37,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 21;
+pub const PLAN_CACHE_VERSION: u32 = 22;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -856,6 +856,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
     }
     thicken_water_bridges(&mut occ, &grid);
     paint_scene_yards(&mut occ, &grid, &scenes);
+    paint_poi_roads(&mut occ, &grid, &gates, &scenes, &mut roads);
     crate::scenes::paint_tree_keepout(&mut occ, &grid, &lots, market, town_rect);
     // Courtyard scenes and tree keepout run after `paint_castle`, so re-site
     // the plinth on leftover inner-bailey court, never on a keep spire.
@@ -2047,6 +2048,169 @@ fn paint_outbound_roads(
     }
 }
 
+fn paint_poi_roads(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    gates: &[GateInfo],
+    scenes: &[Scene],
+    roads: &mut Vec<RoadInfo>,
+) {
+    let mut overlay = HashMap::new();
+    let kinds = [
+        SceneKind::RoadsideInn,
+        SceneKind::TollBridge,
+        SceneKind::RuinedAbbey,
+        SceneKind::CastleRuin,
+    ];
+    for scene in scenes.iter().filter(|scene| kinds.contains(&scene.kind)) {
+        let Some(start) = poi_road_anchor(occ, grid, scene) else {
+            continue;
+        };
+        let Some(goal) = nearest_town_gate(gates, start) else {
+            continue;
+        };
+        if (start.0 - goal.0).abs() + (start.1 - goal.1).abs() < 16 {
+            continue;
+        }
+        let search = clip_to_grid(
+            grid,
+            Rect::new(start.0, start.1, goal.0, goal.1).inflate(96),
+        );
+        let path = astar(grid, search, start, goal)
+            .unwrap_or_else(|| bresenham(start.0, start.1, goal.0, goal.1));
+        let path: Vec<_> = path
+            .into_iter()
+            .filter(|&(x, z)| {
+                occ.bounds.contains(x, z)
+                    && !occ.kind(x, z).is_castle()
+                    && !matches!(
+                        occ.kind(x, z),
+                        CellKind::Building
+                            | CellKind::Palisade
+                            | CellKind::PalisadeGate
+                            | CellKind::Ruin
+                            | CellKind::Ship
+                            | CellKind::Harbor
+                            | CellKind::Dock
+                            | CellKind::Quay
+                            | CellKind::Breakwater
+                            | CellKind::Boat
+                            | CellKind::Crane
+                            | CellKind::Lighthouse
+                    )
+            })
+            .collect();
+        if path.len() < 8 {
+            continue;
+        }
+        if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
+            paint_country_path(occ, &mut overlay, grid, &path);
+            place_roadside_markers(occ, grid, &path);
+            roads.push(RoadInfo {
+                from: [first.0, first.1],
+                to: [last.0, last.1],
+                points: path.iter().map(|&(x, z)| [x, z]).collect(),
+            });
+        }
+    }
+}
+
+fn poi_road_anchor(occ: &Occupancy, grid: &HeightGrid, scene: &Scene) -> Option<(i32, i32)> {
+    let (cx, cz) = scene.rect.center();
+    if grid.is_dry(cx, cz) && !occ.kind(cx, cz).is_castle() {
+        return Some((cx, cz));
+    }
+    for z in scene.rect.min_z..=scene.rect.max_z {
+        for x in scene.rect.min_x..=scene.rect.max_x {
+            if grid.is_dry(x, z)
+                && matches!(
+                    occ.kind(x, z),
+                    CellKind::Green
+                        | CellKind::Plaza
+                        | CellKind::Road
+                        | CellKind::CampCourt
+                        | CellKind::Eave
+                )
+            {
+                return Some((x, z));
+            }
+        }
+    }
+    None
+}
+
+fn nearest_town_gate(gates: &[GateInfo], start: (i32, i32)) -> Option<(i32, i32)> {
+    gates
+        .iter()
+        .filter(|gate| gate.kind == GateKind::Town)
+        .map(|gate| (gate.x, gate.z))
+        .min_by_key(|&(x, z)| (x - start.0).abs() + (z - start.1).abs())
+}
+
+fn paint_country_path(
+    occ: &mut Occupancy,
+    overlay: &mut HashMap<(i32, i32), CellKind>,
+    grid: &HeightGrid,
+    path: &[(i32, i32)],
+) {
+    for window in path.windows(2) {
+        let (x, z) = window[0];
+        let (nx, nz) = window[1];
+        let dh = grid.height(nx, nz) - grid.height(x, z);
+        let stair = if dh.abs() >= 2 {
+            if nx > x {
+                CellKind::RoadStairE
+            } else if nx < x {
+                CellKind::RoadStairW
+            } else if nz > z {
+                CellKind::RoadStairS
+            } else {
+                CellKind::RoadStairN
+            }
+        } else {
+            CellKind::Road
+        };
+        stamp_country_road_cell(occ, overlay, grid, x, z, stair);
+        for dir in Dir::ALL {
+            stamp_country_road_cell(
+                occ,
+                overlay,
+                grid,
+                x + dir.dx(),
+                z + dir.dz(),
+                CellKind::Road,
+            );
+        }
+    }
+    if let Some(&(x, z)) = path.last() {
+        stamp_country_road_cell(occ, overlay, grid, x, z, CellKind::Road);
+    }
+}
+
+fn place_roadside_markers(occ: &mut Occupancy, grid: &HeightGrid, path: &[(i32, i32)]) {
+    for (i, &(x, z)) in path.iter().enumerate() {
+        if i % 42 != 21 {
+            continue;
+        }
+        for dir in Dir::ALL {
+            let nx = x + dir.dx() * 2;
+            let nz = z + dir.dz() * 2;
+            if !grid.is_dry(nx, nz) {
+                continue;
+            }
+            let kind = occ.kind(nx, nz);
+            if matches!(kind, CellKind::Empty | CellKind::Green | CellKind::Farm) {
+                if i % 84 == 21 {
+                    occ.set(nx, nz, CellKind::Shrine, true);
+                } else {
+                    occ.set(nx, nz, CellKind::FieldWall, true);
+                }
+                break;
+            }
+        }
+    }
+}
+
 fn paint_path(
     occ: &mut Occupancy,
     overlay: &mut HashMap<(i32, i32), CellKind>,
@@ -2178,6 +2342,49 @@ fn paint_winding_lanes(
                 points: path.iter().map(|&(x, z)| [x, z]).collect(),
             });
         }
+    }
+}
+
+fn stamp_country_road_cell(
+    occ: &mut Occupancy,
+    overlay: &mut HashMap<(i32, i32), CellKind>,
+    grid: &HeightGrid,
+    x: i32,
+    z: i32,
+    kind: CellKind,
+) {
+    let kind = if !grid.is_dry(x, z)
+        && matches!(
+            kind,
+            CellKind::Road
+                | CellKind::RoadStairN
+                | CellKind::RoadStairS
+                | CellKind::RoadStairE
+                | CellKind::RoadStairW
+        ) {
+        CellKind::Bridge
+    } else {
+        kind
+    };
+    if occ.bounds.contains(x, z) {
+        let cell = occ.kind(x, z);
+        if !cell.is_castle() && cell != CellKind::Well {
+            occ.set(
+                x,
+                z,
+                kind,
+                matches!(
+                    cell,
+                    CellKind::Empty
+                        | CellKind::Farm
+                        | CellKind::FarmEdge
+                        | CellKind::Plaza
+                        | CellKind::Green
+                ),
+            );
+        }
+    } else {
+        overlay.entry((x, z)).or_insert(kind);
     }
 }
 
@@ -2679,8 +2886,11 @@ fn paint_eaves(occ: &mut Occupancy, rect: Rect) {
             if rect.contains(x, z) {
                 continue;
             }
-            if occ.kind(x, z) == CellKind::Empty {
-                occ.set(x, z, CellKind::Eave, false);
+            if matches!(
+                occ.kind(x, z),
+                CellKind::Empty | CellKind::Plaza | CellKind::Green
+            ) {
+                occ.set(x, z, CellKind::Eave, true);
             }
         }
     }
@@ -3594,7 +3804,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 21);
+        assert_eq!(PLAN_CACHE_VERSION, 22);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -3632,8 +3842,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 21;
-    const PLAN_LAYOUT_HASH: u64 = 0x7538_57ea_2698_d90f;
+    const PLAN_LAYOUT_VERSION: u32 = 22;
+    const PLAN_LAYOUT_HASH: u64 = 0x4c03_4713_2b60_0bbc;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

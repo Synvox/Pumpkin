@@ -156,6 +156,8 @@ pub enum CellKind {
     Gallows,
     /// Bandit loot pile of chests and barrels.
     LootPile,
+    /// Parked cart or wagon in a coaching yard.
+    Wagon,
 }
 
 impl CellKind {

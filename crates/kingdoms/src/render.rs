@@ -545,12 +545,12 @@ fn write_scene_renders(
         let title = match kind {
             SceneKind::RuinedAbbey => "Ruined abbey · Tintern nave, tracery, arcade, graves",
             SceneKind::CastleRuin => "Castle ruin · broken curtain and keep on a hill",
-            SceneKind::BanditHideout => "Bandit hideout · ravine camp, lookout, cages",
+            SceneKind::BanditHideout => "Bandit hideout · spread camp, tents, fire, lookout",
             SceneKind::HermitTower => "Hermit's tower · balcony, chimney, garden",
             SceneKind::StoneCircle => "Stone circle · menhirs and fallen lintel",
             SceneKind::TollBridge => "Toll bridge · gatehouse over the river",
             SceneKind::CharcoalCamp => "Charcoal camp · hut, mounds and hearths",
-            SceneKind::RoadsideInn => "Roadside inn · stable, coaching yard, sign",
+            SceneKind::RoadsideInn => "Roadside inn · cobbled yard, wagon, well, jettied tavern",
             _ => kind.label(),
         };
         save(
@@ -879,6 +879,35 @@ fn write_cutaways(
         save(
             &out_dir.join(format!("{stem}-house.png")),
             &render_exterior(volume, lot.rect, 2, ext_title),
+        )?;
+    }
+
+    let inn_lot = plan.lots.iter().find(|lot| {
+        lot.kind == BuildingKind::Tavern
+            && plan.scenes.iter().any(|scene| {
+                scene.kind == SceneKind::RoadsideInn && scene.rect.intersects(lot.rect)
+            })
+    });
+    if let Some(lot) = inn_lot {
+        let floor = lot_floor(plan, lot);
+        save(
+            &out_dir.join(format!("{stem}-inn-cutaway.png")),
+            &render_room(
+                volume,
+                lot.rect,
+                floor,
+                floor + 8,
+                "Inn · bar, kegs, hearth, rooms",
+            ),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-inn.png")),
+            &render_exterior(
+                volume,
+                lot.rect.inflate(4),
+                2,
+                "Inn · jetty, dormers, coaching yard",
+            ),
         )?;
     }
 
