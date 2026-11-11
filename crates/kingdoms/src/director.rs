@@ -2578,7 +2578,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             let Some(war) = dir.towns.get_mut(town_id) else {
                 return;
             };
-            if hostiles_in_town {
+            if hostiles_in_town || war.raid.is_some() {
                 war.alarm = true;
                 if let Some(t) = threatened {
                     war.threatened = Some(t);
