@@ -1033,26 +1033,10 @@ fn place_mill_hamlet(
         return;
     }
     let _ = place_granary_in_yard(occ, grid, yard, lots, seed);
-    let house = Rect::new(
-        yard.max_x - 10,
-        yard.min_z + 2,
-        yard.max_x - 3,
-        yard.min_z + 8,
-    );
-    if yard.contains(house.min_x, house.min_z) && yard.contains(house.max_x, house.max_z) {
-        let _ = force_lot(
-            occ,
-            grid,
-            lots,
-            seed,
-            BuildingKind::Cottage,
-            house,
-            Dir::South,
-        );
-    }
+    let _ = place_mill_cottages(occ, grid, yard, lots, seed, 2);
     scenes.push(Scene {
         kind: SceneKind::MillHamlet,
-        rect: yard.inflate(SCENE_YARD_MARGIN),
+        rect: mill_hamlet_scene_rect(occ, lots, yard),
     });
 }
 
@@ -1122,7 +1106,8 @@ fn find_mill_hamlet_site(
             if wet < 2 || banks < 2 {
                 continue;
             }
-            let score = wet * 8 + banks * 4 + rng.gen_range(0, 5);
+            let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+            let score = wet * 8 + banks * 4 - (hi - lo) + rng.gen_range(0, 5);
             if score > best_score {
                 best_score = score;
                 best = Some(rect);
@@ -1133,6 +1118,45 @@ fn find_mill_hamlet_site(
     best
 }
 
+fn mill_hamlet_scene_rect(occ: &Occupancy, lots: &[Lot], yard: Rect) -> Rect {
+    let mut rect: Option<Rect> = None;
+    let grow = |rect: &mut Option<Rect>, x: i32, z: i32| {
+        *rect = Some(rect.map_or_else(
+            || Rect::new(x, z, x, z),
+            |r| {
+                Rect::new(
+                    r.min_x.min(x),
+                    r.min_z.min(z),
+                    r.max_x.max(x),
+                    r.max_z.max(z),
+                )
+            },
+        ));
+    };
+    for lot in lots {
+        if !matches!(
+            lot.kind,
+            BuildingKind::Watermill | BuildingKind::Barn | BuildingKind::Cottage
+        ) || !yard.intersects(lot.rect)
+        {
+            continue;
+        }
+        grow(&mut rect, lot.rect.min_x, lot.rect.min_z);
+        grow(&mut rect, lot.rect.max_x, lot.rect.max_z);
+    }
+    for z in yard.min_z..=yard.max_z {
+        for x in yard.min_x..=yard.max_x {
+            if matches!(
+                occ.kind(x, z),
+                CellKind::WaterWheel | CellKind::MillRace | CellKind::Sluice
+            ) {
+                grow(&mut rect, x, z);
+            }
+        }
+    }
+    rect.unwrap_or(yard).inflate(4)
+}
+
 fn place_granary_in_yard(
     occ: &mut Occupancy,
     grid: &HeightGrid,
@@ -1140,7 +1164,8 @@ fn place_granary_in_yard(
     lots: &mut Vec<Lot>,
     seed: u64,
 ) -> bool {
-    let (bw, bd) = BuildingKind::Barn.size();
+    // Compact raised granary, not a full 14×10 barn.
+    let (bw, bd) = (8, 7);
     let pads = [
         Rect::new(
             yard.min_x + 2,
@@ -1160,6 +1185,12 @@ fn place_granary_in_yard(
             yard.min_x + 1 + bw,
             yard.max_z - 2,
         ),
+        Rect::new(
+            yard.max_x - 1 - bw,
+            yard.min_z + 2,
+            yard.max_x - 2,
+            yard.min_z + 1 + bd,
+        ),
     ];
     for pad in pads {
         if !yard.contains(pad.min_x, pad.min_z) || !yard.contains(pad.max_x, pad.max_z) {
@@ -1173,6 +1204,46 @@ fn place_granary_in_yard(
         }
     }
     false
+}
+
+fn place_mill_cottages(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    yard: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    limit: usize,
+) -> usize {
+    let (w, d) = BuildingKind::Cottage.size();
+    let mut n = 0;
+    for z in (yard.min_z + 1)..yard.max_z {
+        for x in (yard.min_x + 1)..yard.max_x {
+            if n >= limit {
+                return n;
+            }
+            let pad = Rect::new(x, z, x + w - 1, z + d - 1);
+            if !yard.contains(pad.min_x, pad.min_z) || !yard.contains(pad.max_x, pad.max_z) {
+                continue;
+            }
+            if mill_pad_blocked(occ, pad) {
+                continue;
+            }
+            if force_lot(
+                occ,
+                grid,
+                lots,
+                seed,
+                BuildingKind::Cottage,
+                pad,
+                Dir::South,
+            )
+            .is_some()
+            {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 fn place_beacon_chain(
@@ -3265,6 +3336,9 @@ fn place_watermills(
                 if mill_pad_blocked(occ, pad) {
                     continue;
                 }
+                if mill_bank_too_steep(grid, pad) {
+                    continue;
+                }
                 if mill_water_dir(grid, pad) != Some(water) {
                     continue;
                 }
@@ -3325,6 +3399,11 @@ fn mill_occupies(occ: &Occupancy, x: i32, z: i32) -> bool {
         occ.kind(x, z),
         CellKind::Building | CellKind::WaterWheel | CellKind::MillRace | CellKind::Sluice
     )
+}
+
+fn mill_bank_too_steep(grid: &HeightGrid, pad: Rect) -> bool {
+    let (lo, hi) = grid.range(pad.min_x, pad.min_z, pad.max_x, pad.max_z);
+    hi - lo > 5
 }
 
 fn mill_pad_blocked(occ: &Occupancy, pad: Rect) -> bool {
@@ -3455,29 +3534,37 @@ fn paint_mill_works(occ: &mut Occupancy, _grid: &HeightGrid, yard: Rect, mill: R
     let side = if along { Dir::South } else { Dir::East };
     let mut race = 0;
     for step in 1..=12 {
-        let x = edge_x + water.dx() + side.dx() * step;
-        let z = edge_z + water.dz() + side.dz() * step;
-        if !yard.contains(x, z) || !occ.bounds.contains(x, z) {
-            break;
+        let mut painted_step = false;
+        for thick in 1..=3 {
+            let x = edge_x + water.dx() * thick + side.dx() * step;
+            let z = edge_z + water.dz() * thick + side.dz() * step;
+            if !yard.contains(x, z) || !occ.bounds.contains(x, z) {
+                continue;
+            }
+            if matches!(occ.kind(x, z), CellKind::WaterWheel | CellKind::Building) {
+                continue;
+            }
+            let raceable = matches!(
+                occ.kind(x, z),
+                CellKind::Empty
+                    | CellKind::Green
+                    | CellKind::Farm
+                    | CellKind::FarmEdge
+                    | CellKind::Harbor
+                    | CellKind::MillRace
+                    | CellKind::Sluice
+            );
+            if raceable {
+                let painted = if race == 0 && thick == 2 {
+                    CellKind::Sluice
+                } else {
+                    CellKind::MillRace
+                };
+                occ.set(x, z, painted, true);
+                painted_step = true;
+            }
         }
-        let kind = occ.kind(x, z);
-        let raceable = matches!(
-            kind,
-            CellKind::Empty
-                | CellKind::Green
-                | CellKind::Farm
-                | CellKind::FarmEdge
-                | CellKind::Harbor
-                | CellKind::WaterWheel
-                | CellKind::MillRace
-        );
-        if raceable {
-            let painted = if race == 0 {
-                CellKind::Sluice
-            } else {
-                CellKind::MillRace
-            };
-            occ.set(x, z, painted, true);
+        if painted_step {
             race += 1;
         }
         if race >= 8 {
@@ -7491,96 +7578,105 @@ fn place_tourney(
     let keep_out = castle.inflate(4);
     let Some(yard) = find_tourney_site(occ, grid, search, town, castle, keep_out, 40, 24, 16, rng)
         .or_else(|| find_tourney_site(occ, grid, search, town, castle, keep_out, 36, 22, 16, rng))
-        .or_else(|| find_tourney_site(occ, grid, search, town, castle, keep_out, 30, 18, 18, rng))
     else {
         return;
     };
     occ.fill(yard.inflate(6), CellKind::Green, false);
     occ.fill(yard, CellKind::Green, true);
     let (cx, cz) = yard.center();
-    if yard.width() >= yard.depth() {
+    let (kx, kz) = castle.center();
+    let along_x = yard.width() >= yard.depth();
+    if along_x {
         occ.fill(
-            Rect::new(yard.min_x + 2, cz - 1, yard.max_x - 2, cz + 1),
+            Rect::new(yard.min_x + 6, cz - 1, yard.max_x - 6, cz + 1),
             CellKind::TourneyList,
             true,
         );
         occ.fill(
             Rect::new(
-                yard.min_x + 4,
-                yard.min_z + 1,
-                yard.max_x - 4,
-                yard.min_z + 3,
+                yard.min_x + 7,
+                yard.min_z + 6,
+                yard.max_x - 7,
+                yard.min_z + 8,
             ),
             CellKind::TourneyStand,
             true,
         );
         occ.fill(
             Rect::new(
-                yard.min_x + 4,
-                yard.max_z - 3,
-                yard.max_x - 4,
-                yard.max_z - 1,
+                yard.min_x + 7,
+                yard.max_z - 8,
+                yard.max_x - 7,
+                yard.max_z - 6,
             ),
             CellKind::TourneyStand,
             true,
         );
     } else {
         occ.fill(
-            Rect::new(cx - 1, yard.min_z + 2, cx + 1, yard.max_z - 2),
+            Rect::new(cx - 1, yard.min_z + 6, cx + 1, yard.max_z - 6),
             CellKind::TourneyList,
             true,
         );
         occ.fill(
             Rect::new(
-                yard.min_x + 1,
-                yard.min_z + 4,
-                yard.min_x + 3,
-                yard.max_z - 4,
+                yard.min_x + 6,
+                yard.min_z + 7,
+                yard.min_x + 8,
+                yard.max_z - 7,
             ),
             CellKind::TourneyStand,
             true,
         );
         occ.fill(
             Rect::new(
-                yard.max_x - 3,
-                yard.min_z + 4,
-                yard.max_x - 1,
-                yard.max_z - 4,
+                yard.max_x - 8,
+                yard.min_z + 7,
+                yard.max_x - 6,
+                yard.max_z - 7,
             ),
             CellKind::TourneyStand,
             true,
         );
     }
-    let pavilions = [
+    let tents = [
         Rect::new(yard.min_x, yard.min_z, yard.min_x + 4, yard.min_z + 4),
         Rect::new(yard.max_x - 4, yard.min_z, yard.max_x, yard.min_z + 4),
         Rect::new(yard.min_x, yard.max_z - 4, yard.min_x + 4, yard.max_z),
         Rect::new(yard.max_x - 4, yard.max_z - 4, yard.max_x, yard.max_z),
     ];
-    for pad in pavilions {
-        occ.fill(pad, CellKind::TourneyStand, true);
+    for pad in tents {
+        occ.fill(pad, CellKind::Tent, true);
     }
-    let royal = pavilions
-        .into_iter()
-        .min_by_key(|pad| {
-            let (px, pz) = pad.center();
-            let (kx, kz) = castle.center();
-            (px - kx).abs() + (pz - kz).abs()
-        })
-        .map(|pad| {
-            Rect::new(
-                pad.min_x,
-                pad.min_z,
-                (pad.max_x + 1).min(yard.max_x),
-                (pad.max_z + 1).min(yard.max_z),
-            )
-        });
-    if let Some(pad) = royal {
-        occ.fill(pad, CellKind::TourneyStand, true);
-    }
+    let north_closer = (yard.min_z - kz).abs() <= (yard.max_z - kz).abs();
+    let west_closer = (yard.min_x - kx).abs() <= (yard.max_x - kx).abs();
+    let royal = if along_x {
+        if north_closer {
+            Rect::new(cx - 3, yard.min_z, cx + 3, yard.min_z + 4)
+        } else {
+            Rect::new(cx - 3, yard.max_z - 4, cx + 3, yard.max_z)
+        }
+    } else if west_closer {
+        Rect::new(yard.min_x, cz - 3, yard.min_x + 4, cz + 3)
+    } else {
+        Rect::new(yard.max_x - 4, cz - 3, yard.max_x, cz + 3)
+    };
+    occ.fill(royal, CellKind::TourneyStand, true);
+    let extra = if along_x {
+        if north_closer {
+            Rect::new(cx - 2, yard.max_z - 4, cx + 2, yard.max_z)
+        } else {
+            Rect::new(cx - 2, yard.min_z, cx + 2, yard.min_z + 4)
+        }
+    } else if west_closer {
+        Rect::new(yard.max_x - 4, cz - 2, yard.max_x, cz + 2)
+    } else {
+        Rect::new(yard.min_x, cz - 2, yard.min_x + 4, cz + 2)
+    };
+    occ.fill(extra, CellKind::Tent, true);
     scenes.push(Scene {
         kind: SceneKind::Tourney,
-        rect: yard.inflate(6),
+        rect: yard.inflate(4),
     });
 }
 
@@ -11595,6 +11691,19 @@ mod tests {
                 }
             }
             assert!(lists >= 20, "jousting lists {lists}");
+            let mut tents = 0;
+            let mut stands = 0;
+            for z in tourney.rect.min_z..=tourney.rect.max_z {
+                for x in tourney.rect.min_x..=tourney.rect.max_x {
+                    match plan.occ.kind(x, z) {
+                        CellKind::Tent => tents += 1,
+                        CellKind::TourneyStand => stands += 1,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(tents >= 20, "pavilion tents {tents}");
+            assert!(stands >= 20, "stands and royal box {stands}");
         }
         let bandit = plan
             .scenes

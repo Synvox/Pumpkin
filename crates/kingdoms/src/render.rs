@@ -378,6 +378,12 @@ fn write_scene_renders(
             }
         } else if scene.kind == SceneKind::Vineyard {
             // Keep the outer terraces in frame.
+        } else if scene.kind == SceneKind::MillHamlet {
+            rect = mill_hamlet_focus_rect(plan, rect);
+        } else if scene.kind == SceneKind::Tourney {
+            rect = tourney_focus_rect(plan, rect);
+        } else if scene.kind == SceneKind::WalledMarket {
+            rect = scene.rect.inflate(2);
         } else if rect.width() > 56 || rect.depth() > 56 {
             let (cx, cz) = rect.center();
             rect = Rect::new(cx - 28, cz - 28, cx + 27, cz + 27);
@@ -951,14 +957,40 @@ fn write_cutaways(
     });
     if let Some(lot) = mill_lot {
         let floor = lot_floor(plan, lot);
+        let mut view = lot.rect;
+        if let Some(wheel) = wheel_for_mill(plan, lot.rect) {
+            view = union_rect(view, wheel);
+        }
+        for z in lot.rect.min_z - 10..=lot.rect.max_z + 10 {
+            for x in lot.rect.min_x - 10..=lot.rect.max_x + 10 {
+                if matches!(plan.occ.kind(x, z), CellKind::MillRace | CellKind::Sluice) {
+                    view = union_rect(view, Rect::new(x, z, x, z));
+                }
+            }
+        }
+        let (cx, cz) = lot.rect.center();
+        let sea = plan.heights.sea_level;
         save(
             &out_dir.join(format!("{stem}-mill-hamlet-cutaway.png")),
-            &render_room(
+            &render_iso_view(
                 volume,
-                lot.rect.inflate(4),
-                floor,
-                floor + 8,
-                "Mill hamlet · mill house, wheel and race",
+                view.min_x,
+                view.min_z,
+                view.max_x,
+                view.max_z,
+                0,
+                1,
+                |x, y, z| {
+                    let cut = if matches!(lot.facing, Dir::East | Dir::West) {
+                        z <= cz + 1
+                    } else {
+                        x <= cx + 1
+                    };
+                    cut && y >= sea - 6 && y <= floor + 10
+                },
+                Some("Mill hamlet · mill house, wheel and race"),
+                true,
+                0,
             ),
         )?;
     }
@@ -1077,6 +1109,15 @@ fn write_cutaways(
 }
 
 fn lot_floor(plan: &TownPlan, lot: &crate::buildings::Lot) -> i32 {
+    if lot.kind == BuildingKind::Watermill {
+        let (_, hi) = plan.heights.range(
+            lot.rect.min_x,
+            lot.rect.min_z,
+            lot.rect.max_x,
+            lot.rect.max_z,
+        );
+        return hi.max(plan.heights.sea_level + 2);
+    }
     plan.heights
         .mean(
             lot.rect.min_x,
@@ -1085,6 +1126,56 @@ fn lot_floor(plan: &TownPlan, lot: &crate::buildings::Lot) -> i32 {
             lot.rect.max_z,
         )
         .max(plan.heights.sea_level + 2)
+}
+
+fn mill_hamlet_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
+    let Some(mill) = plan
+        .lots
+        .iter()
+        .find(|lot| lot.kind == BuildingKind::Watermill && fallback.intersects(lot.rect))
+    else {
+        return fallback;
+    };
+    let mut rect = mill.rect.inflate(6);
+    if let Some(wheel) = wheel_for_mill(plan, mill.rect) {
+        rect = union_rect(rect, wheel.inflate(2));
+    }
+    for lot in &plan.lots {
+        if matches!(lot.kind, BuildingKind::Barn | BuildingKind::Cottage)
+            && fallback.intersects(lot.rect)
+        {
+            rect = union_rect(rect, lot.rect.inflate(2));
+        }
+    }
+    rect
+}
+
+fn tourney_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
+    let mut rect: Option<Rect> = None;
+    let grow = |rect: &mut Option<Rect>, x: i32, z: i32| {
+        *rect = Some(rect.map_or_else(
+            || Rect::new(x, z, x, z),
+            |r| {
+                Rect::new(
+                    r.min_x.min(x),
+                    r.min_z.min(z),
+                    r.max_x.max(x),
+                    r.max_z.max(z),
+                )
+            },
+        ));
+    };
+    for z in fallback.min_z..=fallback.max_z {
+        for x in fallback.min_x..=fallback.max_x {
+            if matches!(
+                plan.occ.kind(x, z),
+                CellKind::TourneyList | CellKind::TourneyStand | CellKind::Tent
+            ) {
+                grow(&mut rect, x, z);
+            }
+        }
+    }
+    rect.unwrap_or(fallback).inflate(3)
 }
 
 fn render_room(
