@@ -12,7 +12,7 @@ use crate::scene::TownScene;
 use crate::stamp::PlannedBlock;
 
 /// One missing or wrong block to put back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepairJob {
     pub x: i32,
     pub y: i32,

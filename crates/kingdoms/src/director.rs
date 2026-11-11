@@ -79,7 +79,7 @@ const SET_TARGET_RANGE: f64 = 12.0;
 const LIVE_MELEE_RANGE: f64 = 2.75;
 const LIVE_MELEE_DAMAGE: f32 = 4.0;
 const LIVE_MELEE_PERIOD: u32 = 10;
-const LIVE_RANGED_RANGE: f64 = 16.0;
+const LIVE_RANGED_RANGE: f64 = 28.0;
 const LIVE_RANGED_DAMAGE: f32 = 3.0;
 const LIVE_RANGED_PERIOD: u32 = 20;
 /// Real arrows when a player can see the shot; director damage beyond this.
@@ -391,6 +391,7 @@ pub struct Director {
     pending_flips: VecDeque<PendingFlip>,
     pending_keep_tp: HashSet<String>,
     squad_orders: HashMap<String, SquadCommand>,
+    saved_wars: HashMap<String, siege::SavedTown>,
 }
 
 struct PendingFlip {
@@ -474,6 +475,8 @@ struct TownWar {
     tickets_are_repair: bool,
     building_fields: HashSet<(i32, i32)>,
     repair_restored: HashSet<(i32, i32, i32)>,
+    orphan_sweep: bool,
+    restore_flag: bool,
 }
 
 struct Wired {
@@ -490,6 +493,8 @@ struct GhostSoldier {
     z: f64,
     bearer: bool,
     raider: bool,
+    job: MarchJob,
+    role: Option<VillagerRole>,
 }
 
 struct ActiveRaid {
@@ -540,6 +545,7 @@ impl Director {
             pending_flips: VecDeque::new(),
             pending_keep_tp: HashSet::new(),
             squad_orders: HashMap::new(),
+            saved_wars: HashMap::new(),
         }
     }
 
@@ -564,11 +570,13 @@ impl Director {
         }
         self.last_clock_tick = saved.last_clock_tick;
         crate::damage::restore(&saved.damage);
+        self.saved_wars = saved.wars;
         self.ownership_path = Some(path);
         tracing::info!(
             tick = self.tick,
             next_raid = self.next_raid_id,
             last_clock = self.last_clock_tick,
+            saved_towns = self.saved_wars.len(),
             scores = ?self.scores,
             "loaded war state"
         );
@@ -593,6 +601,12 @@ impl Director {
             .iter()
             .map(|(uuid, k)| (uuid.clone(), k.as_str().to_owned()))
             .collect();
+        let world = self.attached_worlds().into_iter().next();
+        let wars = self
+            .towns
+            .iter()
+            .map(|(id, war)| (id.clone(), snapshot_town(war, world.as_deref())))
+            .collect();
         let state = siege::SavedState {
             towns: self.owners.clone(),
             players,
@@ -602,6 +616,7 @@ impl Director {
             last_clock_tick: self.last_clock_tick,
             damage: crate::damage::snapshot(),
             stats: self.player_stats.clone(),
+            wars,
         };
         siege::save_state_async(path.clone(), state);
     }
@@ -1129,10 +1144,15 @@ impl Director {
             .get(&id)
             .cloned()
             .unwrap_or_else(|| TownOwner::kingdom(&KingdomId::for_town(&info)));
-        self.towns.entry(id).or_insert_with(|| {
-            let scene = TownInfoScene::from_info(info);
-            TownWar::from_scene(scene, owner)
-        });
+        if self.towns.contains_key(&id) {
+            return;
+        }
+        let scene = TownInfoScene::from_info(info);
+        let mut war = TownWar::from_scene(scene, owner);
+        if let Some(saved) = self.saved_wars.remove(&id) {
+            apply_saved_town(&mut war, saved, self.tick);
+        }
+        self.towns.insert(id, war);
     }
 
     fn push_event(&mut self, event: CombatEvent) {
@@ -1285,7 +1305,221 @@ impl TownWar {
             tickets_are_repair: false,
             building_fields: HashSet::new(),
             repair_restored: HashSet::new(),
+            orphan_sweep: false,
+            restore_flag: false,
         }
+    }
+}
+
+fn snapshot_town(war: &TownWar, world: Option<&World>) -> siege::SavedTown {
+    let mut ghosts: Vec<siege::SavedGhost> = Vec::new();
+    if let Some(raid) = &war.raid {
+        ghosts.extend(raid.ghosts.iter().map(saved_ghost_of));
+        if let Some(world) = world {
+            for id in raid.living.iter().chain(raid.temps.iter()) {
+                if let Some(entity) = world.get_entity_by_id(*id) {
+                    ghosts.push(saved_ghost_from_entity(entity.as_ref(), true));
+                }
+            }
+        }
+    }
+    if let Some(world) = world {
+        for id in war.wired.keys() {
+            if war
+                .raid
+                .as_ref()
+                .is_some_and(|r| r.living.contains(id) || r.temps.contains(id))
+            {
+                continue;
+            }
+            if let Some(entity) = world.get_entity_by_id(*id) {
+                let raider = has_tag(entity.get_entity(), TAG_RAIDER);
+                ghosts.push(saved_ghost_from_entity(entity.as_ref(), raider));
+            }
+        }
+    }
+    let raid = war.raid.as_ref().map(|raid| siege::SavedRaid {
+        id: raid.id.0,
+        side: raid.spec.side.as_str().to_owned(),
+        raiders: raid.spec.raiders,
+        extra_defenders: raid.spec.extra_defenders,
+        waves: raid.spec.waves,
+        wave: raid.wave,
+        spawned_this_wave: raid.spawned_this_wave,
+        last_wave_tick: raid.last_wave_tick,
+        camp_x: raid.camp.x,
+        camp_z: raid.camp.z,
+        pending_left: raid.pending_members.len() as u16,
+        pending_retake: raid.pending_retake,
+        extra_left: raid.extra_left,
+        materialized: false,
+        virt_raiders: raid.virt_raiders,
+        virt_defenders: raid.virt_defenders,
+        virt_march: raid.virt_march,
+        ghosts,
+    });
+    siege::SavedTown {
+        occupy_hold: war.occupy_hold,
+        retake_hold: war.retake_hold,
+        hold_lockout: war.hold_lockout,
+        repair_until: war.repair_until,
+        repair_started: war.repair_started,
+        repair_placed: war.repair_placed,
+        gate_breached: war.gate_breached,
+        alarm: war.alarm,
+        repair_jobs: war.repair_jobs.iter().copied().collect(),
+        repair_restored: war.repair_restored.iter().copied().collect(),
+        raid,
+    }
+}
+
+fn saved_ghost_of(ghost: &GhostSoldier) -> siege::SavedGhost {
+    siege::SavedGhost {
+        faction: faction_key(&ghost.faction),
+        x: ghost.x,
+        y: ghost.y,
+        z: ghost.z,
+        bearer: ghost.bearer,
+        raider: ghost.raider,
+        job: job_key(ghost.job).to_owned(),
+        role: ghost.role.map_or("", VillagerRole::as_str).to_owned(),
+    }
+}
+
+fn saved_ghost_from_entity(entity: &dyn EntityBase, raider: bool) -> siege::SavedGhost {
+    let base = entity.get_entity();
+    let pos = base.pos.load();
+    let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
+    siege::SavedGhost {
+        faction: faction_key(&faction_of_entity(entity, None)),
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+        bearer: has_tag(base, TAG_BEARER),
+        raider,
+        job: job_key(job_of(base)).to_owned(),
+        role: role.map_or("", VillagerRole::as_str).to_owned(),
+    }
+}
+
+fn faction_key(faction: &Faction) -> String {
+    match faction {
+        Faction::Pillager => "pillager".to_owned(),
+        Faction::Neutral => "neutral".to_owned(),
+        Faction::Kingdom(id) => id.as_str().to_owned(),
+    }
+}
+
+fn faction_parse(raw: &str) -> Faction {
+    match raw {
+        "pillager" => Faction::Pillager,
+        "neutral" | "" => Faction::Neutral,
+        other => Faction::Kingdom(KingdomId::new(other)),
+    }
+}
+
+fn job_key(job: MarchJob) -> &'static str {
+    match job {
+        MarchJob::Ram => "ram",
+        MarchJob::Ladder => "ladder",
+        MarchJob::Crossbow => "crossbow",
+        MarchJob::Assault => "assault",
+    }
+}
+
+fn job_parse(raw: &str) -> MarchJob {
+    match raw {
+        "ram" => MarchJob::Ram,
+        "ladder" => MarchJob::Ladder,
+        "crossbow" => MarchJob::Crossbow,
+        _ => MarchJob::Assault,
+    }
+}
+
+fn raid_side_parse(raw: &str) -> RaidSide {
+    match raw {
+        "kingdom" => RaidSide::Kingdom,
+        "alder" => RaidSide::Alder,
+        "raven" => RaidSide::Raven,
+        _ => RaidSide::Pillager,
+    }
+}
+
+fn apply_saved_town(war: &mut TownWar, saved: siege::SavedTown, now: u32) {
+    war.occupy_hold = saved.occupy_hold;
+    war.retake_hold = saved.retake_hold;
+    war.hold_lockout = saved.hold_lockout;
+    war.repair_until = saved.repair_until;
+    war.repair_started = saved.repair_started;
+    war.repair_placed = saved.repair_placed;
+    war.gate_breached = saved.gate_breached;
+    war.alarm = saved.alarm;
+    war.repair_jobs = saved.repair_jobs.into_iter().collect();
+    war.repair_restored = saved.repair_restored.into_iter().collect();
+    war.orphan_sweep = true;
+    war.restore_flag = true;
+    if let Some(raid) = saved.raid {
+        let side = raid_side_parse(&raid.side);
+        let spec = RaidSpec {
+            raiders: raid.raiders,
+            extra_defenders: raid.extra_defenders,
+            waves: raid.waves.max(1),
+            side,
+        };
+        let ghosts: Vec<GhostSoldier> = raid.ghosts.into_iter().map(ghost_from_saved).collect();
+        tracing::info!(
+            town = war.info_id.as_str(),
+            owner = war.owner.as_str(),
+            raid = raid.id,
+            ghosts = ghosts.len(),
+            hold = saved.occupy_hold,
+            repair_until = saved.repair_until,
+            "restored town war"
+        );
+        war.raid = Some(ActiveRaid {
+            id: RaidId(raid.id.max(1)),
+            spec,
+            wave: raid.wave,
+            spawned_this_wave: raid.spawned_this_wave,
+            last_wave_tick: raid.last_wave_tick,
+            camp: ScenePost::new(raid.camp_x, raid.camp_z),
+            living: Vec::new(),
+            temps: Vec::new(),
+            warm_until: now,
+            pending_members: compose_wave(raid.pending_left, raid.wave),
+            pending_retake: raid.pending_retake,
+            spawn_cursor: 0,
+            extra_left: raid.extra_left,
+            ram_spawned: true,
+            tower_spawned: true,
+            materialized: false,
+            virt_raiders: raid.virt_raiders,
+            virt_defenders: raid.virt_defenders,
+            virt_march: raid.virt_march,
+            ghosts,
+        });
+    } else {
+        tracing::info!(
+            town = war.info_id.as_str(),
+            owner = war.owner.as_str(),
+            hold = saved.occupy_hold,
+            repair_until = saved.repair_until,
+            queued = war.repair_jobs.len(),
+            "restored town war"
+        );
+    }
+}
+
+fn ghost_from_saved(saved: siege::SavedGhost) -> GhostSoldier {
+    GhostSoldier {
+        faction: faction_parse(&saved.faction),
+        x: saved.x,
+        y: saved.y,
+        z: saved.z,
+        bearer: saved.bearer,
+        raider: saved.raider,
+        job: job_parse(&saved.job),
+        role: VillagerRole::parse(&saved.role),
     }
 }
 
@@ -2118,6 +2352,7 @@ fn nearby_cached_towns(seed: u64, world: &World) -> Vec<TownInfo> {
 
 fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     drain_pending_work(world, town_id);
+    maybe_restore_flag(town_id);
     sync_front_lod(world, town_id, tick);
     let materialized = {
         let dir = lock();
@@ -2200,6 +2435,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     if !drop_ids.is_empty() {
         remove_ephemeral(world, &drop_ids);
     }
+    entities = sweep_restored_orphans(world, town_id, entities);
 
     let mut buckets = SpatialBuckets::new();
     let mut snapshots: Vec<(Arc<dyn EntityBase>, Faction)> = Vec::new();
@@ -2727,6 +2963,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     z: pos.z,
                     bearer: has_tag(base, TAG_BEARER),
                     raider: has_tag(base, TAG_RAIDER),
+                    job: job_of(base),
+                    role,
                 },
             ));
             continue;
@@ -2932,6 +3170,13 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             squad_n += 1;
         }
         let dest = squad_dest;
+        let dest = if job == MarchJob::Crossbow && !breached && !capturing {
+            standoff_between(camp_dest, march_dest, 18)
+        } else if role == Some(VillagerRole::Guard) && alarm && !capturing {
+            gate_line_slot(id, dest)
+        } else {
+            dest
+        };
         if matches!(faction, Faction::Pillager) && ladders_placed {
             let near_ladders =
                 (pos.x - f64::from(ladder_dest.x)).hypot(pos.z - f64::from(ladder_dest.z)) < 10.0;
@@ -3060,6 +3305,23 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     );
     let loop_us = loop_started.elapsed().as_micros();
     log_slow_phase(tick, "entities", loop_started);
+    if tick.is_multiple_of(40) && (n_ranged > 0 || n_arrows > 0 || n_melee > 0) {
+        let raiders_left = {
+            let dir = lock();
+            dir.towns
+                .get(town_id)
+                .and_then(|w| w.raid.as_ref())
+                .map_or(0, |r| r.living.len() + r.ghosts.len())
+        };
+        tracing::info!(
+            town = town_id,
+            volley = n_ranged,
+            arrows = n_arrows,
+            melee = n_melee,
+            raiders_left,
+            "kingdoms siege volley"
+        );
+    }
     if curtain_cross.is_some() || archer_walk.is_some() || ram_sally.is_some() {
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
@@ -3517,8 +3779,7 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
     let mut leftover = Vec::new();
     let mut live_jobs = Vec::new();
     for (i, member) in batch {
-        let vindicator = member.entity_type == &EntityType::VINDICATOR;
-        let job = MarchJob::assign(i, vindicator);
+        let job = member.job;
         let post = match job {
             MarchJob::Ram if !rams.is_empty() => rams[i % rams.len()],
             MarchJob::Ladder if !ladders.is_empty() => ladders[i % ladders.len()],
@@ -3542,6 +3803,8 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
                     z: pos.z,
                     bearer: member.captain,
                     raider: true,
+                    job: member.job,
+                    role: None,
                 });
                 remaining -= 1;
             }
@@ -3556,9 +3819,8 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
             leftover.push(member);
             continue;
         }
-        let vindicator = member.entity_type == &EntityType::VINDICATOR;
         let entity = Entity::new(world.clone(), pos, member.entity_type);
-        let base: Arc<dyn EntityBase> = if vindicator {
+        let base: Arc<dyn EntityBase> = if member.entity_type == &EntityType::VINDICATOR {
             pumpkin_core::entity::mob::vindicator::VindicatorEntity::new(entity)
                 as Arc<dyn EntityBase>
         } else {
@@ -4437,7 +4699,9 @@ fn job_of(entity: &Entity) -> MarchJob {
 }
 
 fn is_ranged_fighter(entity: &Entity, role: Option<VillagerRole>) -> bool {
-    role == Some(VillagerRole::Archer) || entity.entity_type == &EntityType::PILLAGER
+    role == Some(VillagerRole::Archer)
+        || entity.entity_type == &EntityType::PILLAGER
+        || job_of(entity) == MarchJob::Crossbow
 }
 
 fn player_near(world: &World, x: f64, z: f64, range: f64) -> bool {
@@ -6375,6 +6639,81 @@ fn plate_slot(entity_id: i32, flag: PostTarget) -> PostTarget {
     }
 }
 
+fn standoff_between(camp: PostTarget, gate: PostTarget, dist: i32) -> PostTarget {
+    let dx = f64::from(camp.x - gate.x);
+    let dz = f64::from(camp.z - gate.z);
+    let len = dx.hypot(dz).max(1.0);
+    let t = f64::from(dist) / len;
+    PostTarget {
+        x: gate.x + (dx * t) as i32,
+        y: gate.y,
+        z: gate.z + (dz * t) as i32,
+    }
+}
+
+fn gate_line_slot(entity_id: i32, gate: PostTarget) -> PostTarget {
+    let i = (entity_id.unsigned_abs() % 7) as i32 - 3;
+    PostTarget {
+        x: gate.x + i,
+        y: gate.y,
+        z: gate.z,
+    }
+}
+
+fn maybe_restore_flag(town_id: &str) {
+    let owner = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        if !war.restore_flag {
+            return;
+        }
+        war.restore_flag = false;
+        war.owner.clone()
+    };
+    swap_flag_banner(town_id, &owner);
+    tracing::info!(
+        town = town_id,
+        owner = owner.as_str(),
+        "restored flag banner"
+    );
+}
+
+fn sweep_restored_orphans(
+    world: &Arc<World>,
+    town_id: &str,
+    entities: Vec<Arc<dyn EntityBase>>,
+) -> Vec<Arc<dyn EntityBase>> {
+    let sweep = {
+        let dir = lock();
+        dir.towns.get(town_id).is_some_and(|w| w.orphan_sweep)
+    };
+    if !sweep {
+        return entities;
+    }
+    let ids: Vec<i32> = entities
+        .iter()
+        .filter(|entity| entity.get_player().is_none() && is_kingdoms_tagged(entity.get_entity()))
+        .map(|entity| entity.get_entity().entity_id)
+        .collect();
+    if !ids.is_empty() {
+        remove_ephemeral(world, &ids);
+        tracing::info!(
+            town = town_id,
+            swept = ids.len(),
+            "kingdoms restored orphan sweep"
+        );
+    }
+    if let Some(war) = lock().towns.get_mut(town_id) {
+        war.orphan_sweep = false;
+    }
+    entities
+        .into_iter()
+        .filter(|entity| !ids.contains(&entity.get_entity().entity_id))
+        .collect()
+}
+
 fn dest_is_plate(dest: PostTarget, flag: PostTarget) -> bool {
     (dest.x - flag.x).abs() <= 1 && (dest.z - flag.z).abs() <= 1
 }
@@ -6603,16 +6942,24 @@ fn spawn_lod_body(world: &Arc<World>, town_id: &str, ghost: &GhostSoldier) -> Op
     let pos = Vector3::new(ghost.x, ghost.y, ghost.z);
     match &ghost.faction {
         Faction::Pillager => {
-            let entity = Entity::new(world.clone(), pos, &EntityType::PILLAGER);
-            let base: Arc<dyn EntityBase> =
+            let ty = match ghost.job {
+                MarchJob::Ram | MarchJob::Assault => &EntityType::VINDICATOR,
+                MarchJob::Crossbow | MarchJob::Ladder => &EntityType::PILLAGER,
+            };
+            let entity = Entity::new(world.clone(), pos, ty);
+            let base: Arc<dyn EntityBase> = if ty == &EntityType::VINDICATOR {
+                pumpkin_core::entity::mob::vindicator::VindicatorEntity::new(entity)
+                    as Arc<dyn EntityBase>
+            } else {
                 pumpkin_core::entity::mob::pillager::PillagerEntity::new(entity)
-                    as Arc<dyn EntityBase>;
+                    as Arc<dyn EntityBase>
+            };
             if let Some(mob) = base.get_mob() {
                 bind_raider(
                     mob,
                     town_id,
                     ghost.bearer,
-                    MarchJob::Assault,
+                    ghost.job,
                     world,
                     ScenePost::new(ghost.x.floor() as i32, ghost.z.floor() as i32),
                 );
@@ -6621,9 +6968,14 @@ fn spawn_lod_body(world: &Arc<World>, town_id: &str, ghost: &GhostSoldier) -> Op
             let id = base.get_entity().entity_id;
             world.spawn_entity(base).then_some(id)
         }
-        Faction::Kingdom(kingdom) => {
-            spawn_citizen(world, town_id, kingdom, VillagerRole::Guard, false, pos)
-        }
+        Faction::Kingdom(kingdom) => spawn_citizen(
+            world,
+            town_id,
+            kingdom,
+            ghost.role.unwrap_or(VillagerRole::Guard),
+            false,
+            pos,
+        ),
         Faction::Neutral => None,
     }
 }
@@ -8725,6 +9077,25 @@ mod tests {
     }
 
     #[test]
+    fn siege_roles_hold_distinct_posts() {
+        let gate = PostTarget { x: 10, y: 64, z: 0 };
+        let camp = PostTarget {
+            x: 10,
+            y: 64,
+            z: -80,
+        };
+        let stand = standoff_between(camp, gate, 18);
+        assert!(
+            (stand.z - gate.z).abs() >= 16 && (stand.z - gate.z).abs() <= 22,
+            "crossbow standoff {stand:?}"
+        );
+        let slot = gate_line_slot(4, gate);
+        assert_eq!(slot.z, gate.z);
+        assert_ne!(slot.x, gate.x);
+        assert_eq!(LIVE_RANGED_RANGE, 28.0);
+    }
+
+    #[test]
     fn packed_storm_picks_the_gate_with_bodies_not_the_first() {
         use crate::geom::Dir;
         use crate::info::GateKind;
@@ -8748,6 +9119,8 @@ mod tests {
                 z: -80.0 + f64::from(i) * 0.1,
                 bearer: false,
                 raider: true,
+                job: MarchJob::Assault,
+                role: None,
             })
             .collect();
         let packed = packed_storm_gate(

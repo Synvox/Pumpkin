@@ -664,7 +664,7 @@ pub fn bind_citizen(
     let entity = mob.get_entity();
     mob.get_mob_entity()
         .persistence_required
-        .store(true, Ordering::Relaxed);
+        .store(false, Ordering::Relaxed);
     mob.get_mob_entity().set_director_driven(true);
     tag(entity, TAG_CITIZEN);
     tag(entity, TAG_WIRED);
@@ -683,6 +683,7 @@ pub fn bind_citizen(
             remove_avoid(mob);
             strip_vanilla_combat(mob);
             equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_SWORD);
+            equip(mob, EquipmentSlot::OFF_HAND, &Item::SHIELD);
             kit_kingdom(mob, kingdom);
             mob.get_mob_entity()
                 .add_goal(2, ThrottledMeleeGoal::new(MELEE_SPEED));
@@ -696,7 +697,7 @@ pub fn bind_citizen(
         VillagerRole::Archer => {
             remove_avoid(mob);
             strip_vanilla_combat(mob);
-            equip(mob, EquipmentSlot::MAIN_HAND, &Item::BOW);
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::CROSSBOW);
             kit_kingdom(mob, kingdom);
             mob.get_mob_entity()
                 .add_goal(2, ThrottledBowGoal::default());
@@ -741,7 +742,7 @@ pub fn bind_golem(mob: &dyn Mob, town_id: &str, kingdom: &crate::faction::Kingdo
     let entity = mob.get_entity();
     mob.get_mob_entity()
         .persistence_required
-        .store(true, Ordering::Relaxed);
+        .store(false, Ordering::Relaxed);
     mob.get_mob_entity().set_director_driven(true);
     tag(entity, TAG_GOLEM);
     tag(entity, TAG_WIRED);
@@ -773,7 +774,7 @@ pub fn bind_raider(
     let entity = mob.get_entity();
     mob.get_mob_entity()
         .persistence_required
-        .store(true, Ordering::Relaxed);
+        .store(false, Ordering::Relaxed);
     mob.get_mob_entity().set_director_driven(true);
     tag(entity, TAG_RAIDER);
     tag(entity, TAG_WIRED);
@@ -782,6 +783,18 @@ pub fn bind_raider(
         tag(entity, job_tag);
     }
     strip_vanilla_combat(mob);
+    match job {
+        MarchJob::Ram => {
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_PICKAXE);
+        }
+        MarchJob::Assault => {
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_AXE);
+            equip(mob, EquipmentSlot::OFF_HAND, &Item::SHIELD);
+        }
+        MarchJob::Crossbow | MarchJob::Ladder => {
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::CROSSBOW);
+        }
+    }
     if captain {
         tag(entity, TAG_CAPTAIN);
         tag(entity, TAG_BEARER);

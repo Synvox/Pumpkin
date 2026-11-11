@@ -105,23 +105,30 @@ impl RaidSpec {
 pub struct WaveMember {
     pub entity_type: &'static EntityType,
     pub captain: bool,
+    pub job: crate::siege::MarchJob,
 }
 
-/// Mix of crossbow pillagers and melee vindicators, with a captain on the
-/// first member of each wave.
+/// Mix of crossbow pillagers, shield-wall vindicators, and a small ram crew.
+/// Captain is the first member of each wave.
 #[must_use]
 pub fn compose_wave(count: u16, _wave: u8) -> Vec<WaveMember> {
     let mut members = Vec::with_capacity(count as usize);
+    let n = count as usize;
     for i in 0..count {
         let captain = i == 0;
-        let entity_type = if i % 5 == 4 {
-            &EntityType::VINDICATOR
-        } else {
-            &EntityType::PILLAGER
+        let job = crate::siege::MarchJob::for_wave_index(i as usize, n);
+        let entity_type = match job {
+            crate::siege::MarchJob::Ram | crate::siege::MarchJob::Assault => {
+                &EntityType::VINDICATOR
+            }
+            crate::siege::MarchJob::Crossbow | crate::siege::MarchJob::Ladder => {
+                &EntityType::PILLAGER
+            }
         };
         members.push(WaveMember {
             entity_type,
             captain,
+            job,
         });
     }
     members
@@ -163,6 +170,24 @@ mod tests {
             last.iter()
                 .any(|m| m.entity_type == &EntityType::VINDICATOR)
         );
+        let ram = last
+            .iter()
+            .filter(|m| m.job == crate::siege::MarchJob::Ram)
+            .count();
+        let shield = last
+            .iter()
+            .filter(|m| m.job == crate::siege::MarchJob::Assault)
+            .count();
+        let bows = last
+            .iter()
+            .filter(|m| m.job == crate::siege::MarchJob::Crossbow)
+            .count();
+        assert!((2..=6).contains(&ram), "ram crew {ram}");
+        assert!(
+            bows > shield,
+            "crossbows {bows} should outnumber shield {shield}"
+        );
+        assert!(shield > 0);
     }
 
     #[test]

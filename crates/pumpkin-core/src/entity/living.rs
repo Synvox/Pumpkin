@@ -4736,7 +4736,7 @@ mod ai_step_tests {
     }
 
     #[tokio::test]
-    async fn nearby_director_driven_body_still_runs_vanilla_tick() -> TestResult {
+    async fn nearby_director_driven_body_also_sparse_ticks() -> TestResult {
         let folder = tempfile::tempdir()?;
         let world = world(&folder);
         let mob = probe(world.clone(), Arc::new(AtomicUsize::new(0)));
@@ -4758,7 +4758,7 @@ mod ai_step_tests {
             .filter(|skip| *skip)
             .count();
         world.level.shutdown().await;
-        assert_eq!(skipped, 0);
+        assert_eq!(skipped, 6);
         Ok(())
     }
 
