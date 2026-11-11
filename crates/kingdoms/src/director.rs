@@ -82,12 +82,15 @@ const LIVE_MELEE_PERIOD: u32 = 10;
 const LIVE_RANGED_RANGE: f64 = 28.0;
 const LIVE_RANGED_DAMAGE: f32 = 3.0;
 /// Wall archers hit harder so a garrison volley thins a wave at the gate.
-const WALL_ARCHER_DAMAGE: f32 = 5.0;
+const WALL_ARCHER_DAMAGE: f32 = 4.0;
 const LIVE_RANGED_PERIOD: u32 = 20;
 /// Cap visible projectiles. A 50-shot volley of real arrows was ~1k extra
 /// entities on the 3-front soak; director damage is the fight.
 const PLAYER_ARROW_RANGE: f64 = 32.0;
 const VISUAL_ARROWS_PER_VOLLEY: u32 = 2;
+/// Instant hits per volley. Uncapped, wall archers plus the crossbow line
+/// deleted a 120-raider wave before it reached the gate.
+const LIVE_RANGED_HITS_PER_VOLLEY: u32 = 8;
 const CAPTURE_METER_RANGE: f64 = 64.0;
 const DEFAULT_WAR_CLOCK_TICKS: u32 = 2400;
 /// Quiet ticks after hold lockout so builders can repair for the new owner.
@@ -3306,6 +3309,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             );
             n_melee += 1;
         } else if tick.is_multiple_of(LIVE_RANGED_PERIOD)
+            && n_ranged < LIVE_RANGED_HITS_PER_VOLLEY
             && is_ranged_fighter(base, role)
             && let Some(h) = ranged_hostile
             && let Some(target) = world.get_entity_by_id(h.entity_id)
@@ -4761,9 +4765,7 @@ fn job_of(entity: &Entity) -> MarchJob {
 }
 
 fn is_ranged_fighter(entity: &Entity, role: Option<VillagerRole>) -> bool {
-    role == Some(VillagerRole::Archer)
-        || entity.entity_type == &EntityType::PILLAGER
-        || job_of(entity) == MarchJob::Crossbow
+    role == Some(VillagerRole::Archer) || job_of(entity) == MarchJob::Crossbow
 }
 
 fn player_near(world: &World, x: f64, z: f64, range: f64) -> bool {
@@ -9160,8 +9162,9 @@ mod tests {
         assert_eq!(slot.z, gate.z);
         assert_ne!(slot.x, gate.x);
         assert_eq!(LIVE_RANGED_RANGE, 28.0);
-        assert_eq!(WALL_ARCHER_DAMAGE, 5.0);
+        assert_eq!(WALL_ARCHER_DAMAGE, 4.0);
         assert_eq!(VISUAL_ARROWS_PER_VOLLEY, 2);
+        assert_eq!(LIVE_RANGED_HITS_PER_VOLLEY, 8);
     }
 
     #[test]
