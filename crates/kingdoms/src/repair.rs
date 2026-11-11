@@ -116,8 +116,19 @@ pub fn collect_jobs(
         }
         let planned = crate::stamp::planned_column(plan, x, z);
         for block in planned {
+            let Some(live) =
+                world.get_block_state_id_if_loaded(&BlockPos::new(block.x, block.y, block.z))
+            else {
+                // Far towns hold no tickets. Count the hole and queue it so
+                // the director can restore abstractly without a fetch.
+                scan.planned = scan.planned.saturating_add(1);
+                scan.mismatched = scan.mismatched.saturating_add(1);
+                if scan.jobs.len() < cap {
+                    scan.jobs.push(RepairJob::from_planned(block));
+                }
+                continue;
+            };
             scan.planned = scan.planned.saturating_add(1);
-            let live = world.get_block_state_id(&BlockPos::new(block.x, block.y, block.z));
             if live.as_u16() != block.state {
                 scan.mismatched = scan.mismatched.saturating_add(1);
                 if scan.jobs.len() < cap {
@@ -138,7 +149,9 @@ pub fn job_if_mismatch(live: u16, planned: crate::stamp::PlannedBlock) -> Option
 /// Place one planned block. Returns true if the world changed.
 pub fn place_one(world: &Arc<World>, job: RepairJob) -> bool {
     let pos = job.pos();
-    let live = world.get_block_state_id(&pos);
+    let Some(live) = world.get_block_state_id_if_loaded(&pos) else {
+        return false;
+    };
     if live.as_u16() == job.state {
         return false;
     }
