@@ -91,11 +91,6 @@ const VISUAL_ARROWS_PER_VOLLEY: u32 = 2;
 /// Instant hits per volley. Range 28 / damage 4 / 8 hits wiped a capital
 /// wave before it reached the plate.
 const LIVE_RANGED_HITS_PER_VOLLEY: u32 = 4;
-/// Crossbows hold this far from the current dest once they arrive.
-const CROSSBOW_STANDOFF: i32 = 12;
-/// Until this close, crossbows keep the ring-walk dest so a capital column
-/// does not stall 18 blocks short of the outer gate.
-const CROSSBOW_HOLD_RANGE: f64 = 24.0;
 const CAPTURE_METER_RANGE: f64 = 64.0;
 const DEFAULT_WAR_CLOCK_TICKS: u32 = 2400;
 /// Quiet ticks after hold lockout so builders can repair for the new owner.
@@ -2675,8 +2670,14 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 if soaking() {
                     // Hold the soak load: a gate blender would otherwise trip
                     // "raid defeated" and dump a live front in under a minute.
+                    // Count bodies we can still see. Stale `living` ids after a
+                    // wipe would otherwise block the refill.
                     finished = false;
-                    let present = raid.living.len() + raid.ghosts.len();
+                    let snapshot_raiders = snapshots
+                        .iter()
+                        .filter(|(_, faction)| matches!(faction, Faction::Pillager))
+                        .count();
+                    let present = snapshot_raiders + raid.ghosts.len();
                     if raid.pending_members.is_empty()
                         && raid.pending_retake == 0
                         && present < usize::from(raid.spec.raiders) / 2
@@ -3234,9 +3235,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             squad_n += 1;
         }
         let dest = squad_dest;
-        let dest = overlay_siege_role_dest(
-            dest, id, job, role, pos.x, pos.z, camp_dest, alarm, breached, capturing,
-        );
+        let dest = overlay_siege_role_dest(dest, id, role, alarm, capturing);
         if matches!(faction, Faction::Pillager) && ladders_placed {
             let near_ladders =
                 (pos.x - f64::from(ladder_dest.x)).hypot(pos.z - f64::from(ladder_dest.z)) < 10.0;
@@ -6707,39 +6706,16 @@ fn plate_slot(entity_id: i32, flag: PostTarget) -> PostTarget {
 fn overlay_siege_role_dest(
     dest: PostTarget,
     entity_id: i32,
-    job: MarchJob,
     role: Option<VillagerRole>,
-    pos_x: f64,
-    pos_z: f64,
-    camp_dest: PostTarget,
     alarm: bool,
-    breached: bool,
     capturing: bool,
 ) -> PostTarget {
-    if job == MarchJob::Crossbow && !breached && !capturing {
-        let dx = pos_x - f64::from(dest.x);
-        let dz = pos_z - f64::from(dest.z);
-        if dx.hypot(dz) < CROSSBOW_HOLD_RANGE {
-            standoff_between(camp_dest, dest, CROSSBOW_STANDOFF)
-        } else {
-            dest
-        }
-    } else if role == Some(VillagerRole::Guard) && alarm && !capturing && entity_id % 3 == 0 {
+    // Crossbows keep dest_for so a capital column walks the rings. A standoff
+    // at the outer gate parked two thirds of the wave in the archer kill zone.
+    if role == Some(VillagerRole::Guard) && alarm && !capturing && entity_id % 3 == 0 {
         gate_line_slot(entity_id, dest)
     } else {
         dest
-    }
-}
-
-fn standoff_between(camp: PostTarget, gate: PostTarget, dist: i32) -> PostTarget {
-    let dx = f64::from(camp.x - gate.x);
-    let dz = f64::from(camp.z - gate.z);
-    let len = dx.hypot(dz).max(1.0);
-    let t = f64::from(dist) / len;
-    PostTarget {
-        x: gate.x + (dx * t) as i32,
-        y: gate.y,
-        z: gate.z + (dz * t) as i32,
     }
 }
 
@@ -9176,75 +9152,16 @@ mod tests {
     #[test]
     fn siege_roles_hold_distinct_posts() {
         let gate = PostTarget { x: 10, y: 64, z: 0 };
-        let camp = PostTarget {
-            x: 10,
-            y: 64,
-            z: -80,
-        };
-        let stand = standoff_between(camp, gate, CROSSBOW_STANDOFF);
-        assert!(
-            (stand.z - gate.z).abs() >= 10 && (stand.z - gate.z).abs() <= 14,
-            "crossbow standoff {stand:?}"
-        );
-        let far = overlay_siege_role_dest(
-            gate,
-            1,
-            MarchJob::Crossbow,
-            None,
-            10.5,
-            -80.0,
-            camp,
-            true,
-            false,
-            false,
-        );
+        let far = overlay_siege_role_dest(gate, 1, None, true, false);
         assert_eq!(
             (far.x, far.z),
             (gate.x, gate.z),
-            "crossbows far from the dest keep marching, dest={far:?}"
+            "crossbows march with dest_for, dest={far:?}"
         );
-        let near = overlay_siege_role_dest(
-            gate,
-            1,
-            MarchJob::Crossbow,
-            None,
-            10.5,
-            -8.0,
-            camp,
-            true,
-            false,
-            false,
-        );
-        assert!(
-            (near.z - gate.z).abs() >= 10 && (near.z - gate.z).abs() <= 14,
-            "crossbows hold short of the dest once they arrive, dest={near:?}"
-        );
-        let wall = overlay_siege_role_dest(
-            gate,
-            6,
-            MarchJob::Assault,
-            Some(VillagerRole::Guard),
-            4.5,
-            0.5,
-            camp,
-            true,
-            false,
-            false,
-        );
+        let wall = overlay_siege_role_dest(gate, 6, Some(VillagerRole::Guard), true, false);
         assert_eq!(wall.z, gate.z);
         assert_ne!(wall.x, gate.x);
-        let reserve = overlay_siege_role_dest(
-            gate,
-            4,
-            MarchJob::Assault,
-            Some(VillagerRole::Guard),
-            4.5,
-            0.5,
-            camp,
-            true,
-            false,
-            false,
-        );
+        let reserve = overlay_siege_role_dest(gate, 4, Some(VillagerRole::Guard), true, false);
         assert_eq!(
             (reserve.x, reserve.z),
             (gate.x, gate.z),
@@ -9254,7 +9171,6 @@ mod tests {
         assert_eq!(WALL_ARCHER_DAMAGE, 3.0);
         assert_eq!(VISUAL_ARROWS_PER_VOLLEY, 2);
         assert_eq!(LIVE_RANGED_HITS_PER_VOLLEY, 4);
-        assert_eq!(CROSSBOW_STANDOFF, 12);
     }
 
     #[test]
