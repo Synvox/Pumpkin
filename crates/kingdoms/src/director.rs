@@ -489,6 +489,12 @@ struct TownWar {
 struct Wired {
     faction: Faction,
     captain: bool,
+    x: f64,
+    y: f64,
+    z: f64,
+    raider: bool,
+    job: MarchJob,
+    role: Option<VillagerRole>,
 }
 
 /// Despawned raid body that still slides and counts toward the plate.
@@ -1105,6 +1111,26 @@ impl Director {
                         war.raiders_killed += 1;
                         if let Some(raid) = &mut war.raid {
                             raid.living.retain(|id| *id != entity_id);
+                            raid.temps.retain(|id| *id != entity_id);
+                            let keep = war.scene.keep();
+                            let dist =
+                                (wired.x - f64::from(keep.x)).hypot(wired.z - f64::from(keep.z));
+                            // Outer-ring quarry/void deaths emptied `living`
+                            // without a cull, so a one-bot capital raid ended
+                            // as "repelled". Combat deaths near the keep stay
+                            // dead.
+                            if dist > PLAYER_SIM_RANGE {
+                                raid.ghosts.push(GhostSoldier {
+                                    faction: wired.faction.clone(),
+                                    x: wired.x,
+                                    y: wired.y,
+                                    z: wired.z,
+                                    bearer: wired.captain,
+                                    raider: wired.raider,
+                                    job: wired.job,
+                                    role: wired.role,
+                                });
+                            }
                         }
                         event = Some(("raider", war.info_id.clone(), war.raiders_killed));
                     }
@@ -2700,11 +2726,18 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             war.wired.clear();
             for (entity, faction) in &snapshots {
                 let base = entity.get_entity();
+                let p = base.pos.load();
                 war.wired.insert(
                     base.entity_id,
                     Wired {
                         faction: faction.clone(),
                         captain: has_tag(base, TAG_CAPTAIN),
+                        x: p.x,
+                        y: p.y,
+                        z: p.z,
+                        raider: has_tag(base, TAG_RAIDER),
+                        job: job_of(base),
+                        role: role_from_tags(base).and_then(|s| VillagerRole::parse(&s)),
                     },
                 );
             }
