@@ -9,6 +9,7 @@ use crate::buildings::{BuildingKind, Lot};
 use crate::cells::CellKind;
 use crate::geom::{Dir, Rect};
 use crate::plan::TownPlan;
+use crate::scenes::SceneKind;
 use crate::stamp::VolumeSink;
 
 /// Result for one building envelope.
@@ -333,6 +334,12 @@ fn flags_as_floating_kind(kind: CellKind) -> bool {
             | CellKind::Weir
             | CellKind::CutStone
             | CellKind::HerbGarden
+            | CellKind::WindSail
+            | CellKind::SiegeTreb
+            | CellKind::SiegeRam
+            | CellKind::SiegeLadder
+            | CellKind::MineRail
+            | CellKind::MineSpoil
     )
 }
 
@@ -341,6 +348,7 @@ fn hangs_from_parent(
     plan: &TownPlan,
     seen: &HashSet<(i32, i32, i32)>,
     pos: (i32, i32, i32),
+    in_crop: impl Fn(i32, i32) -> bool,
 ) -> bool {
     let (x, y, z) = pos;
     FACE.iter().any(|(dx, dy, dz)| {
@@ -348,6 +356,9 @@ fn hangs_from_parent(
             let nx = x + dx * step;
             let ny = y + dy * step;
             let nz = z + dz * step;
+            if !in_crop(nx, nz) {
+                return false;
+            }
             if seen.contains(&(nx, ny, nz)) {
                 return true;
             }
@@ -373,12 +384,48 @@ fn hangs_from_parent(
 /// Hanging lanterns and similar bits must reach the roof through chain or
 /// fence in the same column. Isolated mid-air timber (cog stays, crane booms,
 /// leftover Features canopies) is a failure.
+///
+/// Scene close-up crops are checked again with out-of-crop neighbours ignored.
+/// A mill sail whose hub sits outside the crop used to pass the town-wide
+/// flood (the hub is still in the volume) and was skipped because `WindSail`
+/// was not a floating kind. That is the detached wood/snow fleck on a quarry
+/// crop: the blade is in frame, the mill is not.
 #[must_use]
 pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<String> {
     let min_z = volume.min_z.max(plan.bounds.min_z);
     let max_z = (volume.min_z + volume.sz - 1).min(plan.bounds.max_z);
     let min_x = volume.min_x.max(plan.bounds.min_x);
     let max_x = (volume.min_x + volume.sx - 1).min(plan.bounds.max_x);
+    let mut fails = floating_in_rect(plan, volume, min_x, max_x, min_z, max_z, "town");
+    for scene in &plan.scenes {
+        if !matches!(scene.kind, SceneKind::Quarry | SceneKind::SiegeCamp) {
+            continue;
+        }
+        let crop = scene.rect.inflate(4);
+        let cx0 = crop.min_x.max(volume.min_x);
+        let cx1 = crop.max_x.min(volume.min_x + volume.sx - 1);
+        let cz0 = crop.min_z.max(volume.min_z);
+        let cz1 = crop.max_z.min(volume.min_z + volume.sz - 1);
+        if cx1 < cx0 || cz1 < cz0 {
+            continue;
+        }
+        let tag = format!("{:?} crop", scene.kind);
+        fails.extend(floating_in_rect(plan, volume, cx0, cx1, cz0, cz1, &tag));
+    }
+    fails.truncate(48);
+    fails
+}
+
+fn floating_in_rect(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    min_x: i32,
+    max_x: i32,
+    min_z: i32,
+    max_z: i32,
+    tag: &str,
+) -> Vec<String> {
+    let in_crop = |x: i32, z: i32| x >= min_x && x <= max_x && z >= min_z && z <= max_z;
     let mut above = HashSet::new();
     let mut seeds = VecDeque::new();
     for z in min_z..=max_z {
@@ -399,6 +446,9 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
                     let nx = x + dx;
                     let ny = y + dy;
                     let nz = z + dz;
+                    if !in_crop(nx, nz) {
+                        return false;
+                    }
                     let Some(nstate) = volume.get(nx, ny, nz) else {
                         return false;
                     };
@@ -435,7 +485,9 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
         let hanging: Vec<(i32, i32, i32)> = above
             .iter()
             .copied()
-            .filter(|pos| !seen.contains(pos) && hangs_from_parent(volume, plan, &seen, *pos))
+            .filter(|pos| {
+                !seen.contains(pos) && hangs_from_parent(volume, plan, &seen, *pos, in_crop)
+            })
             .collect();
         for pos in hanging {
             if seen.insert(pos) {
@@ -461,7 +513,7 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
         return Vec::new();
     }
     let mut fails = Vec::new();
-    while fails.len() < 32 {
+    while fails.len() < 16 {
         let Some(start) = leftover.iter().copied().next() else {
             break;
         };
@@ -486,15 +538,12 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
             continue;
         }
         let name = block.map_or("block", |b| b.name);
-        let where_ = plan
-            .scene_at(x, z)
-            .map_or_else(|| "town".to_string(), |scene| format!("{:?}", scene.kind));
         fails.push(format!(
-            "{where_} floating {size}-block fragment at {x},{y},{z} ({name}) kind={kind:?}"
+            "{tag} floating {size}-block fragment at {x},{y},{z} ({name}) kind={kind:?}"
         ));
     }
     if !leftover.is_empty() {
-        fails.push(format!("{} more floating blocks", leftover.len()));
+        fails.push(format!("{tag} {} more floating blocks", leftover.len()));
     }
     fails
 }

@@ -1164,10 +1164,12 @@ fn place_tent(
     z: i32,
     palette: &Palette,
 ) {
-    if plan
-        .scene_at(x, z)
-        .is_some_and(|scene| scene.kind == crate::scenes::SceneKind::Tourney)
-    {
+    if plan.scene_at(x, z).is_some_and(|scene| {
+        matches!(
+            scene.kind,
+            crate::scenes::SceneKind::Tourney | crate::scenes::SceneKind::SiegeCamp
+        )
+    }) {
         place_tourney_pavilion(sink, plan, x, ground, z, palette);
         return;
     }
@@ -1192,6 +1194,20 @@ fn place_camp_court(
         sink.put(x, ground, z, Block::SPRUCE_LOG.default_state);
         sink.put(x, ground + 1, z, Block::SPRUCE_FENCE.default_state);
         clear_above(sink, x, ground + 2, ground + 6, z);
+        return;
+    }
+    if plan
+        .scene_at(x, z)
+        .is_some_and(|scene| scene.kind == crate::scenes::SceneKind::Quarry)
+    {
+        place_quarry_pit(sink, plan, x, ground, z, palette);
+        return;
+    }
+    if plan
+        .scene_at(x, z)
+        .is_some_and(|scene| scene.kind == crate::scenes::SceneKind::SiegeCamp)
+    {
+        place_siege_cook(sink, plan, x, ground, z, palette);
         return;
     }
     sink.put(x, ground, z, palette.path);
@@ -1225,6 +1241,103 @@ fn place_camp_court(
         sink.put(x, ground + 1, z, Block::DARK_OAK_FENCE.default_state);
         sink.put(x, ground + 2, z, Block::DARK_OAK_FENCE.default_state);
         sink.put(x, ground + 3, z, Block::BLACK_BANNER.default_state);
+    }
+}
+
+fn place_quarry_pit(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let pit = blob_of(plan, x, z, CellKind::CampCourt);
+    let downhill = crate::scenes::quarry_downhill(&plan.heights, pit);
+    let (cx, cz) = pit.center();
+    let cheb = (x - cx).abs().max((z - cz).abs());
+    let max_c = (pit.width().max(pit.depth()) / 2).max(1);
+    let bench = ((max_c - cheb) * 4 / max_c).clamp(0, 4);
+    let on_ramp = match downhill {
+        Dir::South | Dir::North => (x - cx).abs() <= 1,
+        Dir::East | Dir::West => (z - cz).abs() <= 1,
+    };
+    let cut = if on_ramp {
+        let span = match downhill {
+            Dir::South | Dir::North => pit.depth(),
+            Dir::East | Dir::West => pit.width(),
+        }
+        .max(1);
+        let from_uphill = match downhill {
+            Dir::South => z - pit.min_z,
+            Dir::North => pit.max_z - z,
+            Dir::East => x - pit.min_x,
+            Dir::West => pit.max_x - x,
+        };
+        (from_uphill * 10 / span).clamp(2, 10)
+    } else {
+        bench * 2 + 2
+    };
+    let floor = ground - cut;
+    let stone = match bench {
+        0 => palette.cobble,
+        1 => palette.andesite,
+        2 => palette.bricks,
+        3 => palette.mossy_bricks,
+        _ => Block::STONE.default_state,
+    };
+    sink.put(x, floor.saturating_sub(1), z, palette.andesite);
+    sink.put(x, floor, z, stone);
+    if on_ramp {
+        if cut > 0 && (x + z) & 1 == 0 {
+            sink.put(
+                x,
+                floor + 1,
+                z,
+                stair_state(palette.cobble_stairs, downhill),
+            );
+            sink.put(x, floor + 2, z, Block::RAIL.default_state);
+        } else {
+            sink.put(x, floor + 1, z, Block::RAIL.default_state);
+            if (x + z).rem_euclid(6) == 0 {
+                sink.put(x, floor + 2, z, Block::CHEST.default_state);
+            }
+        }
+        clear_above(sink, x, floor + 3, ground + 8, z);
+    } else {
+        clear_above(sink, x, floor + 1, ground + 8, z);
+    }
+}
+
+fn place_siege_cook(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let blob = blob_of(plan, x, z, CellKind::CampCourt);
+    let (cx, cz) = blob.center();
+    sink.put(x, ground, z, palette.cobble);
+    clear_above(sink, x, ground + 1, ground + 6, z);
+    if x == cx && z == cz {
+        sink.put(x, ground + 1, z, Block::CAMPFIRE.default_state);
+        return;
+    }
+    if (x - cx).abs() + (z - cz).abs() == 1 && x == cx {
+        sink.put(x, ground + 1, z, Block::CAULDRON.default_state);
+        return;
+    }
+    if blob.is_corner(x, z) {
+        sink.put(x, ground + 1, z, Block::OAK_FENCE.default_state);
+        sink.put(x, ground + 2, z, Block::OAK_TRAPDOOR.default_state);
+        return;
+    }
+    if (x + z) & 1 == 0 {
+        sink.put(x, ground + 1, z, Block::HAY_BLOCK.default_state);
+    } else {
+        sink.put(x, ground + 1, z, Block::BARREL.default_state);
     }
 }
 
@@ -1515,6 +1628,12 @@ fn place_ridge_tent(
         }
         if war && rect.is_corner(x, z) {
             sink.put(x, ground + h + 1, z, Block::BLACK_BANNER.default_state);
+            if plan
+                .scene_at(x, z)
+                .is_some_and(|scene| scene.kind == crate::scenes::SceneKind::SiegeCamp)
+            {
+                sink.put(x, ground + h + 2, z, Block::RED_BANNER.default_state);
+            }
         }
     }
     for y in ground + 1..=ground + h {
@@ -1582,6 +1701,35 @@ fn place_palisade_gate(
     }
 }
 
+fn treb_counterweight_at_min(plan: &TownPlan, rect: Rect, along_x: bool) -> bool {
+    let (ax, az) = if along_x {
+        (rect.min_x, (rect.min_z + rect.max_z) / 2)
+    } else {
+        ((rect.min_x + rect.max_x) / 2, rect.min_z)
+    };
+    let (bx, bz) = if along_x {
+        (rect.max_x, (rect.min_z + rect.max_z) / 2)
+    } else {
+        ((rect.min_x + rect.max_x) / 2, rect.max_z)
+    };
+    treb_palisade_dist(plan, ax, az) <= treb_palisade_dist(plan, bx, bz)
+}
+
+fn treb_palisade_dist(plan: &TownPlan, x: i32, z: i32) -> i32 {
+    let mut best = 64;
+    for dz in -16..=16 {
+        for dx in -16..=16 {
+            if matches!(
+                plan.occ.kind(x + dx, z + dz),
+                CellKind::Palisade | CellKind::PalisadeGate | CellKind::PalisadeWalk
+            ) {
+                best = best.min(dx.abs().max(dz.abs()));
+            }
+        }
+    }
+    best
+}
+
 fn place_trebuchet(
     sink: &mut impl BlockSink,
     plan: &TownPlan,
@@ -1591,34 +1739,63 @@ fn place_trebuchet(
     palette: &Palette,
 ) {
     sink.put(x, ground, z, palette.cobble);
+    clear_above(sink, x, ground + 1, ground + 12, z);
     let rect = blob_of(plan, x, z, CellKind::SiegeTreb);
     let along_x = rect.width() >= rect.depth();
-    let (cx, cz) = rect.center();
-    let corner = rect.is_corner(x, z);
-    if corner {
-        for y in ground + 1..=ground + 8 {
-            sink.put(x, y, z, Block::DARK_OAK_LOG.default_state);
+    let span = if along_x { rect.width() } else { rect.depth() };
+    let across = if along_x { rect.depth() } else { rect.width() };
+    let t_from_min = if along_x {
+        x - rect.min_x
+    } else {
+        z - rect.min_z
+    };
+    let t = if treb_counterweight_at_min(plan, rect, along_x) {
+        t_from_min
+    } else {
+        span - 1 - t_from_min
+    };
+    let a = if along_x {
+        z - rect.min_z
+    } else {
+        x - rect.min_x
+    };
+    let a_mid = across / 2;
+    let pivot = (span / 3).clamp(2, (span - 4).max(2));
+    let mast = ground + 8;
+    let log = Block::DARK_OAK_LOG.default_state;
+    let on_leg = a == 0 || a == across - 1;
+    let on_keel = a == a_mid;
+    if on_leg && (t - pivot).abs() <= 1 {
+        let h = mast - (t - pivot).abs() * 2;
+        for y in ground + 1..=h {
+            sink.put(x, y, z, log);
         }
-    } else if rect.on_edge(x, z) {
-        sink.put(x, ground + 2, z, Block::DARK_OAK_LOG.default_state);
-        sink.put(x, ground + 5, z, Block::DARK_OAK_FENCE.default_state);
     }
-    let on_arm = if along_x { z == cz } else { x == cx };
-    if on_arm {
-        let t = if along_x {
-            x - rect.min_x
-        } else {
-            z - rect.min_z
-        };
-        let span = if along_x { rect.width() } else { rect.depth() };
-        let arm_y = ground + 8;
-        sink.put(x, arm_y, z, Block::DARK_OAK_LOG.default_state);
-        if t <= 1 {
-            sink.put(x, arm_y - 1, z, palette.cobble);
-            sink.put(x, arm_y - 2, z, Block::ANVIL.default_state);
+    if on_keel {
+        sink.put(x, mast, z, log);
+        if t == pivot {
+            for y in ground + 1..=mast + 2 {
+                sink.put(x, y, z, log);
+            }
+            sink.put(x, mast + 3, z, Block::LANTERN.default_state);
+        } else if t <= 1 {
+            for y in (mast - 3)..mast {
+                sink.put(x, y, z, palette.cobble);
+            }
+            sink.put(x, mast - 4, z, palette.planks);
+            sink.put(x, mast + 1, z, palette.planks);
         } else if t >= span - 2 {
-            sink.put(x, arm_y + 1, z, Block::DARK_OAK_FENCE.default_state);
-            sink.put(x, arm_y + 2, z, Block::DARK_OAK_FENCE.default_state);
+            sink.put(x, mast + 1, z, Block::DARK_OAK_FENCE.default_state);
+            sink.put(x, mast + 2, z, Block::DARK_OAK_FENCE.default_state);
+            for dy in 1..=4 {
+                sink.put(x, mast - dy, z, Block::IRON_CHAIN.default_state);
+            }
+            sink.put(x, mast - 5, z, palette.cobble);
+        } else if t > pivot {
+            sink.put(x, mast + 1, z, log);
+        } else {
+            sink.put(x, mast - 1, z, Block::DARK_OAK_FENCE.default_state);
+            sink.put(x, mast - 2, z, Block::DARK_OAK_FENCE.default_state);
         }
     }
 }
@@ -2332,6 +2509,19 @@ fn place_mine_spoil(
     z: i32,
     palette: &Palette,
 ) {
+    if plan
+        .scene_at(x, z)
+        .is_some_and(|scene| scene.kind == crate::scenes::SceneKind::SiegeCamp)
+    {
+        sink.put(x, ground, z, Block::COARSE_DIRT.default_state);
+        sink.put(x, ground + 1, z, Block::DIRT.default_state);
+        sink.put(x, ground + 2, z, palette.grass);
+        if (x + z) % 4 == 0 {
+            sink.put(x, ground + 2, z, palette.cobble);
+        }
+        clear_above(sink, x, ground + 3, ground + 6, z);
+        return;
+    }
     let mix = (x.wrapping_mul(9) + z.wrapping_mul(5) + plan.seed as i32).unsigned_abs();
     let h = 1 + (mix % 3) as i32;
     for y in ground..=ground + h {
@@ -5981,6 +6171,75 @@ fn crane_pad(plan: &TownPlan, x: i32, z: i32) -> i32 {
     pad
 }
 
+fn quarry_crane_boom_dir(plan: &TownPlan, x: i32, z: i32) -> Dir {
+    let mut best = Dir::South;
+    let mut best_d = i32::MAX;
+    for dir in Dir::ALL {
+        for dist in 1..=8 {
+            let nx = x + dir.dx() * dist;
+            let nz = z + dir.dz() * dist;
+            if plan.occ.kind(nx, nz) == CellKind::CampCourt && dist < best_d {
+                best_d = dist;
+                best = dir;
+                break;
+            }
+        }
+    }
+    best
+}
+
+fn place_quarry_crane(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let y = ground;
+    let pad = crane_pad(plan, x, z);
+    let boom = quarry_crane_boom_dir(plan, x, z);
+    sink.put(x, y, z, Block::STONE_BRICKS.default_state);
+    sink.put(x, y + 1, z, palette.cobble);
+    clear_above(sink, x, y + 2, y + 14, z);
+    let log = Block::OAK_LOG.default_state;
+    if pad >= 8 {
+        for h in 2..=10 {
+            sink.put(x, y + h, z, log);
+        }
+        sink.put(x, y + 11, z, Block::OAK_FENCE.default_state);
+        sink.put(x, y + 12, z, Block::LANTERN.default_state);
+        return;
+    }
+    let back = boom.opposite();
+    let toward_mast = plan.occ.kind(x + back.dx(), z + back.dz()) == CellKind::Crane
+        && crane_pad(plan, x + back.dx(), z + back.dz()) >= 8;
+    let toward_tip = plan.occ.kind(x + boom.dx(), z + boom.dz()) == CellKind::Crane
+        && crane_pad(plan, x + back.dx() * 2, z + back.dz() * 2) >= 8;
+    if toward_mast {
+        sink.put(x, y + 4, z, Block::OAK_FENCE.default_state);
+        sink.put(x, y + 5, z, Block::OAK_FENCE.default_state);
+        sink.put(x, y + 6, z, Block::OAK_FENCE.default_state);
+        sink.put(x, y + 8, z, log);
+        sink.put(x, y + 9, z, log);
+        sink.put(x, y + 10, z, log);
+        return;
+    }
+    if toward_tip {
+        sink.put(x, y + 8, z, log);
+        sink.put(x, y + 9, z, log);
+        for dy in 1..=5 {
+            sink.put(x, y + 8 - dy, z, Block::IRON_CHAIN.default_state);
+        }
+        sink.put(x, y + 2, z, Block::IRON_BARS.default_state);
+        sink.put(x, y + 1, z, palette.bricks);
+        return;
+    }
+    sink.put(x, y + 4, z, Block::OAK_FENCE.default_state);
+    sink.put(x, y + 5, z, Block::OAK_FENCE.default_state);
+    sink.put(x, y + 6, z, Block::OAK_TRAPDOOR.default_state);
+}
+
 fn place_crane(
     sink: &mut impl BlockSink,
     plan: &TownPlan,
@@ -5990,6 +6249,13 @@ fn place_crane(
     sea: i32,
     palette: &Palette,
 ) {
+    if plan
+        .scene_at(x, z)
+        .is_some_and(|scene| scene.kind == crate::scenes::SceneKind::Quarry)
+    {
+        place_quarry_crane(sink, plan, x, ground, z, palette);
+        return;
+    }
     let y = ground.max(sea);
     let pad = crane_pad(plan, x, z);
     sink.put(x, y, z, Block::STONE_BRICKS.default_state);
