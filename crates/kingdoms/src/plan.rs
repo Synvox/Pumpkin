@@ -37,7 +37,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 22;
+pub const PLAN_CACHE_VERSION: u32 = 23;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -2061,6 +2061,9 @@ fn paint_poi_roads(
         SceneKind::TollBridge,
         SceneKind::RuinedAbbey,
         SceneKind::CastleRuin,
+        SceneKind::WalledMarket,
+        SceneKind::MillHamlet,
+        SceneKind::Beacon,
     ];
     for scene in scenes.iter().filter(|scene| kinds.contains(&scene.kind)) {
         let Some(start) = poi_road_anchor(occ, grid, scene) else {
@@ -2130,6 +2133,7 @@ fn poi_road_anchor(occ: &Occupancy, grid: &HeightGrid, scene: &Scene) -> Option<
                         | CellKind::Road
                         | CellKind::CampCourt
                         | CellKind::Eave
+                        | CellKind::Beacon
                 )
             {
                 return Some((x, z));
@@ -2171,15 +2175,16 @@ fn paint_country_path(
             CellKind::Road
         };
         stamp_country_road_cell(occ, overlay, grid, x, z, stair);
+        if !grid.is_dry(x, z) {
+            continue;
+        }
         for dir in Dir::ALL {
-            stamp_country_road_cell(
-                occ,
-                overlay,
-                grid,
-                x + dir.dx(),
-                z + dir.dz(),
-                CellKind::Road,
-            );
+            let rx = x + dir.dx();
+            let rz = z + dir.dz();
+            if !grid.is_dry(rx, rz) {
+                continue;
+            }
+            stamp_country_road_cell(occ, overlay, grid, rx, rz, CellKind::Road);
         }
     }
     if let Some(&(x, z)) = path.last() {
@@ -2200,7 +2205,13 @@ fn place_roadside_markers(occ: &mut Occupancy, grid: &HeightGrid, path: &[(i32, 
             }
             let kind = occ.kind(nx, nz);
             if matches!(kind, CellKind::Empty | CellKind::Green | CellKind::Farm) {
-                if i % 84 == 21 {
+                let high = grid.height(nx, nz) >= grid.height(x, z)
+                    && Dir::ALL
+                        .iter()
+                        .all(|n| grid.height(nx + n.dx(), nz + n.dz()) <= grid.height(nx, nz));
+                if high && i % 84 == 21 {
+                    paint_roadside_beacon(occ, nx, nz);
+                } else if i % 84 == 21 {
                     occ.set(nx, nz, CellKind::Shrine, true);
                 } else {
                     occ.set(nx, nz, CellKind::FieldWall, true);
@@ -2208,6 +2219,31 @@ fn place_roadside_markers(occ: &mut Occupancy, grid: &HeightGrid, path: &[(i32, 
                 break;
             }
         }
+    }
+}
+
+fn paint_roadside_beacon(occ: &mut Occupancy, x: i32, z: i32) {
+    let pad = Rect::new(x - 1, z - 1, x + 1, z + 1);
+    let mut clear = true;
+    for zz in pad.min_z..=pad.max_z {
+        for xx in pad.min_x..=pad.max_x {
+            if !occ.bounds.contains(xx, zz) {
+                clear = false;
+                break;
+            }
+            if !matches!(
+                occ.kind(xx, zz),
+                CellKind::Empty | CellKind::Green | CellKind::Farm | CellKind::FarmEdge
+            ) {
+                clear = false;
+                break;
+            }
+        }
+    }
+    if clear {
+        occ.fill(pad, CellKind::Beacon, true);
+    } else {
+        occ.set(x, z, CellKind::Beacon, true);
     }
 }
 
@@ -3804,7 +3840,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 22);
+        assert_eq!(PLAN_CACHE_VERSION, 23);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -3842,8 +3878,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 22;
-    const PLAN_LAYOUT_HASH: u64 = 0x4c03_4713_2b60_0bbc;
+    const PLAN_LAYOUT_VERSION: u32 = 23;
+    const PLAN_LAYOUT_HASH: u64 = 0x4da4_60b5_3e14_f593;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

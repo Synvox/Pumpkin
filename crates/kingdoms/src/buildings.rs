@@ -110,7 +110,12 @@ impl BuildingKind {
     pub const fn timber_frame(self) -> bool {
         matches!(
             self,
-            Self::Cottage | Self::Timber | Self::Townhouse | Self::Tavern | Self::Longhouse
+            Self::Cottage
+                | Self::Timber
+                | Self::Townhouse
+                | Self::Tavern
+                | Self::Longhouse
+                | Self::Watermill
         )
     }
 }

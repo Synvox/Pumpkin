@@ -945,7 +945,7 @@ mod tests {
         let scene = scene();
         let mut sim = SiegeSim::from_scene(&scene, 50, 50);
         assert_eq!(sim.entities.len(), 100);
-        let report = sim.run(400, 50);
+        let report = sim.run(600, 50);
         assert_eq!(report.defenders, 50);
         assert_eq!(report.raiders, 50);
         assert!(report.ms_per_tick < 50.0, "ms/tick {}", report.ms_per_tick);

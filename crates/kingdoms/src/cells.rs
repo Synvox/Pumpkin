@@ -158,6 +158,8 @@ pub enum CellKind {
     LootPile,
     /// Parked cart or wagon in a coaching yard.
     Wagon,
+    /// Hilltop beacon brazier or roadside watch-fire.
+    Beacon,
 }
 
 impl CellKind {
