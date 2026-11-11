@@ -154,6 +154,8 @@ pub enum CellKind {
     StandingStone,
     /// Crossroads gallows post.
     Gallows,
+    /// Bandit loot pile of chests and barrels.
+    LootPile,
 }
 
 impl CellKind {

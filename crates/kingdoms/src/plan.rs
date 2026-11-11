@@ -37,7 +37,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 19;
+pub const PLAN_CACHE_VERSION: u32 = 21;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -445,18 +445,16 @@ impl TownPlan {
             .find(|scene| scene.rect.contains(x, z))
     }
 
-    /// True inside any scene footprint plus [`crate::scenes::SCENE_YARD_MARGIN`].
-    /// Frontier yards take [`crate::scenes::FRONTIER_TREE_MARGIN`] extra so
-    /// hanging Features canopies do not float over the curtain crop.
+    /// True inside any scene footprint plus [`crate::scenes::scene_tree_margin`].
+    /// Frontier and ruin yards take extra so hanging Features canopies do
+    /// not float over the close-up crop.
     #[must_use]
     pub fn in_scene_yard(&self, x: i32, z: i32) -> bool {
         self.scenes.iter().any(|scene| {
-            let extra = if scene.kind == crate::scenes::SceneKind::Frontier {
-                crate::scenes::SCENE_YARD_MARGIN + crate::scenes::FRONTIER_TREE_MARGIN
-            } else {
-                crate::scenes::SCENE_YARD_MARGIN
-            };
-            scene.rect.inflate(extra).contains(x, z)
+            scene
+                .rect
+                .inflate(crate::scenes::scene_tree_margin(scene.kind))
+                .contains(x, z)
         })
     }
 
@@ -3596,7 +3594,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 19);
+        assert_eq!(PLAN_CACHE_VERSION, 21);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -3634,8 +3632,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 19;
-    const PLAN_LAYOUT_HASH: u64 = 0x29f0_fe06_4444_21e2;
+    const PLAN_LAYOUT_VERSION: u32 = 21;
+    const PLAN_LAYOUT_HASH: u64 = 0x7538_57ea_2698_d90f;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

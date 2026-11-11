@@ -343,7 +343,8 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             | SceneKind::MountainFortress
             | SceneKind::HermitTower
             | SceneKind::BanditHideout
-            | SceneKind::CastleRuin => {
+            | SceneKind::CastleRuin
+            | SceneKind::TollBridge => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));
             }
@@ -360,7 +361,9 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             | SceneKind::LumberCamp
             | SceneKind::Extramural
             | SceneKind::RuinedAbbey
-            | SceneKind::StoneCircle => {
+            | SceneKind::StoneCircle
+            | SceneKind::CharcoalCamp
+            | SceneKind::RoadsideInn => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::Workstation, cx, cz));
             }

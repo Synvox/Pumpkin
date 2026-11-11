@@ -219,6 +219,9 @@ fn planned_timber(kind: CellKind) -> bool {
             | CellKind::Shrine
             | CellKind::FieldWall
             | CellKind::Green
+            | CellKind::Gallows
+            | CellKind::StandingStone
+            | CellKind::LootPile
     )
 }
 
@@ -260,6 +263,229 @@ fn nearby_leaves(volume: &VolumeSink, x: i32, y: i32, z: i32) -> bool {
         }
     }
     false
+}
+
+const FACE: [(i32, i32, i32); 6] = [
+    (1, 0, 0),
+    (-1, 0, 0),
+    (0, 1, 0),
+    (0, -1, 0),
+    (0, 0, 1),
+    (0, 0, -1),
+];
+const PARENT_GAP: i32 = 2;
+
+fn is_water_block(state: &pumpkin_data::BlockState) -> bool {
+    Block::from_state_id(state.id).id == Block::WATER.id
+}
+
+fn is_hanging_decoration(id: pumpkin_data::BlockId) -> bool {
+    id == Block::LANTERN.id
+        || id == Block::SOUL_LANTERN.id
+        || id == Block::RED_BANNER.id
+        || id == Block::BLACK_BANNER.id
+        || id == Block::WHITE_BANNER.id
+        || id == Block::IRON_CHAIN.id
+        || id == Block::OAK_HANGING_SIGN.id
+        || id == Block::TORCH.id
+        || id == Block::WALL_TORCH.id
+}
+
+fn flags_as_floating_kind(kind: CellKind) -> bool {
+    matches!(
+        kind,
+        CellKind::Empty
+            | CellKind::Green
+            | CellKind::Farm
+            | CellKind::FarmEdge
+            | CellKind::Orchard
+            | CellKind::Pasture
+            | CellKind::Grave
+            | CellKind::Hedge
+            | CellKind::Ship
+            | CellKind::Boat
+            | CellKind::Crane
+            | CellKind::Ruin
+            | CellKind::Palisade
+            | CellKind::PalisadeWalk
+            | CellKind::PalisadeGate
+            | CellKind::Tent
+            | CellKind::WarTent
+            | CellKind::CampCourt
+            | CellKind::WatchPost
+            | CellKind::LootPile
+            | CellKind::Cage
+            | CellKind::SiegeTrench
+            | CellKind::Gallows
+            | CellKind::StandingStone
+            | CellKind::Shrine
+            | CellKind::FieldWall
+            | CellKind::Plaza
+            | CellKind::Fountain
+    )
+}
+
+fn hangs_from_parent(
+    volume: &VolumeSink,
+    plan: &TownPlan,
+    seen: &HashSet<(i32, i32, i32)>,
+    pos: (i32, i32, i32),
+) -> bool {
+    let (x, y, z) = pos;
+    FACE.iter().any(|(dx, dy, dz)| {
+        for step in 1..=PARENT_GAP {
+            let nx = x + dx * step;
+            let ny = y + dy * step;
+            let nz = z + dz * step;
+            if seen.contains(&(nx, ny, nz)) {
+                return true;
+            }
+            let Some(state) = volume.get(nx, ny, nz) else {
+                return false;
+            };
+            if is_water_block(state) {
+                return true;
+            }
+            if ny < plan.heights.height(nx, nz) && !state.is_air() {
+                return true;
+            }
+            if !state.is_air() {
+                return false;
+            }
+        }
+        false
+    })
+}
+
+/// Solids not 6-connected to terrain, water, or a grounded parent structure.
+///
+/// Hanging lanterns and similar bits must reach the roof through chain or
+/// fence in the same column. Isolated mid-air timber (cog stays, crane booms,
+/// leftover Features canopies) is a failure.
+#[must_use]
+pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<String> {
+    let min_z = volume.min_z.max(plan.bounds.min_z);
+    let max_z = (volume.min_z + volume.sz - 1).min(plan.bounds.max_z);
+    let min_x = volume.min_x.max(plan.bounds.min_x);
+    let max_x = (volume.min_x + volume.sx - 1).min(plan.bounds.max_x);
+    let mut above = HashSet::new();
+    let mut seeds = VecDeque::new();
+    for z in min_z..=max_z {
+        for x in min_x..=max_x {
+            let ground = plan.heights.height(x, z) - 1;
+            for y in volume.min_y..volume.min_y + volume.sy {
+                let Some(state) = volume.get(x, y, z) else {
+                    continue;
+                };
+                if state.is_air() || is_water_block(state) {
+                    continue;
+                }
+                if y <= ground {
+                    continue;
+                }
+                above.insert((x, y, z));
+                let supported = FACE.iter().any(|(dx, dy, dz)| {
+                    let nx = x + dx;
+                    let ny = y + dy;
+                    let nz = z + dz;
+                    let Some(nstate) = volume.get(nx, ny, nz) else {
+                        return false;
+                    };
+                    if nstate.is_air() {
+                        return false;
+                    }
+                    is_water_block(nstate) || ny < plan.heights.height(nx, nz)
+                });
+                if supported {
+                    seeds.push_back((x, y, z));
+                }
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    while let Some(pos) = seeds.pop_front() {
+        if !seen.insert(pos) {
+            continue;
+        }
+        let (x, y, z) = pos;
+        for (dx, dy, dz) in FACE {
+            let next = (x + dx, y + dy, z + dz);
+            if above.contains(&next) && !seen.contains(&next) {
+                seeds.push_back(next);
+            }
+        }
+    }
+    // One or two air of gap still counts as hanging from the parent
+    // structure (lanterns, banners, mill sails, jettied eaves). Isolated
+    // mid-air timber several blocks out does not.
+    let mut grew = true;
+    while grew {
+        grew = false;
+        let hanging: Vec<(i32, i32, i32)> = above
+            .iter()
+            .copied()
+            .filter(|pos| !seen.contains(pos) && hangs_from_parent(volume, plan, &seen, *pos))
+            .collect();
+        for pos in hanging {
+            if seen.insert(pos) {
+                grew = true;
+                let mut q = VecDeque::from([pos]);
+                while let Some((x, y, z)) = q.pop_front() {
+                    for (dx, dy, dz) in FACE {
+                        let next = (x + dx, y + dy, z + dz);
+                        if above.contains(&next) && seen.insert(next) {
+                            q.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut leftover: HashSet<(i32, i32, i32)> = above
+        .difference(&seen)
+        .copied()
+        .filter(|&(x, _, z)| flags_as_floating_kind(plan.occ.kind(x, z)))
+        .collect();
+    if leftover.is_empty() {
+        return Vec::new();
+    }
+    let mut fails = Vec::new();
+    while fails.len() < 32 {
+        let Some(start) = leftover.iter().copied().next() else {
+            break;
+        };
+        leftover.remove(&start);
+        let mut size = 1;
+        let mut stack = vec![start];
+        while let Some((x, y, z)) = stack.pop() {
+            for (dx, dy, dz) in FACE {
+                let next = (x + dx, y + dy, z + dz);
+                if leftover.remove(&next) {
+                    size += 1;
+                    stack.push(next);
+                }
+            }
+        }
+        let (x, y, z) = start;
+        let kind = plan.occ.kind(x, z);
+        let block = volume
+            .get(x, y, z)
+            .map(|state| Block::from_state_id(state.id));
+        if size <= 2 && block.is_some_and(|b| is_hanging_decoration(b.id)) {
+            continue;
+        }
+        let name = block.map_or("block", |b| b.name);
+        let where_ = plan
+            .scene_at(x, z)
+            .map_or_else(|| "town".to_string(), |scene| format!("{:?}", scene.kind));
+        fails.push(format!(
+            "{where_} floating {size}-block fragment at {x},{y},{z} ({name}) kind={kind:?}"
+        ));
+    }
+    if !leftover.is_empty() {
+        fails.push(format!("{} more floating blocks", leftover.len()));
+    }
+    fails
 }
 
 /// Runs the flood-fill and roof-support checks for every roofed building.
@@ -1691,6 +1917,12 @@ mod tests {
         );
         let plan = build_plan(314_159, origin, grid, PaletteKind::Sandstone);
         let volume = fill_volume(&plan);
+        let floating = check_floating_fragments(&plan, &volume);
+        assert!(
+            floating.is_empty(),
+            "desert floating fragments:\n{}",
+            floating.join("\n")
+        );
         let check = check_town(&plan, &volume);
         let desert_fails: Vec<_> = check
             .failures()
@@ -1799,6 +2031,12 @@ mod tests {
         let volume = fill_volume(&plan);
         let fails = check_scene_vegetation(&plan, &volume);
         assert!(fails.is_empty(), "scene vegetation:\n{}", fails.join("\n"));
+        let floating = check_floating_fragments(&plan, &volume);
+        assert!(
+            floating.is_empty(),
+            "floating fragments:\n{}",
+            floating.join("\n")
+        );
     }
 
     #[test]
@@ -1896,14 +2134,17 @@ mod tests {
         );
         let volume = crate::chunk_fill::fill_volume_from_chunks_in(&plan, &world_gen, region);
         let mut fails = check_scene_vegetation(&plan, &volume);
-        for scene in plan
-            .scenes
-            .iter()
-            .filter(|scene| scene.kind == crate::scenes::SceneKind::Frontier)
-        {
+        for scene in plan.scenes.iter().filter(|scene| {
+            matches!(
+                scene.kind,
+                crate::scenes::SceneKind::Frontier
+                    | crate::scenes::SceneKind::CastleRuin
+                    | crate::scenes::SceneKind::RuinedAbbey
+            )
+        }) {
             let pad = scene
                 .rect
-                .inflate(crate::scenes::SCENE_YARD_MARGIN + crate::scenes::FRONTIER_TREE_MARGIN);
+                .inflate(crate::scenes::scene_tree_margin(scene.kind));
             let front = crate::chunk_fill::fill_volume_from_chunks_in(&plan, &world_gen, pad);
             fails.extend(check_scene_vegetation(&plan, &front));
         }
