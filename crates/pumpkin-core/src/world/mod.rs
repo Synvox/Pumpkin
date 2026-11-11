@@ -1519,52 +1519,6 @@ impl World {
         self.play_sound_expect(player, sound, category, &new_vec);
     }
 
-    /// Full vanilla mob tick within this player distance.
-    const VANILLA_FULL_RANGE: f64 = 16.0;
-    /// 5 Hz vanilla tick out to this, then 1 Hz beyond.
-    const VANILLA_SIM_RANGE: f64 = 32.0;
-    const VANILLA_FAR_PERIOD: u32 = 20;
-
-    fn nearest_player_xz(x: f64, z: f64, players: &[(f64, f64)]) -> Option<f64> {
-        let mut best: Option<f64> = None;
-        for &(px, pz) in players {
-            let d = (px - x).hypot(pz - z);
-            best = Some(best.map_or(d, |b| b.min(d)));
-        }
-        best
-    }
-
-    /// Skip vanilla living ticks when no player is close enough to notice.
-    /// Near-player bodies still tick every tick; 32–64 is 5 Hz, beyond is 1 Hz.
-    fn skip_vanilla_activation(nearest_xz: Option<f64>, tick_count: i32) -> bool {
-        let d = nearest_xz.unwrap_or(f64::INFINITY);
-        if d <= Self::VANILLA_FULL_RANGE {
-            return false;
-        }
-        let n = tick_count.unsigned_abs();
-        if d <= Self::VANILLA_SIM_RANGE {
-            !n.is_multiple_of(crate::entity::mob::MobEntity::SPARSE_TICK_PERIOD)
-        } else {
-            !n.is_multiple_of(Self::VANILLA_FAR_PERIOD)
-        }
-    }
-
-    fn should_skip_entity_tick(entity: &dyn EntityBase, player_xz: &[(f64, f64)]) -> bool {
-        let inner = entity.get_entity();
-        if inner.entity_type == &EntityType::PLAYER {
-            return false;
-        }
-        let Some(mob) = entity.get_mob() else {
-            return false;
-        };
-        if mob.get_mob_entity().skip_sparse_vanilla_tick() {
-            return true;
-        }
-        let pos = inner.pos.load();
-        let nearest = Self::nearest_player_xz(pos.x, pos.z, player_xz);
-        Self::skip_vanilla_activation(nearest, inner.tick_count.load(Relaxed))
-    }
-
     #[expect(clippy::too_many_lines)]
     pub fn tick(self: &Arc<Self>, server: &Arc<Server>) {
         let start = std::time::Instant::now();
@@ -1633,11 +1587,6 @@ impl World {
         let level_for_entities = self.level.clone();
         let entity_handle = handle.clone();
 
-        let player_xz: Vec<(f64, f64)> = players_cache
-            .iter()
-            .map(|(_, pos, _, _)| (pos.x, pos.z))
-            .collect();
-
         let t_entities = std::time::Instant::now();
         let tickable: Vec<_> = entities_to_tick
             .par_iter()
@@ -1651,10 +1600,6 @@ impl World {
                     return None;
                 }
                 if !level_for_entities.is_chunk_loaded(&entity_chunk) {
-                    return None;
-                }
-                entity.get_entity().tick_count.fetch_add(1, Relaxed);
-                if Self::should_skip_entity_tick(entity.as_ref(), &player_xz) {
                     return None;
                 }
                 Some((entity, entity_chunk))
@@ -1729,6 +1674,13 @@ impl World {
             let (entity, entity_chunk) = &tickable[index];
             order::set_entity_order(Some(first_order + index as u64 * order::ORDERS_PER_ENTITY));
 
+            entity.get_entity().tick_count.fetch_add(1, Relaxed);
+            let sparse = entity
+                .get_mob()
+                .is_some_and(|mob| mob.get_mob_entity().skip_sparse_vanilla_tick());
+            if sparse {
+                return;
+            }
             entity.tick(entity.as_ref(), server_ref);
 
             let entity_inner = entity.get_entity();
@@ -7711,17 +7663,6 @@ mod tests {
         data.iter()
             .filter_map(|record| record.get_string("id"))
             .collect()
-    }
-
-    #[test]
-    fn vanilla_mobs_full_tick_near_a_player() {
-        assert!(!World::skip_vanilla_activation(Some(8.0), 3));
-        assert!(!World::skip_vanilla_activation(Some(16.0), 7));
-        assert!(World::skip_vanilla_activation(Some(17.0), 1));
-        assert!(!World::skip_vanilla_activation(Some(32.0), 4));
-        assert!(World::skip_vanilla_activation(Some(48.0), 1));
-        assert!(!World::skip_vanilla_activation(Some(48.0), 20));
-        assert!(World::skip_vanilla_activation(None, 1));
     }
 
     #[test]

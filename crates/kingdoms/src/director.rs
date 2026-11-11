@@ -467,6 +467,7 @@ struct TownWar {
     repair_last_pct: u32,
     repair_builders_ensured: bool,
     tickets_are_repair: bool,
+    building_fields: HashSet<(i32, i32)>,
 }
 
 struct Wired {
@@ -1271,18 +1272,33 @@ impl TownWar {
             repair_last_pct: 0,
             repair_builders_ensured: false,
             tickets_are_repair: false,
+            building_fields: HashSet::new(),
         }
     }
 
-    fn field_toward(&mut self, dest: ScenePost) -> Arc<FlowField> {
+    fn request_field(&mut self, dest: ScenePost, town_id: &str) {
         let key = crate::flow::cache_key(dest);
-        if let Some(field) = self.fields.get(&key) {
-            return Arc::clone(field);
+        if self.fields.contains_key(&key) || self.building_fields.contains(&key) {
+            return;
         }
-        let extras: Vec<ScenePost> = self.scene.raid_camps().to_vec();
-        let field = Arc::new(FlowField::toward(&self.scene, dest, &extras));
-        self.fields.insert(key, Arc::clone(&field));
-        field
+        self.building_fields.insert(key);
+        let town = town_id.to_owned();
+        std::thread::spawn(move || {
+            let scene = {
+                let dir = lock();
+                dir.towns.get(&town).map(|w| w.scene.clone())
+            };
+            let Some(scene) = scene else {
+                return;
+            };
+            let extras = scene.raid_camps().to_vec();
+            let field = Arc::new(FlowField::toward(&scene, dest, &extras));
+            let mut dir = lock();
+            if let Some(war) = dir.towns.get_mut(&town) {
+                war.fields.insert(key, field);
+                war.building_fields.remove(&key);
+            }
+        });
     }
 }
 
@@ -2058,11 +2074,15 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             .is_some_and(|w| w.raid.as_ref().is_some_and(|r| r.materialized))
     };
     let near = town_has_nearby_player(world, town_id);
-    tick_raid_warmup(world, town_id, tick);
     let repairing = in_repair_window(town_id, tick);
-    tick_town_repair(world, town_id, tick, near);
     if materialized {
+        tick_raid_warmup(world, town_id, tick);
         if tickets_pending(town_id) || raid_still_warming(town_id, tick) {
+            // Keep an already-open repair window placing while the next
+            // raid warms. Skip on first contact: repairing is false then.
+            if repairing {
+                tick_town_repair(world, town_id, tick, near);
+            }
             prewarm_town_fields(town_id);
             return;
         }
@@ -2070,11 +2090,15 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         tick_abstract_raid(world, town_id, tick);
         // Tickets only for a scheduled raid. Warming idle towns on approach
         // was the 200–470 ms first-contact hitch (209 tickets at join).
+        tick_raid_warmup(world, town_id, tick);
         if tickets_pending(town_id) && !repairing {
             prewarm_town_fields(town_id);
             return;
         }
         if !near {
+            if repairing {
+                tick_town_repair(world, town_id, tick, false);
+            }
             prewarm_town_fields(town_id);
             return;
         }
@@ -3229,6 +3253,13 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     }
     maybe_soldier_chatter(world, town_id, tick);
 
+    // After the live body loop so first-contact / wave-complete ticks do not
+    // pay builder AABB scans. Peacetime repair still runs every tick once
+    // join amortize is over.
+    if repairing && !amortizing {
+        tick_town_repair(world, town_id, tick, near);
+    }
+
     if !amortizing && tick.is_multiple_of(RESPAWN_PERIOD) {
         crate::populate::respawn_missing(world, town_id);
     }
@@ -3701,7 +3732,10 @@ fn begin_repair(war: &mut TownWar, tick: u32, lockout: bool) {
         tick
     };
     war.repair_until = war.hold_lockout.saturating_add(REPAIR_WINDOW_TICKS);
-    war.repair_started = war.hold_lockout;
+    // Capture tick, not lockout. The window is exclusive of `repair_until`,
+    // so a start-at-lockout 5 min log never ran (`elapsed == 6000` is the
+    // first tick outside the window).
+    war.repair_started = tick;
     war.repair_logged_5min = false;
     war.repair_scan_cursor = 0;
     war.repair_pass_planned = 0;
@@ -3729,9 +3763,10 @@ fn begin_repair(war: &mut TownWar, tick: u32, lockout: bool) {
 
 fn tick_town_repair(world: &Arc<World>, town_id: &str, tick: u32, near: bool) {
     maybe_refill_repair(world, town_id, tick, false);
-    if !near {
-        place_queued_repairs(world, town_id, tick);
-    }
+    // Place even when a player is near. Builders still walk for the
+    // animation; the queue must not stall if they are in combat or the
+    // town is in raid warmup (no live body loop).
+    place_queued_repairs(world, town_id, tick);
     if near {
         ensure_repair_builders(world, town_id);
     }
@@ -3739,6 +3774,19 @@ fn tick_town_repair(world: &Arc<World>, town_id: &str, tick: u32, near: bool) {
 }
 
 fn ensure_repair_builders(world: &Arc<World>, town_id: &str) {
+    {
+        let dir = lock();
+        let tick = dir.tick;
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        if war.repair_until == 0 || tick < war.hold_lockout || tick >= war.repair_until {
+            return;
+        }
+        if war.repair_builders_ensured || !war.builders.is_empty() {
+            return;
+        }
+    }
     remember_builders(world, town_id);
     let (keep, kingdom) = {
         let mut dir = lock();
@@ -3806,7 +3854,7 @@ fn log_repair_progress(town_id: &str, tick: u32) {
             "kingdoms repair rate"
         );
     }
-    if !war.repair_logged_5min && elapsed >= REPAIR_REPORT_TICKS {
+    if !war.repair_logged_5min && (elapsed >= REPAIR_REPORT_TICKS || tick + 1 >= war.repair_until) {
         war.repair_logged_5min = true;
         tracing::info!(
             town = town_id,
@@ -3927,10 +3975,6 @@ fn prewarm_town_fields(town_id: &str) {
         return;
     };
     let flag = war.scene.flag();
-    if !war.fields.contains_key(&crate::flow::cache_key(flag)) {
-        let _ = war.field_toward(flag);
-        return;
-    }
     let flag_dest = PostTarget {
         x: flag.x,
         y: flag.height_or(64),
@@ -3938,9 +3982,10 @@ fn prewarm_town_fields(town_id: &str) {
     };
     let gate = outermost_gate_dest(war.scene.gates(), flag_dest);
     let post = ScenePost::new(gate.x, gate.z);
-    if !war.fields.contains_key(&crate::flow::cache_key(post)) {
-        let _ = war.field_toward(post);
-    }
+    // Build off the tick. A capital-sized BFS on 0:-1 was the 200-1400 ms
+    // first-town hitch when it ran in `tick_one_town`.
+    war.request_field(flag, town_id);
+    war.request_field(post, town_id);
 }
 
 fn take_snapshot_cursor(town_id: &str) -> u32 {
@@ -7937,6 +7982,13 @@ mod tests {
         assert_eq!(REPAIR_WINDOW_TICKS, 6000);
         assert_eq!(HOLD_LOCKOUT_TICKS + REPAIR_WINDOW_TICKS, 6400);
         assert_eq!(REPAIR_REPORT_TICKS, 6000);
+        let capture = 100u32;
+        let lockout = capture.saturating_add(HOLD_LOCKOUT_TICKS);
+        let until = lockout.saturating_add(REPAIR_WINDOW_TICKS);
+        assert!(
+            capture.saturating_add(REPAIR_REPORT_TICKS) < until,
+            "5 min log must fire while the repair window is still open"
+        );
     }
 
     #[test]

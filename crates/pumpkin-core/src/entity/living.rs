@@ -4709,11 +4709,16 @@ mod ai_step_tests {
     }
 
     #[tokio::test]
-    async fn director_driven_bodies_skip_every_vanilla_tick() -> TestResult {
+    async fn director_driven_sparse_tick_skips_three_of_four() -> TestResult {
         let folder = tempfile::tempdir()?;
         let world = world(&folder);
         let mob = probe(world.clone(), Arc::new(AtomicUsize::new(0)));
         mob.mob.set_director_driven(true);
+        mob.mob
+            .living_entity
+            .entity
+            .no_physics
+            .store(true, Ordering::Relaxed);
         let skipped = (0..8)
             .map(|n| {
                 mob.mob
@@ -4726,7 +4731,34 @@ mod ai_step_tests {
             .filter(|skip| *skip)
             .count();
         world.level.shutdown().await;
-        assert_eq!(skipped, 8);
+        assert_eq!(skipped, 6);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nearby_director_driven_body_still_runs_vanilla_tick() -> TestResult {
+        let folder = tempfile::tempdir()?;
+        let world = world(&folder);
+        let mob = probe(world.clone(), Arc::new(AtomicUsize::new(0)));
+        mob.mob.set_director_driven(true);
+        mob.mob
+            .living_entity
+            .entity
+            .no_physics
+            .store(false, Ordering::Relaxed);
+        let skipped = (0..8)
+            .map(|n| {
+                mob.mob
+                    .living_entity
+                    .entity
+                    .tick_count
+                    .store(n, Ordering::Relaxed);
+                mob.mob.skip_sparse_vanilla_tick()
+            })
+            .filter(|skip| *skip)
+            .count();
+        world.level.shutdown().await;
+        assert_eq!(skipped, 0);
         Ok(())
     }
 
