@@ -362,7 +362,9 @@ fn write_scene_renders(
             | SceneKind::RoadsideInn
             | SceneKind::WalledMarket
             | SceneKind::MillHamlet
-            | SceneKind::Beacon => 6,
+            | SceneKind::Beacon
+            | SceneKind::Quarry
+            | SceneKind::SiegeCamp => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -382,6 +384,8 @@ fn write_scene_renders(
             rect = mill_hamlet_focus_rect(plan, rect);
         } else if scene.kind == SceneKind::Tourney {
             rect = tourney_focus_rect(plan, rect);
+        } else if scene.kind == SceneKind::Quarry {
+            rect = quarry_focus_rect(plan, rect);
         } else if scene.kind == SceneKind::WalledMarket {
             rect = scene.rect.inflate(2);
         } else if rect.width() > 56 || rect.depth() > 56 {
@@ -549,11 +553,20 @@ fn write_scene_renders(
         SceneKind::MillHamlet,
         SceneKind::Beacon,
         SceneKind::Tourney,
+        SceneKind::Monastery,
+        SceneKind::Vineyard,
+        SceneKind::Quarry,
+        SceneKind::SiegeCamp,
+        SceneKind::Riverside,
     ] {
         let Some(scene) = plan.scenes.iter().find(|scene| scene.kind == kind) else {
             continue;
         };
-        let rect = scene.rect.inflate(2);
+        let rect = if kind == SceneKind::Quarry {
+            quarry_focus_rect(plan, scene.rect)
+        } else {
+            scene.rect.inflate(2)
+        };
         let name = kind.label().to_ascii_lowercase().replace(' ', "-");
         let title = match kind {
             SceneKind::RuinedAbbey => "Ruined abbey · Tintern nave, tracery, arcade, graves",
@@ -568,6 +581,15 @@ fn write_scene_renders(
             SceneKind::MillHamlet => "Mill hamlet · wheel, race, granary",
             SceneKind::Beacon => "Hilltop beacon · brazier and watch-fire",
             SceneKind::Tourney => "Jousting lists · sand lane, stands, pavilions beside the castle",
+            SceneKind::Monastery => {
+                "Priory · cloister garth, chapter house, scriptorium, herb garden"
+            }
+            SceneKind::Vineyard => "Vineyard · terraced hillside rows and press house",
+            SceneKind::Quarry => "Quarry · stepped pit, jib cranes, cut stone, mason's lodge",
+            SceneKind::SiegeCamp => {
+                "Siege camp · trebuchets outside, tent rows, palisade, ditch and bank"
+            }
+            SceneKind::Riverside => "Riverside village · stone bridge, ford and fishing weirs",
             _ => kind.label(),
         };
         save(
@@ -1173,6 +1195,44 @@ fn tourney_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
             ) {
                 grow(&mut rect, x, z);
             }
+        }
+    }
+    rect.unwrap_or(fallback).inflate(3)
+}
+
+fn quarry_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
+    let mut rect: Option<Rect> = None;
+    let grow = |rect: &mut Option<Rect>, x: i32, z: i32| {
+        *rect = Some(rect.map_or_else(
+            || Rect::new(x, z, x, z),
+            |r| {
+                Rect::new(
+                    r.min_x.min(x),
+                    r.min_z.min(z),
+                    r.max_x.max(x),
+                    r.max_z.max(z),
+                )
+            },
+        ));
+    };
+    for z in fallback.min_z..=fallback.max_z {
+        for x in fallback.min_x..=fallback.max_x {
+            if matches!(
+                plan.occ.kind(x, z),
+                CellKind::CampCourt
+                    | CellKind::Crane
+                    | CellKind::CutStone
+                    | CellKind::MineRail
+                    | CellKind::MineSpoil
+            ) {
+                grow(&mut rect, x, z);
+            }
+        }
+    }
+    for lot in &plan.lots {
+        if lot.kind == BuildingKind::Blacksmith && fallback.intersects(lot.rect) {
+            grow(&mut rect, lot.rect.min_x, lot.rect.min_z);
+            grow(&mut rect, lot.rect.max_x, lot.rect.max_z);
         }
     }
     rect.unwrap_or(fallback).inflate(3)

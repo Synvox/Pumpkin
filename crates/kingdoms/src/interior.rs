@@ -415,6 +415,10 @@ pub fn furnish_house(
             furnish_watermill_room(sink, rect, x, floor, z, roof_y);
         }
         BuildingKind::Winepress => furnish_winepress(sink, rect, x, floor, z, roof_y),
+        BuildingKind::ChapterHouse => {
+            furnish_chapter_house(sink, rect, x, floor, z, roof_y, palette);
+        }
+        BuildingKind::Scriptorium => furnish_scriptorium(sink, rect, x, floor, z, roof_y, palette),
         _ => furnish_dwelling(sink, rect, x, floor, z, roof_y, stories, palette),
     }
 }
@@ -550,6 +554,64 @@ fn furnish_barn(sink: &mut impl BlockSink, rect: Rect, x: i32, floor: i32, z: i3
         sink.put(x, floor + 1, z, Block::CHEST.default_state);
     }
     if light_here(x, z, 5) && roof_y >= floor + 4 {
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
+    }
+}
+
+fn furnish_chapter_house(
+    sink: &mut impl BlockSink,
+    rect: Rect,
+    x: i32,
+    floor: i32,
+    z: i32,
+    roof_y: i32,
+    palette: &Palette,
+) {
+    let (cx, cz) = rect.center();
+    if x == cx && z == cz {
+        sink.put(x, floor + 1, z, Block::LECTERN.default_state);
+        sink.put(x, floor + 2, z, Block::LANTERN.default_state);
+    } else if (x - cx).abs() == 2 && (z - cz).abs() <= 2 {
+        let dir = if x < cx { Dir::East } else { Dir::West };
+        sink.put(x, floor + 1, z, stair_state(palette.stairs, dir));
+    } else if (z - cz).abs() == 2 && (x - cx).abs() <= 2 {
+        let dir = if z < cz { Dir::South } else { Dir::North };
+        sink.put(x, floor + 1, z, stair_state(palette.stairs, dir));
+    } else if (x + z) % 5 == 0 {
+        sink.put(x, floor + 1, z, Block::OAK_SLAB.default_state);
+    }
+    if light_here(x, z, 5) && roof_y >= floor + 4 {
+        hang_lantern(sink, x, roof_y - 2, z, roof_y);
+    }
+}
+
+fn furnish_scriptorium(
+    sink: &mut impl BlockSink,
+    rect: Rect,
+    x: i32,
+    floor: i32,
+    z: i32,
+    roof_y: i32,
+    palette: &Palette,
+) {
+    let (cx, cz) = rect.center();
+    let desk = (z - rect.min_z) % 2 == 1 && (x - cx).abs() >= 1;
+    if x == cx && z == cz {
+        sink.put(x, floor + 1, z, Block::LECTERN.default_state);
+    } else if desk {
+        sink.put(x, floor + 1, z, palette.slab);
+        if (x + z) % 3 == 0 {
+            sink.put(x, floor + 2, z, Block::LECTERN.default_state);
+        } else if (x + z) % 3 == 1 {
+            sink.put(x, floor + 2, z, Block::WHITE_WOOL.default_state);
+        }
+    } else if rect.min_x + 1 == x || rect.max_x - 1 == x {
+        sink.put(x, floor + 1, z, Block::BOOKSHELF.default_state);
+        sink.put(x, floor + 2, z, Block::BOOKSHELF.default_state);
+    } else if (x + z) % 4 == 0 {
+        sink.put(x, floor + 1, z, Block::BARREL.default_state);
+    }
+    if light_here(x, z, 4) && roof_y >= floor + 4 {
         hang_lantern(sink, x, roof_y - 2, z, roof_y);
     }
 }

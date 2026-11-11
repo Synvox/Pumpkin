@@ -29,6 +29,10 @@ pub enum BuildingKind {
     Winepress,
     /// Taiga stave church with dragon-head gables.
     StaveChurch,
+    /// Priory chapter house off the cloister.
+    ChapterHouse,
+    /// Priory scriptorium with desks and lecterns.
+    Scriptorium,
 }
 
 impl BuildingKind {
@@ -55,6 +59,8 @@ impl BuildingKind {
             Self::Watermill => (7, 6),
             Self::Winepress => (9, 7),
             Self::StaveChurch => (15, 11),
+            Self::ChapterHouse => (9, 7),
+            Self::Scriptorium => (9, 7),
         }
     }
 
@@ -69,7 +75,9 @@ impl BuildingKind {
             | Self::Watermill
             | Self::Winepress
             | Self::StaveChurch
-            | Self::Monastery => 1,
+            | Self::Monastery
+            | Self::ChapterHouse
+            | Self::Scriptorium => 1,
             Self::Longhouse | Self::Blacksmith | Self::Cathedral => 1,
             Self::Tavern | Self::Church => 2,
             Self::Timber
@@ -102,6 +110,8 @@ impl BuildingKind {
             Self::Watermill => 8,
             Self::Winepress => 6,
             Self::StaveChurch => 8,
+            Self::ChapterHouse => 7,
+            Self::Scriptorium => 5,
         }
     }
 
@@ -116,6 +126,7 @@ impl BuildingKind {
                 | Self::Tavern
                 | Self::Longhouse
                 | Self::Watermill
+                | Self::Scriptorium
         )
     }
 }
