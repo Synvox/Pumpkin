@@ -359,7 +359,10 @@ fn write_scene_renders(
             | SceneKind::Gallows
             | SceneKind::TollBridge
             | SceneKind::CharcoalCamp
-            | SceneKind::RoadsideInn => 6,
+            | SceneKind::RoadsideInn
+            | SceneKind::WalledMarket
+            | SceneKind::MillHamlet
+            | SceneKind::Beacon => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -522,7 +525,7 @@ fn write_scene_renders(
                 volume,
                 hull.inflate(4),
                 2,
-                "Cog · pointed bow, billowed sail, yard, forecastle",
+                "Cog · pointed bow, crow's nest, billowed sail, yard",
                 ship_beam_rot(hull),
             ),
         )?;
@@ -536,6 +539,10 @@ fn write_scene_renders(
         SceneKind::TollBridge,
         SceneKind::CharcoalCamp,
         SceneKind::RoadsideInn,
+        SceneKind::WalledMarket,
+        SceneKind::MillHamlet,
+        SceneKind::Beacon,
+        SceneKind::Tourney,
     ] {
         let Some(scene) = plan.scenes.iter().find(|scene| scene.kind == kind) else {
             continue;
@@ -545,12 +552,16 @@ fn write_scene_renders(
         let title = match kind {
             SceneKind::RuinedAbbey => "Ruined abbey · Tintern nave, tracery, arcade, graves",
             SceneKind::CastleRuin => "Castle ruin · broken curtain and keep on a hill",
-            SceneKind::BanditHideout => "Bandit hideout · spread camp, tents, fire, lookout",
+            SceneKind::BanditHideout => "Bandit hideout · spread camp, spit, wagon, lookouts",
             SceneKind::HermitTower => "Hermit's tower · balcony, chimney, garden",
             SceneKind::StoneCircle => "Stone circle · menhirs and fallen lintel",
             SceneKind::TollBridge => "Toll bridge · gatehouse over the river",
             SceneKind::CharcoalCamp => "Charcoal camp · hut, mounds and hearths",
             SceneKind::RoadsideInn => "Roadside inn · cobbled yard, wagon, well, jettied tavern",
+            SceneKind::WalledMarket => "Walled market · guildhall, stalls, palisade, well",
+            SceneKind::MillHamlet => "Mill hamlet · wheel, race, granary",
+            SceneKind::Beacon => "Hilltop beacon · brazier and watch-fire",
+            SceneKind::Tourney => "Jousting lists · sand lane, stands, pavilions beside the castle",
             _ => kind.label(),
         };
         save(
@@ -907,6 +918,47 @@ fn write_cutaways(
                 lot.rect.inflate(4),
                 2,
                 "Inn · jetty, dormers, coaching yard",
+            ),
+        )?;
+    }
+
+    let guild_lot = plan.lots.iter().find(|lot| {
+        lot.kind == BuildingKind::TownHall
+            && plan.scenes.iter().any(|scene| {
+                scene.kind == SceneKind::WalledMarket && scene.rect.intersects(lot.rect)
+            })
+    });
+    if let Some(lot) = guild_lot {
+        let floor = lot_floor(plan, lot);
+        save(
+            &out_dir.join(format!("{stem}-guildhall-cutaway.png")),
+            &render_room(
+                volume,
+                lot.rect,
+                floor,
+                floor + 8,
+                "Guildhall · furnished hall in the walled market",
+            ),
+        )?;
+    }
+
+    let mill_lot = plan.lots.iter().find(|lot| {
+        lot.kind == BuildingKind::Watermill
+            && plan
+                .scenes
+                .iter()
+                .any(|scene| scene.kind == SceneKind::MillHamlet && scene.rect.intersects(lot.rect))
+    });
+    if let Some(lot) = mill_lot {
+        let floor = lot_floor(plan, lot);
+        save(
+            &out_dir.join(format!("{stem}-mill-hamlet-cutaway.png")),
+            &render_room(
+                volume,
+                lot.rect.inflate(4),
+                floor,
+                floor + 8,
+                "Mill hamlet · mill house, wheel and race",
             ),
         )?;
     }
@@ -1432,6 +1484,9 @@ fn block_rgb(state: &BlockState) -> [u8; 3] {
     }
     if id == Block::RED_BANNER.id {
         return [160, 32, 32];
+    }
+    if id == Block::YELLOW_BANNER.id || id == Block::YELLOW_WOOL.id {
+        return [230, 200, 40];
     }
     if id == Block::BLACK_BANNER.id || id == Block::BLACK_WOOL.id {
         return [28, 28, 32];

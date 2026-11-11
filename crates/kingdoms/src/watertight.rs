@@ -223,6 +223,7 @@ fn planned_timber(kind: CellKind) -> bool {
             | CellKind::StandingStone
             | CellKind::LootPile
             | CellKind::Wagon
+            | CellKind::Beacon
     )
 }
 
@@ -286,6 +287,7 @@ fn is_hanging_decoration(id: pumpkin_data::BlockId) -> bool {
         || id == Block::RED_BANNER.id
         || id == Block::BLACK_BANNER.id
         || id == Block::WHITE_BANNER.id
+        || id == Block::YELLOW_BANNER.id
         || id == Block::IRON_CHAIN.id
         || id == Block::OAK_HANGING_SIGN.id
         || id == Block::TORCH.id
@@ -324,6 +326,7 @@ fn flags_as_floating_kind(kind: CellKind) -> bool {
             | CellKind::Plaza
             | CellKind::Fountain
             | CellKind::Wagon
+            | CellKind::Beacon
     )
 }
 
