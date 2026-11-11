@@ -45,8 +45,8 @@ use rsa::RsaPublicKey;
 use std::fs;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32};
-use std::{future::Future, sync::atomic::Ordering, time::Duration};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, Ordering};
+use std::{future::Future, time::Duration};
 use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
@@ -66,6 +66,11 @@ pub mod ticker;
 pub use recipe::RecipeManager;
 
 use crate::data::advancement_data::AdvancementManager;
+
+/// Set when the kingdoms plugin is installed. Random-ticks only the
+/// player's neighbourhood; scheduled block and fluid ticks still run
+/// in every loaded chunk.
+pub static KINGDOMS_TICK_WORLDS_INLINE: AtomicBool = AtomicBool::new(false);
 
 /// Represents a Minecraft server instance.
 #[repr(C)]

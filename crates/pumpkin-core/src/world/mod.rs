@@ -1588,7 +1588,7 @@ impl World {
         let entity_handle = handle.clone();
 
         let t_entities = std::time::Instant::now();
-        let tickable: Vec<_> = entities_to_tick
+        let candidates: Vec<_> = entities_to_tick
             .par_iter()
             .filter_map(|entity| {
                 let entity_pos = entity.get_entity().pos.load();
@@ -1603,6 +1603,19 @@ impl World {
                     return None;
                 }
                 Some((entity, entity_chunk))
+            })
+            .collect();
+
+        // Far virtualized raid bodies skip 3 of 4 vanilla ticks. Keep them
+        // out of island planning so a 400-body march does not build a reach
+        // graph. Nearby (`!no_physics`) bodies stay in `tickable`.
+        let tickable: Vec<_> = candidates
+            .into_iter()
+            .filter(|(entity, _)| {
+                entity.get_entity().tick_count.fetch_add(1, Relaxed);
+                !entity
+                    .get_mob()
+                    .is_some_and(|mob| mob.get_mob_entity().skip_sparse_vanilla_tick())
             })
             .collect();
 
@@ -1674,13 +1687,6 @@ impl World {
             let (entity, entity_chunk) = &tickable[index];
             order::set_entity_order(Some(first_order + index as u64 * order::ORDERS_PER_ENTITY));
 
-            entity.get_entity().tick_count.fetch_add(1, Relaxed);
-            let sparse = entity
-                .get_mob()
-                .is_some_and(|mob| mob.get_mob_entity().skip_sparse_vanilla_tick());
-            if sparse {
-                return;
-            }
             entity.tick(entity.as_ref(), server_ref);
 
             let entity_inner = entity.get_entity();
@@ -2082,6 +2088,10 @@ impl World {
     pub fn tick_chunks(self: &Arc<Self>, server: &Arc<Server>) {
         const BATCH_SIZE: usize = 32;
         const INHABITED_TIME_BATCH_SIZE: usize = 1024;
+        // Kingdoms raid tickets keep march-path chunks loaded. Random-tick
+        // only the player's neighbourhood so copper/crops next to a player
+        // still run; scheduled block/fluid ticks are unchanged.
+        const KINGDOMS_RANDOM_TICK_CHUNK_RANGE: i32 = 8;
         let random_tick_speed = self.level_info.load().game_rules.random_tick_speed;
 
         let active_chunks = self
@@ -2089,7 +2099,38 @@ impl World {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let tick_data = self.level.get_tick_data(&active_chunks, random_tick_speed);
+        let random_tick_chunks;
+        let tick_chunks = if crate::server::KINGDOMS_TICK_WORLDS_INLINE.load(Relaxed) {
+            let players = self.players.load();
+            if players.is_empty() {
+                active_chunks.as_ref()
+            } else {
+                let player_chunks: Vec<(i32, i32)> = players
+                    .iter()
+                    .map(|player| {
+                        let pos = player.get_entity().pos.load();
+                        (
+                            get_section_cord(pos.x.floor() as i32),
+                            get_section_cord(pos.z.floor() as i32),
+                        )
+                    })
+                    .collect();
+                random_tick_chunks = active_chunks
+                    .iter()
+                    .copied()
+                    .filter(|pos| {
+                        player_chunks.iter().any(|(px, pz)| {
+                            (pos.x - px).abs() <= KINGDOMS_RANDOM_TICK_CHUNK_RANGE
+                                && (pos.y - pz).abs() <= KINGDOMS_RANDOM_TICK_CHUNK_RANGE
+                        })
+                    })
+                    .collect::<FxHashSet<_>>();
+                &random_tick_chunks
+            }
+        } else {
+            active_chunks.as_ref()
+        };
+        let tick_data = self.level.get_tick_data(tick_chunks, random_tick_speed);
         let handle = server.runtime.clone();
 
         // 1. Parallel Block Ticks via Rayon

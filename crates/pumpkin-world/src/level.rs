@@ -562,9 +562,15 @@ impl Level {
         });
     }
 
+    /// Collects this tick's random samples and due scheduled ticks.
+    ///
+    /// `random_tick_chunks` is only the random-tick set. Scheduled block and
+    /// fluid ticks still come from every loaded chunk in
+    /// `chunks_with_scheduled_ticks`, even when a caller passes a neighbourhood
+    /// filter (kingdoms does that while raid tickets keep march chunks loaded).
     pub fn get_tick_data(
         &self,
-        active_chunks: &FxHashSet<Vector2<i32>>,
+        random_tick_chunks: &FxHashSet<Vector2<i32>>,
         random_tick_speed: i64,
     ) -> TickData {
         let samples_per_section = random_tick_speed.max(0);
@@ -572,11 +578,11 @@ impl Level {
         let mut ticks = TickData {
             block_ticks: Vec::new(),
             fluid_ticks: Vec::new(),
-            random_ticks: Vec::with_capacity(active_chunks.len() * 3),
+            random_ticks: Vec::with_capacity(random_tick_chunks.len() * 3),
         };
 
-        // 1. Process active chunks (random ticks, block entities)
-        for pos in active_chunks {
+        // 1. Process random-tick chunks
+        for pos in random_tick_chunks {
             if let Some(chunk) = self.loaded_chunks.get(pos) {
                 let chunk = chunk.value();
                 let chunk_x_base = chunk.x * 16;
@@ -1133,5 +1139,46 @@ mod tests {
 
         let end_level = Level::from_root_folder(&config, root.clone(), 0, Dimension::THE_END);
         assert_eq!(end_level.level_folder.dim_folder, root.join("DIM1"));
+    }
+
+    #[tokio::test]
+    async fn scheduled_ticks_fire_in_chunks_outside_the_random_tick_set() {
+        let temp_dir = TempDir::new().unwrap();
+        let level = Level::from_root_folder(
+            &LevelConfig::default(),
+            temp_dir.path().to_path_buf(),
+            0,
+            Dimension::OVERWORLD,
+        );
+        let near = Vector2::new(0, 0);
+        let far = Vector2::new(16, 0);
+        level
+            .loaded_chunks
+            .insert(near, ChunkData::empty_sync(0, 0));
+        level
+            .loaded_chunks
+            .insert(far, ChunkData::empty_sync(16, 0));
+
+        let far_block = BlockPos::new(16 * 16 + 3, 64, 5);
+        let far_fluid = BlockPos::new(16 * 16 + 7, 64, 9);
+        level.schedule_block_tick(&Block::SAND, far_block, 0, TickPriority::Normal);
+        level.schedule_fluid_tick(&Fluid::WATER, far_fluid, 0, TickPriority::Normal);
+
+        let mut only_near = FxHashSet::default();
+        only_near.insert(near);
+        let data = level.get_tick_data(&only_near, 3);
+        assert!(
+            data.block_ticks
+                .iter()
+                .any(|tick| tick.position == far_block),
+            "scheduled block ticks in far loaded chunks must still fire"
+        );
+        assert!(
+            data.fluid_ticks
+                .iter()
+                .any(|tick| tick.position == far_fluid),
+            "scheduled fluid ticks in far loaded chunks must still fire"
+        );
+        level.shutdown().await;
     }
 }

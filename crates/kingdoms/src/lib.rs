@@ -104,6 +104,8 @@ use marker::register_hooks;
 
 /// Installs the plugin on a running server: command, hooks, and future worlds.
 pub fn install(server: &Server) {
+    pumpkin_core::server::KINGDOMS_TICK_WORLDS_INLINE
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     server.command_dispatcher.rcu(|dispatcher| {
         let mut next = (**dispatcher).clone();
         command::register(&mut next, &server.permission_manager);

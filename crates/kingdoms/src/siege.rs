@@ -87,20 +87,37 @@ impl TownOwner {
 /// How a raider contributes to the siege.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarchJob {
+    /// Melee shield-wall at the threatened gate.
     Assault,
+    /// Sapper crew pushing the ram.
     Ram,
     Ladder,
+    /// Crossbow line that holds a standoff short of the gate.
+    Crossbow,
 }
 
 impl MarchJob {
+    /// Mix for one wave: a small ram crew, then ~1/3 shield, rest crossbows.
+    #[must_use]
+    pub fn for_wave_index(index: usize, count: usize) -> Self {
+        let ram_n = ram_crew_size(count);
+        if index < ram_n {
+            return Self::Ram;
+        }
+        let rest = index - ram_n;
+        if rest % 3 == 0 {
+            Self::Assault
+        } else {
+            Self::Crossbow
+        }
+    }
+
     #[must_use]
     pub fn assign(index: usize, vindicator: bool) -> Self {
-        if vindicator || index.is_multiple_of(8) {
+        if vindicator {
             Self::Ram
-        } else if index % 5 == 1 {
-            Self::Ladder
         } else {
-            Self::Assault
+            Self::for_wave_index(index, index.saturating_add(1).max(8))
         }
     }
 
@@ -109,6 +126,7 @@ impl MarchJob {
         match self {
             Self::Ram => Some(crate::faction::TAG_JOB_RAM),
             Self::Ladder => Some(crate::faction::TAG_JOB_LADDER),
+            Self::Crossbow => Some(crate::faction::TAG_JOB_CROSSBOW),
             Self::Assault => None,
         }
     }
@@ -123,8 +141,21 @@ impl MarchJob {
             if tag == crate::faction::TAG_JOB_LADDER {
                 job = Self::Ladder;
             }
+            if tag == crate::faction::TAG_JOB_CROSSBOW {
+                job = Self::Crossbow;
+            }
         }
         job
+    }
+}
+
+/// Two to six sappers on a wave of 8+.
+#[must_use]
+pub fn ram_crew_size(count: usize) -> usize {
+    if count < 8 {
+        0
+    } else {
+        (count / 10).clamp(2, 6)
     }
 }
 
@@ -237,12 +268,102 @@ struct OwnershipFile {
     damage: HashMap<String, String>,
     #[serde(default)]
     stats: HashMap<String, PlayerStats>,
+    #[serde(default)]
+    wars: HashMap<String, SavedTown>,
 }
 
 /// World-folder path for the ownership file.
 #[must_use]
 pub fn ownership_path(world_root: &Path) -> PathBuf {
     world_root.join(OWNERSHIP_FILE)
+}
+
+/// One virtual soldier persisted across a restart.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct SavedGhost {
+    #[serde(default)]
+    pub faction: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    #[serde(default)]
+    pub bearer: bool,
+    #[serde(default)]
+    pub raider: bool,
+    #[serde(default)]
+    pub job: String,
+    #[serde(default)]
+    pub role: String,
+}
+
+/// Active raid snapshot. Living entity ids are discarded; bodies become ghosts.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct SavedRaid {
+    #[serde(default)]
+    pub id: u32,
+    #[serde(default)]
+    pub side: String,
+    #[serde(default)]
+    pub raiders: u16,
+    #[serde(default)]
+    pub extra_defenders: u16,
+    #[serde(default)]
+    pub waves: u8,
+    #[serde(default)]
+    pub wave: u8,
+    #[serde(default)]
+    pub spawned_this_wave: u16,
+    #[serde(default)]
+    pub last_wave_tick: u32,
+    #[serde(default)]
+    pub camp_x: i32,
+    #[serde(default)]
+    pub camp_z: i32,
+    #[serde(default)]
+    pub pending_left: u16,
+    #[serde(default)]
+    pub pending_retake: u16,
+    #[serde(default)]
+    pub extra_left: u16,
+    #[serde(default)]
+    pub materialized: bool,
+    #[serde(default)]
+    pub virt_raiders: u16,
+    #[serde(default)]
+    pub virt_defenders: u16,
+    #[serde(default)]
+    pub virt_march: u32,
+    #[serde(default)]
+    pub ghosts: Vec<SavedGhost>,
+}
+
+/// Per-town war clock, repair window, and raid that must survive a restart.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct SavedTown {
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub occupy_hold: u32,
+    #[serde(default)]
+    pub retake_hold: u32,
+    #[serde(default)]
+    pub hold_lockout: u32,
+    #[serde(default)]
+    pub repair_until: u32,
+    #[serde(default)]
+    pub repair_started: u32,
+    #[serde(default)]
+    pub repair_placed: u32,
+    #[serde(default)]
+    pub gate_breached: bool,
+    #[serde(default)]
+    pub alarm: bool,
+    #[serde(default)]
+    pub repair_jobs: Vec<crate::repair::RepairJob>,
+    #[serde(default)]
+    pub repair_restored: Vec<(i32, i32, i32)>,
+    #[serde(default)]
+    pub raid: Option<SavedRaid>,
 }
 
 /// Loaded towns, player membership, scores, and war clock.
@@ -256,6 +377,7 @@ pub struct SavedState {
     pub last_clock_tick: u32,
     pub damage: HashMap<String, crate::damage::DamageState>,
     pub stats: HashMap<String, PlayerStats>,
+    pub wars: HashMap<String, SavedTown>,
 }
 
 /// Load town id → owner from `kingdoms-ownership.json`.
@@ -291,6 +413,7 @@ pub fn load_state(path: &Path) -> SavedState {
             .map(|(id, raw)| (id, crate::damage::DamageState::parse(&raw)))
             .collect(),
         stats: file.stats,
+        wars: file.wars,
     }
 }
 
@@ -328,6 +451,7 @@ pub fn save_state(path: &Path, state: &SavedState) -> std::io::Result<()> {
             .map(|(id, state)| (id.clone(), state.as_str().to_owned()))
             .collect(),
         stats: state.stats.clone(),
+        wars: state.wars.clone(),
     };
     let json = serde_json::to_string_pretty(&file).unwrap_or_else(|_| "{}".to_owned());
     std::fs::write(path, json)
@@ -861,6 +985,7 @@ mod tests {
                 last_clock_tick: 2400,
                 damage: HashMap::new(),
                 stats: HashMap::new(),
+                wars: HashMap::new(),
             },
         )
         .unwrap();
@@ -1226,10 +1351,13 @@ mod tests {
 
     #[test]
     fn ram_crew_are_every_eighth_plus_vindicators() {
-        assert_eq!(MarchJob::assign(0, false), MarchJob::Ram);
-        assert_eq!(MarchJob::assign(1, false), MarchJob::Ladder);
-        assert_eq!(MarchJob::assign(2, false), MarchJob::Assault);
+        assert_eq!(MarchJob::for_wave_index(0, 12), MarchJob::Ram);
+        assert_eq!(MarchJob::for_wave_index(1, 12), MarchJob::Ram);
+        assert_eq!(MarchJob::for_wave_index(2, 12), MarchJob::Assault);
+        assert_eq!(MarchJob::for_wave_index(3, 12), MarchJob::Crossbow);
         assert_eq!(MarchJob::assign(3, true), MarchJob::Ram);
+        assert_eq!(ram_crew_size(12), 2);
+        assert_eq!(ram_crew_size(4), 0);
     }
 
     #[test]
@@ -1295,6 +1423,74 @@ mod tests {
         assert_eq!(got.defenses, 2);
         assert!(got.banner_given);
         assert_eq!(got.renown(), 14);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn raid_and_repair_survive_a_file_round_trip() {
+        let dir = std::env::temp_dir().join(format!("kingdoms-war-raid-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = ownership_path(&dir);
+        let mut wars = HashMap::new();
+        wars.insert(
+            "20261025:0:0".to_owned(),
+            SavedTown {
+                owner: "alder".to_owned(),
+                occupy_hold: 40,
+                repair_until: 9000,
+                repair_placed: 12,
+                gate_breached: true,
+                alarm: true,
+                repair_jobs: vec![crate::repair::RepairJob {
+                    x: 1,
+                    y: 64,
+                    z: 2,
+                    state: 3,
+                }],
+                raid: Some(SavedRaid {
+                    id: 9,
+                    side: "pillager".to_owned(),
+                    raiders: 40,
+                    waves: 1,
+                    wave: 1,
+                    spawned_this_wave: 40,
+                    ghosts: vec![SavedGhost {
+                        faction: "pillager".to_owned(),
+                        x: 1.5,
+                        y: 64.0,
+                        z: 2.5,
+                        bearer: true,
+                        raider: true,
+                        ..SavedGhost::default()
+                    }],
+                    ..SavedRaid::default()
+                }),
+                ..SavedTown::default()
+            },
+        );
+        save_state(
+            &path,
+            &SavedState {
+                wars,
+                clock_tick: 1200,
+                ..SavedState::default()
+            },
+        )
+        .unwrap();
+        let back = load_state(&path);
+        let town = back.wars.get("20261025:0:0").expect("town");
+        assert_eq!(town.owner, "alder");
+        assert_eq!(town.occupy_hold, 40);
+        assert_eq!(town.repair_until, 9000);
+        assert_eq!(town.repair_placed, 12);
+        assert!(town.gate_breached);
+        assert_eq!(town.repair_jobs.len(), 1);
+        let raid = town.raid.as_ref().expect("raid");
+        assert_eq!(raid.id, 9);
+        assert_eq!(raid.ghosts.len(), 1);
+        assert!(raid.ghosts[0].bearer);
+        assert_eq!(back.clock_tick, 1200);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
     }

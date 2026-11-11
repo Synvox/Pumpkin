@@ -30,6 +30,7 @@ pub const TAG_KINGDOM: &str = "kingdoms:kingdom";
 pub const TAG_WIRED: &str = "kingdoms:wired";
 pub const TAG_JOB_RAM: &str = "kingdoms:job:ram";
 pub const TAG_JOB_LADDER: &str = "kingdoms:job:ladder";
+pub const TAG_JOB_CROSSBOW: &str = "kingdoms:job:crossbow";
 pub const TAG_ROUTED: &str = "kingdoms:routed";
 pub const TAG_TEMP: &str = "kingdoms:temp";
 
