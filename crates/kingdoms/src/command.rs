@@ -540,6 +540,9 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
                         order: director::SquadOrder::Charge,
                     })),
             )
+            .then(literal("hold").executes(KingdomRallyExecutor {
+                order: director::SquadOrder::Hold,
+            }))
             .then(literal("horn").executes(KingdomHornExecutor))
             .then(literal("rank").then(literal("set").then(
                 argument("rank", StringArgumentType::SingleWord).executes(KingdomRankSetExecutor),

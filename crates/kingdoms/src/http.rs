@@ -621,10 +621,29 @@ fn director_state() -> Value {
         .iter()
         .filter_map(|t| t.get("raiders_alive").and_then(Value::as_u64))
         .sum::<u64>() as u32;
+    let squads: Vec<Value> = dir
+        .squad_states()
+        .into_iter()
+        .map(|s| {
+            json!({
+                "uuid": s.uuid,
+                "name": s.name,
+                "kingdom": s.kingdom,
+                "order": s.order,
+                "size": s.size,
+                "hold": { "x": s.hold.0, "y": s.hold.1, "z": s.hold.2 },
+                "x": s.x,
+                "y": s.y,
+                "z": s.z,
+                "target": s.target,
+            })
+        })
+        .collect();
     json!({
         "tick": tick,
         "towns": towns,
         "players": players,
+        "squads": squads,
         "troops": { "defenders": defenders, "raiders": raiders },
         "war_clock": !external_director_connected(),
     })
@@ -919,6 +938,12 @@ mod tests {
         assert!(war_json.get("towns").is_some());
         assert!(war_json.get("clock").is_some());
         assert!(war_json.get("heroes").is_some());
+
+        let (status, state_json) =
+            response_json(get_state(State(state.clone()), bearer_headers(&token)).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(state_json.get("squads").is_some());
+        assert!(state_json["squads"].is_array());
 
         let raid = post_raid(
             State(state),
