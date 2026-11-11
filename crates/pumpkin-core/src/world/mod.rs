@@ -1546,6 +1546,7 @@ impl World {
             raids.next_id = raids.next_id.max(guard.next_id);
             *guard = raids;
         };
+        let pre_elapsed = start.elapsed();
 
         let t_chunks = std::time::Instant::now();
         self.tick_chunks(server);
@@ -1800,6 +1801,7 @@ impl World {
             );
         }
         Self::log_kingdoms_tick_profile(
+            pre_elapsed,
             chunk_elapsed,
             player_elapsed,
             island_elapsed,
@@ -1818,6 +1820,7 @@ impl World {
         reason = "one profile line from World::tick phase timers"
     )]
     fn log_kingdoms_tick_profile(
+        pre_elapsed: std::time::Duration,
         chunk_elapsed: std::time::Duration,
         player_elapsed: std::time::Duration,
         island_elapsed: std::time::Duration,
@@ -1844,8 +1847,9 @@ impl World {
         }
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
         info!(
-            "kingdoms tick-phase n={n} total={:.2} chunks={:.2} players={:.2} islands={:.2} entity_tick={:.2} tracker={:.2} block_entities={:.2} sparse={sparse_n} full={full_n} entities={entity_count}",
+            "kingdoms tick-phase n={n} total={:.2} pre={:.2} chunks={:.2} players={:.2} islands={:.2} entity_tick={:.2} tracker={:.2} block_entities={:.2} sparse={sparse_n} full={full_n} entities={entity_count}",
             ms(total_elapsed),
+            ms(pre_elapsed),
             ms(chunk_elapsed),
             ms(player_elapsed),
             ms(island_elapsed),

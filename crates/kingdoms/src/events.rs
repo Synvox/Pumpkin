@@ -14,6 +14,7 @@ use pumpkin_core::plugin::api::events::player::player_join::PlayerJoinEvent;
 use pumpkin_core::plugin::api::events::player::player_respawn::PlayerRespawnEvent;
 use pumpkin_core::plugin::api::events::player::player_spawn_location::PlayerSpawnLocationEvent;
 use pumpkin_core::plugin::api::events::server::ServerTickStartEvent;
+use pumpkin_core::plugin::api::events::world::world_save::WorldSaveEvent;
 use pumpkin_core::plugin::{EventHandler, EventPriority, Payload, PluginFuture, TypedEventHandler};
 use pumpkin_core::server::Server;
 use pumpkin_data::Block;
@@ -114,6 +115,16 @@ pub fn register(server: &Server) {
             _phantom: std::marker::PhantomData,
         }),
     );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(SaveHandler),
+            priority: EventPriority::Normal,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
 }
 
 fn push_handler<E, H>(server: &Server, handler: Arc<TypedEventHandler<E, H>>)
@@ -138,11 +149,10 @@ impl EventHandler<ServerTickStartEvent> for TickHandler {
         server: &'a Arc<Server>,
         _event: &'a mut ServerTickStartEvent,
     ) -> PluginFuture<'a, ()> {
-        Box::pin(async move {
-            for world in server.worlds.load().iter() {
-                director::tick_world(world);
-            }
-        })
+        for world in server.worlds.load().iter() {
+            director::tick_world(world);
+        }
+        Box::pin(async {})
     }
 }
 
@@ -298,6 +308,20 @@ impl EventHandler<BlockBreakEvent> for BreakHandler {
             if director::is_protected_flag_column(&world, pos.0.x, pos.0.z) {
                 event.set_cancelled(true);
             }
+        })
+    }
+}
+
+struct SaveHandler;
+
+impl EventHandler<WorldSaveEvent> for SaveHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        _server: &'a Arc<Server>,
+        _event: &'a mut WorldSaveEvent,
+    ) -> PluginFuture<'a, ()> {
+        Box::pin(async move {
+            director::flush_persist();
         })
     }
 }

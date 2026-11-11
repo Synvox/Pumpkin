@@ -572,6 +572,19 @@ impl Director {
         crate::damage::restore(&saved.damage);
         self.saved_wars = saved.wars;
         self.ownership_path = Some(path);
+        let existing: Vec<String> = self
+            .saved_wars
+            .keys()
+            .filter(|id| self.towns.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in existing {
+            if let Some(saved_town) = self.saved_wars.remove(&id)
+                && let Some(war) = self.towns.get_mut(&id)
+            {
+                apply_saved_town(war, saved_town, self.tick);
+            }
+        }
         tracing::info!(
             tick = self.tick,
             next_raid = self.next_raid_id,
@@ -593,6 +606,14 @@ impl Director {
     }
 
     fn persist(&self) {
+        self.write_persist(false);
+    }
+
+    fn persist_sync(&self) {
+        self.write_persist(true);
+    }
+
+    fn write_persist(&self, sync: bool) {
         let Some(path) = &self.ownership_path else {
             return;
         };
@@ -618,7 +639,13 @@ impl Director {
             stats: self.player_stats.clone(),
             wars,
         };
-        siege::save_state_async(path.clone(), state);
+        if sync {
+            if let Err(err) = siege::save_state(path, &state) {
+                tracing::warn!(%err, "failed to persist kingdoms ownership");
+            }
+        } else {
+            siege::save_state_async(path.clone(), state);
+        }
     }
 
     fn mark_dirty(&mut self) {
@@ -2169,6 +2196,7 @@ pub fn tick_world(world: &Arc<World>) {
     for info in cached {
         dir.ensure_town_from_info(info);
     }
+    restore_saved_war_towns(&mut dir, seed);
 
     let town_ids: Vec<String> = dir.towns.keys().cloned().collect();
     drop(dir);
@@ -2333,6 +2361,20 @@ fn maybe_profile(world: &World, tick: u32, mspt: f64, director_ms: f64, towns_us
         "kingdoms profile tick={tick} director_ms={director_ms:.2} towns_us={towns_us} mspt={mspt:.2} live_fronts={live_fronts} abstract_fronts={abstract_fronts} live_bodies={live_bodies} tickets={tickets} entities={entities} rss_kb={}",
         process_rss_kb()
     );
+}
+
+fn restore_saved_war_towns(dir: &mut Director, seed: u64) {
+    let ids: Vec<String> = dir.saved_wars.keys().cloned().collect();
+    for id in ids {
+        if dir.towns.contains_key(&id) {
+            continue;
+        }
+        if let Some(info) = lookup_town_info(seed, &id) {
+            dir.ensure_town_from_info(info);
+        } else if let Some((s, cx, cz)) = parse_town_id(&id) {
+            crate::plan::request_plan(s, cx, cz);
+        }
+    }
 }
 
 fn nearby_cached_towns(seed: u64, world: &World) -> Vec<TownInfo> {
@@ -8065,6 +8107,11 @@ pub fn stop_raid_by_id(id: RaidId) -> u32 {
 
 pub fn set_target_town(raid_id: RaidId, town_id: &str) -> Result<(), String> {
     lock().set_target_town(raid_id, town_id)
+}
+
+/// Write ownership, the war clock, raids, and repair onto disk now.
+pub fn flush_persist() {
+    lock().persist_sync();
 }
 
 #[must_use]

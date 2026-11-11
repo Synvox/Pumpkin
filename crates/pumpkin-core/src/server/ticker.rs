@@ -1,4 +1,4 @@
-use super::server_test_manager::drain_game_test_queue;
+use super::server_test_manager::{drain_game_test_queue, game_test_queue_idle};
 
 use crate::{
     STOP_INTERRUPT,
@@ -11,7 +11,7 @@ use pumpkin_gametest::GameTestRunner;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const NANOSECONDS_PER_MILLISECOND: i64 = 1_000_000;
 const NANOSECONDS_PER_SECOND: i64 = 1_000_000_000;
@@ -89,17 +89,25 @@ impl Ticker {
 
             manager.tick();
 
+            let profile = kingdoms_profile_on();
+            let t_start_event = Instant::now();
             let tick_number = server.tick_count.load(Ordering::Relaxed);
-            if server.plugin_manager.has_handlers::<ServerTickStartEvent>() {
-                server.runtime.block_on(
+            if let Some(&kingdoms_tick) = super::KINGDOMS_TICK_FN.get() {
+                kingdoms_tick(server);
+            } else if server.plugin_manager.has_handlers::<ServerTickStartEvent>() {
+                // Do not drive this on the server runtime: `Runtime::block_on`
+                // turns the ticker into a worker and it runs chunk-gen.
+                futures::executor::block_on(
                     server
                         .plugin_manager
                         .fire(server, &mut ServerTickStartEvent::new(tick_number)),
                 );
             }
+            let start_event_elapsed = t_start_event.elapsed();
 
             let should_tick_game_tests = manager.runs_normally() || sprinting;
 
+            let t_worlds = Instant::now();
             if sprinting {
                 manager.start_sprint_tick_work();
                 server.tick();
@@ -110,22 +118,37 @@ impl Ticker {
             } else {
                 server.tick();
             }
+            let worlds_elapsed = t_worlds.elapsed();
 
-            if should_tick_game_tests {
+            let t_tests = Instant::now();
+            if should_tick_game_tests && (!game_test_runner.is_empty() || !game_test_queue_idle()) {
                 server.runtime.block_on(async {
                     drain_game_test_queue(server, &mut game_test_runner).await;
                     game_test_runner.tick().await;
                 });
             }
+            let tests_elapsed = t_tests.elapsed();
 
             let tick_duration_nanos = elapsed_nanos(base) - tick_start_nanos;
 
+            let t_end_event = Instant::now();
             let tick_number = server.tick_count.load(Ordering::Relaxed);
             if server.plugin_manager.has_handlers::<ServerTickEndEvent>() {
-                server.runtime.block_on(server.plugin_manager.fire(
+                futures::executor::block_on(server.plugin_manager.fire(
                     server,
                     &mut ServerTickEndEvent::new(tick_number, tick_duration_nanos),
                 ));
+            }
+            let end_event_elapsed = t_end_event.elapsed();
+
+            if profile {
+                log_kingdoms_server_tick(
+                    start_event_elapsed,
+                    worlds_elapsed,
+                    tests_elapsed,
+                    end_event_elapsed,
+                    Duration::from_nanos(tick_duration_nanos.max(0) as u64),
+                );
             }
 
             server.update_tick_times(tick_duration_nanos);
@@ -213,6 +236,36 @@ fn wait_until_next_tick(base: Instant, next_tick_nanos: i64) {
 
 fn elapsed_nanos(base: Instant) -> i64 {
     base.elapsed().as_nanos() as i64
+}
+
+fn kingdoms_profile_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("KINGDOMS_PROFILE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    })
+}
+
+fn log_kingdoms_server_tick(
+    start_event: Duration,
+    worlds: Duration,
+    tests: Duration,
+    end_event: Duration,
+    total: Duration,
+) {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    if !n.is_multiple_of(100) {
+        return;
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    info!(
+        "kingdoms server-tick n={n} total={:.2} start_event={:.2} worlds={:.2} tests={:.2} end_event={:.2}",
+        ms(total),
+        ms(start_event),
+        ms(worlds),
+        ms(tests),
+        ms(end_event),
+    );
 }
 
 #[cfg(test)]

@@ -45,8 +45,9 @@ use rsa::RsaPublicKey;
 use std::fs;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32};
-use std::{future::Future, sync::atomic::Ordering, time::Duration};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, Ordering};
+use std::{future::Future, time::Duration};
 use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
@@ -66,6 +67,14 @@ pub mod ticker;
 pub use recipe::RecipeManager;
 
 use crate::data::advancement_data::AdvancementManager;
+
+/// Kingdoms ticks each world on the ticker thread so a busy rayon chunk-gen
+/// pool cannot stall the overworld behind empty nether/end work.
+pub static KINGDOMS_TICK_WORLDS_INLINE: AtomicBool = AtomicBool::new(false);
+
+/// Direct kingdoms director tick. Avoids `PluginManager::fire` on the ticker
+/// thread, which otherwise parks the tick inside the Tokio runtime.
+pub static KINGDOMS_TICK_FN: OnceLock<fn(&Arc<Server>)> = OnceLock::new();
 
 /// Represents a Minecraft server instance.
 #[repr(C)]
@@ -1199,10 +1208,17 @@ impl Server {
 
         let worlds = self.worlds.load();
         let handle = self.runtime.clone();
-        worlds.par_iter().for_each(|world| {
-            let _guard = handle.enter();
-            world.tick(self);
-        });
+        if KINGDOMS_TICK_WORLDS_INLINE.load(Ordering::Relaxed) {
+            for world in worlds.iter() {
+                let _guard = handle.enter();
+                world.tick(self);
+            }
+        } else {
+            worlds.par_iter().for_each(|world| {
+                let _guard = handle.enter();
+                world.tick(self);
+            });
+        }
 
         // Global tasks
         self.player_data_storage.tick(self);
