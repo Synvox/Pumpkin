@@ -79,18 +79,23 @@ const SET_TARGET_RANGE: f64 = 12.0;
 const LIVE_MELEE_RANGE: f64 = 2.75;
 const LIVE_MELEE_DAMAGE: f32 = 4.0;
 const LIVE_MELEE_PERIOD: u32 = 10;
-const LIVE_RANGED_RANGE: f64 = 28.0;
+const LIVE_RANGED_RANGE: f64 = 20.0;
 const LIVE_RANGED_DAMAGE: f32 = 3.0;
 /// Wall archers hit harder so a garrison volley thins a wave at the gate.
-const WALL_ARCHER_DAMAGE: f32 = 4.0;
+const WALL_ARCHER_DAMAGE: f32 = 3.0;
 const LIVE_RANGED_PERIOD: u32 = 20;
 /// Cap visible projectiles. A 50-shot volley of real arrows was ~1k extra
 /// entities on the 3-front soak; director damage is the fight.
 const PLAYER_ARROW_RANGE: f64 = 32.0;
 const VISUAL_ARROWS_PER_VOLLEY: u32 = 2;
-/// Instant hits per volley. Uncapped, wall archers plus the crossbow line
-/// deleted a 120-raider wave before it reached the gate.
-const LIVE_RANGED_HITS_PER_VOLLEY: u32 = 8;
+/// Instant hits per volley. Range 28 / damage 4 / 8 hits wiped a capital
+/// wave before it reached the plate.
+const LIVE_RANGED_HITS_PER_VOLLEY: u32 = 4;
+/// Crossbows hold this far from the current dest once they arrive.
+const CROSSBOW_STANDOFF: i32 = 12;
+/// Until this close, crossbows keep the ring-walk dest so a capital column
+/// does not stall 18 blocks short of the outer gate.
+const CROSSBOW_HOLD_RANGE: f64 = 24.0;
 const CAPTURE_METER_RANGE: f64 = 64.0;
 const DEFAULT_WAR_CLOCK_TICKS: u32 = 2400;
 /// Quiet ticks after hold lockout so builders can repair for the new owner.
@@ -3229,13 +3234,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             squad_n += 1;
         }
         let dest = squad_dest;
-        let dest = if job == MarchJob::Crossbow && !breached && !capturing {
-            standoff_between(camp_dest, march_dest, 18)
-        } else if role == Some(VillagerRole::Guard) && alarm && !capturing {
-            gate_line_slot(id, dest)
-        } else {
-            dest
-        };
+        let dest = overlay_siege_role_dest(
+            dest, id, job, role, pos.x, pos.z, camp_dest, alarm, breached, capturing,
+        );
         if matches!(faction, Faction::Pillager) && ladders_placed {
             let near_ladders =
                 (pos.x - f64::from(ladder_dest.x)).hypot(pos.z - f64::from(ladder_dest.z)) < 10.0;
@@ -6703,6 +6704,33 @@ fn plate_slot(entity_id: i32, flag: PostTarget) -> PostTarget {
     }
 }
 
+fn overlay_siege_role_dest(
+    dest: PostTarget,
+    entity_id: i32,
+    job: MarchJob,
+    role: Option<VillagerRole>,
+    pos_x: f64,
+    pos_z: f64,
+    camp_dest: PostTarget,
+    alarm: bool,
+    breached: bool,
+    capturing: bool,
+) -> PostTarget {
+    if job == MarchJob::Crossbow && !breached && !capturing {
+        let dx = pos_x - f64::from(dest.x);
+        let dz = pos_z - f64::from(dest.z);
+        if dx.hypot(dz) < CROSSBOW_HOLD_RANGE {
+            standoff_between(camp_dest, dest, CROSSBOW_STANDOFF)
+        } else {
+            dest
+        }
+    } else if role == Some(VillagerRole::Guard) && alarm && !capturing && entity_id % 3 == 0 {
+        gate_line_slot(entity_id, dest)
+    } else {
+        dest
+    }
+}
+
 fn standoff_between(camp: PostTarget, gate: PostTarget, dist: i32) -> PostTarget {
     let dx = f64::from(camp.x - gate.x);
     let dz = f64::from(camp.z - gate.z);
@@ -9153,18 +9181,80 @@ mod tests {
             y: 64,
             z: -80,
         };
-        let stand = standoff_between(camp, gate, 18);
+        let stand = standoff_between(camp, gate, CROSSBOW_STANDOFF);
         assert!(
-            (stand.z - gate.z).abs() >= 16 && (stand.z - gate.z).abs() <= 22,
+            (stand.z - gate.z).abs() >= 10 && (stand.z - gate.z).abs() <= 14,
             "crossbow standoff {stand:?}"
         );
-        let slot = gate_line_slot(4, gate);
-        assert_eq!(slot.z, gate.z);
-        assert_ne!(slot.x, gate.x);
-        assert_eq!(LIVE_RANGED_RANGE, 28.0);
-        assert_eq!(WALL_ARCHER_DAMAGE, 4.0);
+        let far = overlay_siege_role_dest(
+            gate,
+            1,
+            MarchJob::Crossbow,
+            None,
+            10.5,
+            -80.0,
+            camp,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            (far.x, far.z),
+            (gate.x, gate.z),
+            "crossbows far from the dest keep marching, dest={far:?}"
+        );
+        let near = overlay_siege_role_dest(
+            gate,
+            1,
+            MarchJob::Crossbow,
+            None,
+            10.5,
+            -8.0,
+            camp,
+            true,
+            false,
+            false,
+        );
+        assert!(
+            (near.z - gate.z).abs() >= 10 && (near.z - gate.z).abs() <= 14,
+            "crossbows hold short of the dest once they arrive, dest={near:?}"
+        );
+        let wall = overlay_siege_role_dest(
+            gate,
+            6,
+            MarchJob::Assault,
+            Some(VillagerRole::Guard),
+            4.5,
+            0.5,
+            camp,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(wall.z, gate.z);
+        assert_ne!(wall.x, gate.x);
+        let reserve = overlay_siege_role_dest(
+            gate,
+            4,
+            MarchJob::Assault,
+            Some(VillagerRole::Guard),
+            4.5,
+            0.5,
+            camp,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            (reserve.x, reserve.z),
+            (gate.x, gate.z),
+            "only every third guard forms the shield wall"
+        );
+        assert_eq!(LIVE_RANGED_RANGE, 20.0);
+        assert_eq!(WALL_ARCHER_DAMAGE, 3.0);
         assert_eq!(VISUAL_ARROWS_PER_VOLLEY, 2);
-        assert_eq!(LIVE_RANGED_HITS_PER_VOLLEY, 8);
+        assert_eq!(LIVE_RANGED_HITS_PER_VOLLEY, 4);
+        assert_eq!(CROSSBOW_STANDOFF, 12);
     }
 
     #[test]

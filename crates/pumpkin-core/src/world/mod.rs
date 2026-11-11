@@ -1546,7 +1546,6 @@ impl World {
             raids.next_id = raids.next_id.max(guard.next_id);
             *guard = raids;
         };
-        let pre_elapsed = start.elapsed();
 
         let t_chunks = std::time::Instant::now();
         self.tick_chunks(server);
@@ -1607,24 +1606,18 @@ impl World {
             })
             .collect();
 
-        // Kingdoms raid bodies skip 3 of 4 vanilla ticks. Keep them out of
-        // island planning so 400 sparse soldiers do not build a reach graph.
-        let mut sparse_n = 0usize;
+        // Far virtualized raid bodies skip 3 of 4 vanilla ticks. Keep them
+        // out of island planning so a 400-body march does not build a reach
+        // graph. Nearby (`!no_physics`) bodies stay in `tickable`.
         let tickable: Vec<_> = candidates
             .into_iter()
             .filter(|(entity, _)| {
                 entity.get_entity().tick_count.fetch_add(1, Relaxed);
-                let sparse = entity
+                !entity
                     .get_mob()
-                    .is_some_and(|mob| mob.get_mob_entity().skip_sparse_vanilla_tick());
-                if sparse {
-                    sparse_n += 1;
-                    return false;
-                }
-                true
+                    .is_some_and(|mob| mob.get_mob_entity().skip_sparse_vanilla_tick())
             })
             .collect();
-        let t_islands = std::time::Instant::now();
 
         // Entities that can affect each other tick in list order; separate islands run in
         // parallel.
@@ -1689,8 +1682,6 @@ impl World {
         };
         let first_order = self.level.reserve_entity_tick_orders(tickable.len());
 
-        let island_elapsed = t_islands.elapsed();
-        let t_entity_tick = std::time::Instant::now();
         let server_ref = server.as_ref();
         let tick_entity = |index: usize| {
             let (entity, entity_chunk) = &tickable[index];
@@ -1739,12 +1730,9 @@ impl World {
             order::set_entity_order(None);
         }
         self.order_tick_spawns();
-        let entity_tick_elapsed = t_entity_tick.elapsed();
         let entity_elapsed = t_entities.elapsed();
 
-        let t_tracker = std::time::Instant::now();
         self.entity_tracker.update_all(self);
-        let tracker_elapsed = t_tracker.elapsed();
 
         let mut block_entities: Vec<Arc<dyn BlockEntity>> = Vec::new();
         if self.block_entities.len() < active_chunks.len() {
@@ -1800,63 +1788,6 @@ impl World {
                 block_entity_elapsed,
             );
         }
-        Self::log_kingdoms_tick_profile(
-            pre_elapsed,
-            chunk_elapsed,
-            player_elapsed,
-            island_elapsed,
-            entity_tick_elapsed,
-            tracker_elapsed,
-            block_entity_elapsed,
-            total_elapsed,
-            sparse_n,
-            tickable.len(),
-            entity_count,
-        );
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one profile line from World::tick phase timers"
-    )]
-    fn log_kingdoms_tick_profile(
-        pre_elapsed: std::time::Duration,
-        chunk_elapsed: std::time::Duration,
-        player_elapsed: std::time::Duration,
-        island_elapsed: std::time::Duration,
-        entity_tick_elapsed: std::time::Duration,
-        tracker_elapsed: std::time::Duration,
-        block_entity_elapsed: std::time::Duration,
-        total_elapsed: std::time::Duration,
-        sparse_n: usize,
-        full_n: usize,
-        entity_count: usize,
-    ) {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let profile = *ON.get_or_init(|| {
-            std::env::var("KINGDOMS_PROFILE")
-                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        });
-        if !profile {
-            return;
-        }
-        let n = N.fetch_add(1, Relaxed);
-        if !n.is_multiple_of(100) {
-            return;
-        }
-        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
-        info!(
-            "kingdoms tick-phase n={n} total={:.2} pre={:.2} chunks={:.2} players={:.2} islands={:.2} entity_tick={:.2} tracker={:.2} block_entities={:.2} sparse={sparse_n} full={full_n} entities={entity_count}",
-            ms(total_elapsed),
-            ms(pre_elapsed),
-            ms(chunk_elapsed),
-            ms(player_elapsed),
-            ms(island_elapsed),
-            ms(entity_tick_elapsed),
-            ms(tracker_elapsed),
-            ms(block_entity_elapsed),
-        );
     }
 
     fn send_block_updated(

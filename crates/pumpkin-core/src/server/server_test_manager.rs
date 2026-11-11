@@ -122,14 +122,6 @@ pub async fn stop_game_tests() {
     STOP_GAME_TESTS.store(true, Ordering::Release);
 }
 
-/// True when no queued `GameTest` work is waiting. Contended locks count as busy.
-#[must_use]
-pub fn game_test_queue_idle() -> bool {
-    GAME_TEST_QUEUE
-        .try_lock()
-        .is_ok_and(|queue| queue.is_empty())
-}
-
 pub async fn drain_game_test_queue(server: &Arc<Server>, runner: &mut GameTestRunner) {
     // Hold the same queue mutex used by stop_game_tests while consuming the stop
     // flag and draining requests. This closes the async race where a new /test run

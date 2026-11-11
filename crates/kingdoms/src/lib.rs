@@ -102,17 +102,10 @@ pub use watertight::{BuildingCheck, TownCheck, check_floating_fragments, check_t
 use height::register_world_gen;
 use marker::register_hooks;
 
-fn kingdoms_server_tick(server: &std::sync::Arc<Server>) {
-    for world in server.worlds.load().iter() {
-        director::tick_world(world);
-    }
-}
-
 /// Installs the plugin on a running server: command, hooks, and future worlds.
 pub fn install(server: &Server) {
     pumpkin_core::server::KINGDOMS_TICK_WORLDS_INLINE
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    let _ = pumpkin_core::server::KINGDOMS_TICK_FN.set(kingdoms_server_tick);
     server.command_dispatcher.rcu(|dispatcher| {
         let mut next = (**dispatcher).clone();
         command::register(&mut next, &server.permission_manager);
