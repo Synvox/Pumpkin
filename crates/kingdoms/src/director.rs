@@ -486,6 +486,7 @@ struct TownWar {
     restore_flag: bool,
 }
 
+#[derive(Clone)]
 struct Wired {
     faction: Faction,
     captain: bool,
@@ -2665,6 +2666,46 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             // Living ids come from spawn + [`Director::note_death`]. A spatial
             // snapshot misses brand-new bodies (not yet in the entity index)
             // and was wiping the wave, ending the raid before it marched.
+            // Bodies we have already wired that vanished without a death
+            // event (chunk unload, void) still have to become ghosts or a
+            // one-bot capital raid ends as "repelled" at the outer ring.
+            {
+                let snap_ids: HashSet<i32> = snapshots
+                    .iter()
+                    .map(|(entity, _)| entity.get_entity().entity_id)
+                    .collect();
+                let missing_ids: Vec<i32> = war.raid.as_ref().map_or_else(Vec::new, |raid| {
+                    raid.living
+                        .iter()
+                        .copied()
+                        .filter(|id| !snap_ids.contains(id) && war.wired.contains_key(id))
+                        .collect()
+                });
+                let missing: Vec<Wired> = missing_ids
+                    .iter()
+                    .filter_map(|id| war.wired.get(id).cloned())
+                    .collect();
+                let keep = war.scene.keep();
+                if let Some(raid) = war.raid.as_mut() {
+                    raid.living.retain(|id| !missing_ids.contains(id));
+                    raid.temps.retain(|id| !missing_ids.contains(id));
+                    for wired in missing {
+                        let dist = (wired.x - f64::from(keep.x)).hypot(wired.z - f64::from(keep.z));
+                        if dist > PLAYER_SIM_RANGE && matches!(wired.faction, Faction::Pillager) {
+                            raid.ghosts.push(GhostSoldier {
+                                faction: wired.faction,
+                                x: wired.x,
+                                y: wired.y,
+                                z: wired.z,
+                                bearer: wired.captain,
+                                raider: wired.raider,
+                                job: wired.job,
+                                role: wired.role,
+                            });
+                        }
+                    }
+                }
+            }
             let mut finished = false;
             if let Some(raid) = &mut war.raid {
                 let tickets_done = war.pending_tickets.is_empty()
