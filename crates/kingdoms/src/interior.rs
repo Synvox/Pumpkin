@@ -472,24 +472,44 @@ fn furnish_tavern(
     let (cx, cz) = rect.center();
     let lx = x - rect.min_x;
     let lz = z - rect.min_z;
-    if (x - cx).abs() <= 1 && lz % 3 == 1 {
+    if lx == 2 && lz == 2 {
+        let top = (floor + stories * 4).min(roof_y - 1);
+        for y in floor + 1..=top {
+            sink.put(x, y, z, Block::LADDER.default_state);
+        }
+        return;
+    }
+    if lz == 1 && (x - cx).abs() <= 3 {
+        sink.put(x, floor + 1, z, Block::BARREL.default_state);
+        if x == cx {
+            sink.put(x, floor + 2, z, Block::BARREL.default_state);
+        }
+    } else if lz == 2 && (x - cx).abs() <= 3 {
         sink.put(x, floor + 1, z, palette.slab);
-    } else if (x - cx).abs() == 2 && lz % 3 == 1 {
+    } else if x == cx && lz == 3 {
+        sink.put(x, floor + 1, z, Block::CAMPFIRE.default_state);
+        sink.put(x, floor + 2, z, palette.bricks);
+    } else if (x - cx).abs() <= 1 && lz % 3 == 1 && lz >= 4 {
+        sink.put(x, floor + 1, z, palette.slab);
+    } else if (x - cx).abs() == 2 && lz % 3 == 1 && lz >= 4 {
         sink.put(
             x,
             floor + 1,
             z,
             stair_state(palette.stairs, if x < cx { Dir::East } else { Dir::West }),
         );
-    } else if lx == 1 && lz == 1 {
-        sink.put(x, floor + 1, z, Block::BARREL.default_state);
-    } else if lx == 2 && lz == 1 {
-        sink.put(x, floor + 1, z, Block::CAULDRON.default_state);
-    } else if x == cx && z == cz {
-        sink.put(x, floor + 1, z, Block::CRAFTING_TABLE.default_state);
+    } else if lx == 1 && lz == rect.depth() - 2 {
+        sink.put(x, floor + 1, z, Block::FURNACE.default_state);
     }
-    if stories >= 2 && z == cz && (x - cx).abs() >= 2 {
-        sink.put(x, floor + 5, z, Block::WHITE_BED.default_state);
+    if stories >= 2 {
+        let y1 = floor + 4;
+        if y1 + 1 < roof_y {
+            if lz % 3 == 1 && (x - cx).abs() >= 2 {
+                sink.put(x, y1 + 1, z, Block::WHITE_BED.default_state);
+            } else if x == cx && z == cz {
+                sink.put(x, y1 + 1, z, Block::CHEST.default_state);
+            }
+        }
     }
     if light_here(x, z, 4) {
         sink.put(x, floor + 3, z, Block::LANTERN.default_state);

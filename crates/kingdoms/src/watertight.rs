@@ -222,6 +222,7 @@ fn planned_timber(kind: CellKind) -> bool {
             | CellKind::Gallows
             | CellKind::StandingStone
             | CellKind::LootPile
+            | CellKind::Wagon
     )
 }
 
@@ -322,6 +323,7 @@ fn flags_as_floating_kind(kind: CellKind) -> bool {
             | CellKind::FieldWall
             | CellKind::Plaza
             | CellKind::Fountain
+            | CellKind::Wagon
     )
 }
 
