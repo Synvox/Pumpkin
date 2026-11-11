@@ -82,34 +82,62 @@ pub fn repair_columns(
     out
 }
 
-/// Diff live blocks against the plan for `columns`. Caps the queue.
+/// Diff of a scan pass: jobs to place plus how much of the plan still matches.
+#[derive(Clone, Debug, Default)]
+pub struct RepairScan {
+    pub jobs: Vec<RepairJob>,
+    pub planned: u32,
+    pub mismatched: u32,
+}
+
+impl RepairScan {
+    /// Percent of scanned planned blocks that already match the live world.
+    #[must_use]
+    pub fn pct_restored(&self) -> u32 {
+        100u32
+            .saturating_mul(self.planned.saturating_sub(self.mismatched))
+            .checked_div(self.planned)
+            .unwrap_or(100)
+    }
+}
+
+/// Diff live blocks against the plan for `columns`. Caps the job queue.
 #[must_use]
 pub fn collect_jobs(
     world: &World,
     plan: &TownPlan,
     columns: &[(i32, i32, RepairBand)],
     cap: usize,
-) -> Vec<RepairJob> {
-    let mut jobs = Vec::new();
+) -> RepairScan {
+    let mut scan = RepairScan::default();
     for &(x, z, _) in columns {
-        if jobs.len() >= cap {
-            break;
-        }
         if crate::siege::is_flag_column(plan.castle.flag, x, z) {
             continue;
         }
         let planned = crate::stamp::planned_column(plan, x, z);
         for block in planned {
-            if jobs.len() >= cap {
-                break;
-            }
-            let live = world.get_block_state_id(&BlockPos::new(block.x, block.y, block.z));
+            let Some(live) =
+                world.get_block_state_id_if_loaded(&BlockPos::new(block.x, block.y, block.z))
+            else {
+                // Far towns hold no tickets. Count the hole and queue it so
+                // the director can restore abstractly without a fetch.
+                scan.planned = scan.planned.saturating_add(1);
+                scan.mismatched = scan.mismatched.saturating_add(1);
+                if scan.jobs.len() < cap {
+                    scan.jobs.push(RepairJob::from_planned(block));
+                }
+                continue;
+            };
+            scan.planned = scan.planned.saturating_add(1);
             if live.as_u16() != block.state {
-                jobs.push(RepairJob::from_planned(block));
+                scan.mismatched = scan.mismatched.saturating_add(1);
+                if scan.jobs.len() < cap {
+                    scan.jobs.push(RepairJob::from_planned(block));
+                }
             }
         }
     }
-    jobs
+    scan
 }
 
 /// A repair job when live world state does not match the plan.
@@ -121,7 +149,9 @@ pub fn job_if_mismatch(live: u16, planned: crate::stamp::PlannedBlock) -> Option
 /// Place one planned block. Returns true if the world changed.
 pub fn place_one(world: &Arc<World>, job: RepairJob) -> bool {
     let pos = job.pos();
-    let live = world.get_block_state_id(&pos);
+    let Some(live) = world.get_block_state_id_if_loaded(&pos) else {
+        return false;
+    };
     if live.as_u16() == job.state {
         return false;
     }
@@ -191,5 +221,13 @@ mod tests {
         assert_eq!(job.z, 6);
         assert_eq!(job.state, planned.state);
         assert!(job_if_mismatch(planned.state, planned).is_none());
+        let empty = RepairScan::default();
+        assert_eq!(empty.pct_restored(), 100);
+        let half = RepairScan {
+            jobs: Vec::new(),
+            planned: 10,
+            mismatched: 4,
+        };
+        assert_eq!(half.pct_restored(), 60);
     }
 }

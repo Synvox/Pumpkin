@@ -4736,6 +4736,33 @@ mod ai_step_tests {
     }
 
     #[tokio::test]
+    async fn nearby_director_driven_body_still_runs_vanilla_tick() -> TestResult {
+        let folder = tempfile::tempdir()?;
+        let world = world(&folder);
+        let mob = probe(world.clone(), Arc::new(AtomicUsize::new(0)));
+        mob.mob.set_director_driven(true);
+        mob.mob
+            .living_entity
+            .entity
+            .no_physics
+            .store(false, Ordering::Relaxed);
+        let skipped = (0..8)
+            .map(|n| {
+                mob.mob
+                    .living_entity
+                    .entity
+                    .tick_count
+                    .store(n, Ordering::Relaxed);
+                mob.mob.skip_sparse_vanilla_tick()
+            })
+            .filter(|skip| *skip)
+            .count();
+        world.level.shutdown().await;
+        assert_eq!(skipped, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn goal_jump_survives_navigation_finish_and_expires_next_step() -> TestResult {
         let folder = tempfile::tempdir()?;
         let world = world(&folder);

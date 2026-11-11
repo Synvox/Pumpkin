@@ -146,10 +146,14 @@ pub struct MobEntity {
 }
 
 impl MobEntity {
-    /// Far `director_driven` bodies skip vanilla ticks this often (2–4).
+    /// Far `director_driven` bodies skip vanilla ticks this often (3 of 4).
+    /// Near-player bodies keep a full vanilla tick; the tracker still sends
+    /// moves at 20 Hz within 32.
     pub const SPARSE_TICK_PERIOD: u32 = 4;
 
     /// True when this kingdoms raid body should skip the rest of vanilla tick.
+    /// Only virtualized (`no_physics`) director bodies skip; a body next to a
+    /// player still runs gravity, fire, drowning, hurt timers, and death.
     #[must_use]
     pub fn skip_sparse_vanilla_tick(&self) -> bool {
         if !self.is_director_driven() {

@@ -1,7 +1,8 @@
 //! Civilian and guard routines between raids.
 //!
 //! Day: civilians walk to a workstation. Night: they go home to a bed.
-//! Alarm: everyone flees to the keep. Guards patrol the wall when idle.
+//! Alarm: everyone flees to the keep. Guards walk the walls and hold the
+//! gates when idle. Militia drills in the bailey.
 
 /// Vanilla day length in ticks.
 pub const DAY_TICKS: i64 = 24_000;
