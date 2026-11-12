@@ -3648,6 +3648,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         }
     }
     tick_moving_ram(world, town_id, tick, &snapshots, breached, &mut ram_at_gate);
+    tick_crewed_trebuchet_frame(world, town_id, tick, &snapshots);
     if amortizing {
         prewarm_siege_columns(world, town_id);
         continue_engine_spawns(world, town_id);
@@ -5693,7 +5694,6 @@ fn tick_moving_ram(
     if let Some(war) = dir.towns.get_mut(town_id) {
         war.ram = ram;
     }
-    tick_crewed_trebuchet_frame(world, town_id, tick, snapshots);
 }
 
 fn tick_crewed_trebuchet_frame(
