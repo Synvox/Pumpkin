@@ -1226,6 +1226,14 @@ fn place_palisade(
     z: i32,
     palette: &Palette,
 ) {
+    if plan.has_scene(x, z, crate::scenes::SceneKind::TollBridge) {
+        let y = ground.max(plan.heights.sea_level) + 3;
+        for yy in ground.min(plan.heights.sea_level).max(sink.floor_min() + 2)..=y {
+            sink.put(x, yy, z, palette.bricks);
+        }
+        sink.put(x, y + 1, z, palette.brick_wall);
+        return;
+    }
     let bandit = plan
         .scene_at(x, z)
         .is_some_and(|scene| scene.kind == crate::scenes::SceneKind::BanditHideout);
@@ -2248,6 +2256,18 @@ fn place_palisade_gate(
     z: i32,
     palette: &Palette,
 ) {
+    if plan.has_scene(x, z, crate::scenes::SceneKind::TollBridge) {
+        let y = ground.max(plan.heights.sea_level) + 3;
+        for yy in ground.min(plan.heights.sea_level).max(sink.floor_min() + 2)..=y {
+            sink.put(x, yy, z, palette.bricks);
+        }
+        sink.put(x, y + 1, z, palette.brick_wall);
+        sink.put(x, y + 2, z, palette.brick_wall);
+        if (x + z) % 2 == 0 {
+            sink.put(x, y + 3, z, Block::LANTERN.default_state);
+        }
+        return;
+    }
     sink.put(x, ground, z, palette.path);
     let rect = blob_of(plan, x, z, CellKind::PalisadeGate);
     let (cx, cz) = rect.center();
@@ -4975,7 +4995,8 @@ fn place_watchtower(
             sink.put(x, floor + 1, z, Block::LADDER.default_state);
             sink.put(x, floor + 5, z, Block::LADDER.default_state);
             sink.put(x, floor + 9, z, Block::LADDER.default_state);
-            sink.put(x, top + 1, z, Block::LANTERN.default_state);
+            sink.put(x, top + 1, z, Block::GLOWSTONE.default_state);
+            sink.put(x, top + 2, z, Block::CAMPFIRE.default_state);
         } else if (x + z) % 4 == 0 {
             sink.put(x, floor + 1, z, Block::CHEST.default_state);
         }
@@ -6207,7 +6228,7 @@ fn place_green(
         .scene_at(x, z)
         .is_some_and(|scene| scene.kind == crate::scenes::SceneKind::CharcoalCamp)
     {
-        place_charcoal_yard(sink, x, ground, z, palette);
+        place_charcoal_yard(sink, plan, x, ground, z, palette);
         return;
     }
     if plan
@@ -6282,22 +6303,64 @@ fn place_lumber_yard(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, pal
     }
 }
 
-fn place_charcoal_yard(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
+fn place_charcoal_yard(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
     sink.put(x, ground, z, Block::COARSE_DIRT.default_state);
-    let mix = (x.wrapping_mul(11) + z.wrapping_mul(19)).unsigned_abs();
-    match mix % 13 {
-        0 | 1 => {
-            sink.put(x, ground + 1, z, Block::COAL_BLOCK.default_state);
-            sink.put(x, ground + 2, z, Block::COAL_BLOCK.default_state);
+    clear_above(sink, x, ground + 1, ground + 8, z);
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|s| s.kind == crate::scenes::SceneKind::CharcoalCamp && s.rect.contains(x, z))
+    {
+        let clamps = [
+            (scene.rect.min_x + 10, scene.rect.min_z + 11),
+            (scene.rect.max_x - 7, scene.rect.min_z + 13),
+            (scene.rect.min_x + 16, scene.rect.max_z - 6),
+        ];
+        let mut nearest = 8;
+        for (cx, cz) in clamps {
+            nearest = nearest.min((x - cx).abs().max((z - cz).abs()));
         }
-        2 => {
+        if nearest == 0 {
+            sink.put(x, ground + 1, z, palette.log);
+            sink.put(x, ground + 2, z, palette.log);
+            sink.put(x, ground + 3, z, Block::CAMPFIRE.default_state);
+            return;
+        }
+        if nearest == 1 {
+            sink.put(x, ground + 1, z, Block::DIRT.default_state);
+            sink.put(x, ground + 2, z, Block::DIRT.default_state);
+            sink.put(x, ground + 3, z, Block::GRASS_BLOCK.default_state);
+            return;
+        }
+        if nearest == 2 {
+            sink.put(x, ground + 1, z, Block::COARSE_DIRT.default_state);
+            return;
+        }
+    }
+    let mix = (x.wrapping_mul(11) + z.wrapping_mul(19)).unsigned_abs();
+    match mix % 9 {
+        0 => {
             sink.put(x, ground + 1, z, palette.log);
             sink.put(x, ground + 2, z, palette.log);
             sink.put(x, ground + 3, z, palette.log);
         }
-        3 => sink.put(x, ground + 1, z, Block::CAMPFIRE.default_state),
-        4 => sink.put(x, ground + 1, z, Block::FURNACE.default_state),
-        5 => sink.put(x, ground + 1, z, Block::BARREL.default_state),
+        1 => {
+            sink.put(x, ground + 1, z, palette.log);
+            sink.put(x, ground + 2, z, palette.log);
+        }
+        2 => sink.put(x, ground + 1, z, Block::BARREL.default_state),
+        3 => {
+            sink.put(x, ground + 1, z, palette.log);
+            sink.put(x, ground + 2, z, palette.log);
+        }
+        4 => sink.put(x, ground + 1, z, palette.fence),
         _ => {}
     }
 }
@@ -6323,6 +6386,15 @@ fn place_inn_yard(
     );
     terrace_edge(sink, plan, x, ground, z, palette);
     clear_above(sink, x, ground + 1, ground + 4, z);
+    let tavern_sign = plan.lots.iter().any(|lot| {
+        lot.kind == BuildingKind::Tavern && z == lot.rect.max_z + 1 && x == lot.rect.center().0
+    });
+    if tavern_sign {
+        sink.put(x, ground + 1, z, palette.fence);
+        sink.put(x, ground + 2, z, palette.fence);
+        sink.put(x, ground + 3, z, Block::OAK_HANGING_SIGN.default_state);
+        return;
+    }
     let beside_barn = plan.lots.iter().any(|lot| {
         lot.kind == BuildingKind::Barn
             && Dir::ALL
@@ -6339,6 +6411,19 @@ fn place_inn_yard(
             }
         } else if along == 1 {
             sink.put(x, ground + 1, z, palette.fence);
+            sink.put(x, ground + 2, z, palette.fence);
+        }
+        return;
+    }
+    let rim = Dir::ALL.iter().any(|dir| {
+        !matches!(
+            plan.occ.kind(x + dir.dx(), z + dir.dz()),
+            CellKind::Plaza | CellKind::Well | CellKind::Wagon | CellKind::Eave
+        )
+    });
+    if rim && (x + z).rem_euclid(3) == 0 {
+        sink.put(x, ground + 1, z, palette.fence);
+        if mix == 0 {
             sink.put(x, ground + 2, z, palette.fence);
         }
     }

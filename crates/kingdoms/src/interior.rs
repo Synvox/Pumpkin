@@ -536,11 +536,10 @@ fn furnish_tavern(
     }
     if lz == 1 && (x - cx).abs() <= 3 {
         sink.put(x, floor + 1, z, Block::BARREL.default_state);
-        if x == cx {
-            sink.put(x, floor + 2, z, Block::BARREL.default_state);
-        }
+        sink.put(x, floor + 2, z, Block::BARREL.default_state);
     } else if lz == 2 && (x - cx).abs() <= 3 {
-        sink.put(x, floor + 1, z, palette.slab);
+        sink.put(x, floor + 1, z, stair_state(palette.stairs, Dir::South));
+        sink.put(x, floor + 2, z, Block::OAK_TRAPDOOR.default_state);
     } else if x == cx && lz == 3 {
         sink.put(x, floor + 1, z, Block::CAMPFIRE.default_state);
         sink.put(x, floor + 2, z, palette.bricks);
@@ -596,10 +595,23 @@ fn furnish_barn(sink: &mut impl BlockSink, rect: Rect, x: i32, floor: i32, z: i3
     let lx = x - rect.min_x;
     if lx % 4 == 0 {
         sink.put(x, floor + 1, z, Block::OAK_FENCE.default_state);
+        if roof_y >= floor + 5 {
+            sink.put(x, floor + 2, z, Block::OAK_LOG.default_state);
+            sink.put(x, floor + 3, z, Block::OAK_SLAB.default_state);
+        }
     } else if (x + z) % 4 == 0 {
         sink.put(x, floor + 1, z, Block::HAY_BLOCK.default_state);
+        if roof_y >= floor + 6 {
+            sink.put(x, floor + 2, z, Block::HAY_BLOCK.default_state);
+            sink.put(x, floor + 3, z, Block::OAK_SLAB.default_state);
+            sink.put(x, floor + 4, z, Block::HAY_BLOCK.default_state);
+        }
     } else if (x + z) % 7 == 1 {
         sink.put(x, floor + 1, z, Block::CHEST.default_state);
+    } else if roof_y >= floor + 5 && lx % 2 == 0 {
+        sink.put(x, floor + 1, z, Block::OAK_FENCE.default_state);
+        sink.put(x, floor + 2, z, Block::OAK_LOG.default_state);
+        sink.put(x, floor + 3, z, Block::OAK_SLAB.default_state);
     }
     if light_here(x, z, 5) && roof_y >= floor + 4 {
         hang_lantern(sink, x, roof_y - 2, z, roof_y);

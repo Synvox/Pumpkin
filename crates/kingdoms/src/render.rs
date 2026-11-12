@@ -363,6 +363,7 @@ fn write_scene_renders(
             | SceneKind::WalledMarket
             | SceneKind::MillHamlet
             | SceneKind::Beacon
+            | SceneKind::Watchtower
             | SceneKind::Quarry
             | SceneKind::SiegeCamp
             | SceneKind::HuntingLodge
@@ -390,6 +391,8 @@ fn write_scene_renders(
             rect = tourney_focus_rect(plan, rect);
         } else if scene.kind == SceneKind::Quarry {
             rect = quarry_focus_rect(plan, rect);
+        } else if scene.kind == SceneKind::TollBridge {
+            rect = toll_focus_rect(plan, scene.rect);
         } else if scene.kind == SceneKind::WalledMarket {
             rect = scene.rect.inflate(2);
         } else if rect.width() > 56 || rect.depth() > 56 {
@@ -556,6 +559,7 @@ fn write_scene_renders(
         SceneKind::WalledMarket,
         SceneKind::MillHamlet,
         SceneKind::Beacon,
+        SceneKind::Watchtower,
         SceneKind::Tourney,
         SceneKind::Monastery,
         SceneKind::Vineyard,
@@ -579,6 +583,8 @@ fn write_scene_renders(
             festival_focus_rect(plan, scene.rect)
         } else if kind == SceneKind::RidgeMill {
             mill_focus_rect(plan, scene.rect)
+        } else if kind == SceneKind::TollBridge {
+            toll_focus_rect(plan, scene.rect)
         } else {
             scene.rect.inflate(2)
         };
@@ -589,12 +595,15 @@ fn write_scene_renders(
             SceneKind::BanditHideout => "Bandit hideout · spread camp, spit, wagon, lookouts",
             SceneKind::HermitTower => "Hermit's tower · balcony, chimney, garden",
             SceneKind::StoneCircle => "Stone circle · menhirs and fallen lintel",
-            SceneKind::TollBridge => "Toll bridge · gatehouse over the river",
-            SceneKind::CharcoalCamp => "Charcoal camp · hut, mounds and hearths",
-            SceneKind::RoadsideInn => "Roadside inn · cobbled yard, wagon, well, jettied tavern",
+            SceneKind::TollBridge => "Toll bridge · stone arch, gatehouse and tollhouse",
+            SceneKind::CharcoalCamp => "Charcoal camp · earth clamps, log piles and huts",
+            SceneKind::RoadsideInn => {
+                "Coaching inn · courtyard, stables, hay loft, well and hanging sign"
+            }
             SceneKind::WalledMarket => "Walled market · guildhall, stalls, palisade, well",
             SceneKind::MillHamlet => "Mill hamlet · wheel, race, granary",
             SceneKind::Beacon => "Hilltop beacon · brazier and watch-fire",
+            SceneKind::Watchtower => "Headland watchtower · stone tower and beacon fire",
             SceneKind::Tourney => "Jousting lists · sand lane, stands, pavilions beside the castle",
             SceneKind::Monastery => {
                 "Priory · cloister garth, chapter house, scriptorium, herb garden"
@@ -1188,6 +1197,46 @@ fn lot_floor(plan: &TownPlan, lot: &crate::buildings::Lot) -> i32 {
             lot.rect.max_z,
         )
         .max(plan.heights.sea_level + 2)
+}
+
+fn toll_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
+    let mut rect: Option<Rect> = None;
+    let grow = |rect: &mut Option<Rect>, x: i32, z: i32| {
+        *rect = Some(rect.map_or_else(
+            || Rect::new(x, z, x, z),
+            |r| {
+                Rect::new(
+                    r.min_x.min(x),
+                    r.min_z.min(z),
+                    r.max_x.max(x),
+                    r.max_z.max(z),
+                )
+            },
+        ));
+    };
+    for z in fallback.min_z..=fallback.max_z {
+        for x in fallback.min_x..=fallback.max_x {
+            if matches!(
+                plan.occ.kind(x, z),
+                CellKind::Bridge | CellKind::PalisadeGate | CellKind::Palisade
+            ) {
+                grow(&mut rect, x, z);
+            }
+        }
+    }
+    for lot in &plan.lots {
+        if lot.kind == BuildingKind::Watchtower && fallback.intersects(lot.rect) {
+            grow(&mut rect, lot.rect.min_x, lot.rect.min_z);
+            grow(&mut rect, lot.rect.max_x, lot.rect.max_z);
+        }
+        if lot.kind == BuildingKind::Cottage
+            && fallback.contains(lot.rect.center().0, lot.rect.center().1)
+        {
+            grow(&mut rect, lot.rect.min_x, lot.rect.min_z);
+            grow(&mut rect, lot.rect.max_x, lot.rect.max_z);
+        }
+    }
+    rect.unwrap_or(fallback).inflate(2)
 }
 
 fn mill_hamlet_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
