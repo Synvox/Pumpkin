@@ -33,6 +33,13 @@ const LADDER_HEIGHT: i32 = WALL_WALK_LIFT;
 const TOWER_STEP: f64 = 0.12;
 /// Block-display parts spawned per town tick (the 8-part dump was a 200 ms hitch).
 pub const ENGINE_PARTS_PER_TICK: usize = 2;
+/// Attackers bring at most this many crewed rams + trebuchets.
+pub const ENGINE_CAP: u8 = 2;
+/// Hit points. Sallying defenders wreck the frame; crew keep it firing.
+pub const TREB_MAX_HP: f32 = 60.0;
+/// Damage applied per nearby defender each trebuchet tick.
+pub const TREB_DAMAGE_PER_DEFENDER: f32 = 0.8;
+const TREB_CREW_MIN: u32 = 2;
 
 /// One wall block the cobble cleared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +88,128 @@ pub struct SiegeTower {
     pub y: f64,
     pub z: f64,
     pub arrived: bool,
+}
+
+/// Villager-crewed siege-camp trebuchet (block displays, same palette as the stamp).
+#[derive(Clone, Debug)]
+pub struct CrewedTrebuchet {
+    pub parts: Vec<i32>,
+    pub hp: f32,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub destroyed: bool,
+}
+
+impl CrewedTrebuchet {
+    #[must_use]
+    pub fn post(&self) -> ScenePost {
+        ScenePost::new(self.x.floor() as i32, self.z.floor() as i32)
+    }
+}
+
+/// Compact camp-trebuchet look: mast, cobble counterweight, fence arm, lantern.
+#[must_use]
+pub fn trebuchet_part_offsets() -> [(f64, f64, f64, &'static Block); 9] {
+    [
+        (0.0, 0.0, 0.0, &Block::DARK_OAK_LOG),
+        (0.0, 1.0, 0.0, &Block::DARK_OAK_LOG),
+        (0.0, 2.0, 0.0, &Block::DARK_OAK_LOG),
+        (0.0, 3.0, 0.0, &Block::DARK_OAK_LOG),
+        (-1.0, 1.0, 0.0, &Block::OAK_PLANKS),
+        (-1.0, 2.0, 0.0, &Block::COBBLESTONE),
+        (1.0, 3.0, 0.0, &Block::DARK_OAK_FENCE),
+        (1.0, 4.0, 0.0, &Block::DARK_OAK_FENCE),
+        (0.0, 5.0, 0.0, &Block::LANTERN),
+    ]
+}
+
+/// Empty crewed trebuchet at `origin`; parts are appended a few per tick.
+#[must_use]
+pub fn empty_trebuchet(origin: Vector3<f64>) -> CrewedTrebuchet {
+    CrewedTrebuchet {
+        parts: Vec::new(),
+        hp: TREB_MAX_HP,
+        x: origin.x,
+        y: origin.y,
+        z: origin.z,
+        destroyed: false,
+    }
+}
+
+/// True when every display part has been spawned.
+#[must_use]
+pub fn trebuchet_complete(treb: &CrewedTrebuchet) -> bool {
+    treb.parts.len() >= trebuchet_part_offsets().len()
+}
+
+/// Spawn up to `budget` remaining trebuchet displays. Returns how many were added.
+pub fn append_trebuchet_parts(
+    world: &Arc<World>,
+    treb: &mut CrewedTrebuchet,
+    budget: usize,
+) -> usize {
+    if budget == 0 || treb.destroyed {
+        return 0;
+    }
+    let mut added = 0usize;
+    let offsets = trebuchet_part_offsets();
+    while treb.parts.len() < offsets.len() && added < budget {
+        let (dx, dy, dz, block) = offsets[treb.parts.len()];
+        let pos = Vector3::new(treb.x + dx, treb.y + dy, treb.z + dz);
+        let entity = Entity::new(world.clone(), pos, &EntityType::BLOCK_DISPLAY);
+        let display = BlockDisplayEntity::new(entity);
+        display.set_block_state(i32::from(block.default_state.id.as_u16()));
+        display.display.set_teleport_duration(2);
+        let id = display.get_entity().entity_id;
+        if world.spawn_entity(display) {
+            treb.parts.push(id);
+        } else {
+            break;
+        }
+        added += 1;
+    }
+    added
+}
+
+/// Remove trebuchet display entities.
+pub fn destroy_trebuchet(world: &World, treb: &mut CrewedTrebuchet) {
+    for id in treb.parts.drain(..) {
+        if let Some(e) = world.get_entity_by_id(id) {
+            e.get_entity().remove();
+        }
+    }
+    treb.destroyed = true;
+    treb.hp = 0.0;
+    tracing::info!(
+        "kingdoms trebuchet destroyed x={:.1} z={:.1}",
+        treb.x,
+        treb.z
+    );
+}
+
+/// Chip HP. Returns true when the frame just died.
+#[must_use]
+pub fn tick_crewed_trebuchet(hp: f32, defenders_near: u32) -> f32 {
+    hp - TREB_DAMAGE_PER_DEFENDER * defenders_near as f32
+}
+
+/// Crewed frame can loose when two sappers stand at the keel.
+#[must_use]
+pub fn trebuchet_can_fire(destroyed: bool, crew_near: u32) -> bool {
+    !destroyed && crew_near >= TREB_CREW_MIN
+}
+
+/// `(ram, trebuchet)` for this raid size. Cap is [`ENGINE_CAP`].
+#[must_use]
+pub fn engines_for_raid(raiders: u16) -> (bool, bool) {
+    if raiders < 8 {
+        (false, false)
+    } else if raiders < 12 {
+        (true, false)
+    } else {
+        (true, true)
+    }
 }
 
 /// Horizontal and vertical speed that lands `from` on `to` after `ticks`.
@@ -493,5 +622,24 @@ mod tests {
         assert!(!is_protected_block(&Block::STONE_BRICKS));
         assert!(!is_protected_block(&Block::COBBLESTONE));
         assert!(!is_protected_block(&Block::LADDER));
+    }
+
+    #[test]
+    fn raid_brings_one_or_two_crewed_engines() {
+        assert_eq!(engines_for_raid(4), (false, false));
+        assert_eq!(engines_for_raid(8), (true, false));
+        assert_eq!(engines_for_raid(16), (true, true));
+        assert_eq!(ENGINE_CAP, 2);
+        assert_eq!(trebuchet_part_offsets().len(), 9);
+        assert!(trebuchet_part_offsets().len() > ENGINE_PARTS_PER_TICK);
+        let empty = empty_trebuchet(Vector3::new(0.0, 64.0, 0.0));
+        assert!(!trebuchet_complete(&empty));
+        assert_eq!(empty.hp, TREB_MAX_HP);
+        assert!(trebuchet_can_fire(false, 2));
+        assert!(!trebuchet_can_fire(false, 1));
+        assert!(!trebuchet_can_fire(true, 4));
+        let hp = tick_crewed_trebuchet(TREB_MAX_HP, 2);
+        assert!((hp - (TREB_MAX_HP - 2.0 * TREB_DAMAGE_PER_DEFENDER)).abs() < f32::EPSILON);
+        assert!(tick_crewed_trebuchet(1.0, 4) <= 0.0);
     }
 }

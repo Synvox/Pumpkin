@@ -639,11 +639,26 @@ fn director_state() -> Value {
             })
         })
         .collect();
+    let morale: Vec<Value> = dir
+        .morale_states()
+        .into_iter()
+        .map(|m| {
+            json!({
+                "kingdom": m.kingdom,
+                "recruitment": m.recruitment,
+                "desertion": m.desertion,
+                "lost_towns": m.lost_towns,
+                "shock_until": m.shock_until,
+                "holds_capital": m.holds_capital,
+            })
+        })
+        .collect();
     json!({
         "tick": tick,
         "towns": towns,
         "players": players,
         "squads": squads,
+        "morale": morale,
         "troops": { "defenders": defenders, "raiders": raiders },
         "war_clock": !external_director_connected(),
     })
@@ -684,6 +699,7 @@ fn webhook_name(kind: CombatKind) -> Option<&'static str> {
         CombatKind::Capture => Some("town_captured"),
         CombatKind::Retake => Some("town_captured"),
         CombatKind::RamDestroyed => Some("ram_destroyed"),
+        CombatKind::TrebuchetDestroyed => Some("trebuchet_destroyed"),
         CombatKind::Rout => Some("rout"),
         CombatKind::WarClock => Some("war_clock"),
         CombatKind::Alarm => Some("town_alarm"),
@@ -944,6 +960,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(state_json.get("squads").is_some());
         assert!(state_json["squads"].is_array());
+        assert!(state_json.get("morale").is_some());
+        assert!(state_json["morale"].is_array());
 
         let raid = post_raid(
             State(state),
