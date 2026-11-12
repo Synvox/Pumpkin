@@ -2255,7 +2255,7 @@ fn paint_shipyard(
         max_x = max_x.max(sx);
         max_z = max_z.max(sz);
     };
-    // Modest grass apron, then distinct yard pieces that do not overlap.
+    // Grass apron, then a wide slip from the yard down into the water.
     shipyard_fill(
         occ,
         grid,
@@ -2264,9 +2264,9 @@ fn paint_shipyard(
         z,
         out,
         -8,
-        2,
-        -6,
-        8,
+        3,
+        -10,
+        10,
         CellKind::Green,
         true,
         &mut grow,
@@ -2278,10 +2278,25 @@ fn paint_shipyard(
         x,
         z,
         out,
-        -16,
-        -10,
         -8,
-        10,
+        16,
+        -6,
+        6,
+        CellKind::Slipway,
+        false,
+        &mut grow,
+    );
+    shipyard_fill(
+        occ,
+        grid,
+        search,
+        x,
+        z,
+        out,
+        -20,
+        -11,
+        -6,
+        6,
         CellKind::Ropewalk,
         true,
         &mut grow,
@@ -2293,10 +2308,10 @@ fn paint_shipyard(
         x,
         z,
         out,
+        -10,
+        -7,
+        -10,
         -8,
-        -5,
-        -8,
-        -5,
         CellKind::CutStone,
         true,
         &mut grow,
@@ -2308,10 +2323,10 @@ fn paint_shipyard(
         x,
         z,
         out,
-        -8,
-        -5,
-        6,
-        9,
+        -10,
+        -7,
+        8,
+        10,
         CellKind::CutStone,
         true,
         &mut grow,
@@ -2323,14 +2338,15 @@ fn paint_shipyard(
         x,
         z,
         out,
-        -8,
+        -7,
         -4,
-        0,
-        3,
+        -9,
+        -7,
         CellKind::Sawpit,
         true,
         &mut grow,
     );
+    // 3x3 pad on the slip at the water's edge, jib along the hull.
     shipyard_fill(
         occ,
         grid,
@@ -2338,12 +2354,12 @@ fn paint_shipyard(
         x,
         z,
         out,
-        4,
-        6,
+        -3,
+        -1,
         4,
         6,
         CellKind::Crane,
-        true,
+        false,
         &mut grow,
     );
     shipyard_fill(
@@ -2353,8 +2369,8 @@ fn paint_shipyard(
         x,
         z,
         out,
-        7,
-        10,
+        0,
+        8,
         5,
         5,
         CellKind::Crane,
@@ -2368,16 +2384,16 @@ fn paint_shipyard(
         x,
         z,
         out,
-        -2,
-        18,
-        -2,
         2,
-        CellKind::Slipway,
+        7,
+        8,
+        10,
+        CellKind::Dock,
         false,
         &mut grow,
     );
-    let hull_cx = x + out.dx() * 8;
-    let hull_cz = z + out.dz() * 8;
+    // Keel inland of the shoreline so the hull sits up on the slip, not afloat.
+    let (hull_cx, hull_cz) = yard_at(x, z, out, -2, 0);
     let hull = hull_rect(hull_cx, hull_cz, out, SLIP_HULL_LEN, SLIP_HULL_BEAM);
     let mut hull_ok = true;
     for hz in hull.min_z..=hull.max_z {
@@ -2418,8 +2434,9 @@ fn paint_shipyard(
                     continue;
                 }
                 let here = occ.kind(sx, sz);
-                if shipyard_claimable(here)
-                    || matches!(here, CellKind::Slipway | CellKind::Green | CellKind::Quay)
+                if here != CellKind::Crane
+                    && (shipyard_claimable(here)
+                        || matches!(here, CellKind::Slipway | CellKind::Green | CellKind::Quay))
                 {
                     occ.set(sx, sz, CellKind::Ship, true);
                     grow(sx, sz);
@@ -2427,10 +2444,26 @@ fn paint_shipyard(
             }
         }
     }
+    let (boat_cx, boat_cz) = yard_at(x, z, out, 5, 11);
+    let boat = hull_rect(boat_cx, boat_cz, out, 6, 3);
+    for bz in boat.min_z..=boat.max_z {
+        for bx in boat.min_x..=boat.max_x {
+            if !search.contains(bx, bz) {
+                continue;
+            }
+            let here = occ.kind(bx, bz);
+            if shipyard_claimable(here)
+                || matches!(here, CellKind::Harbor | CellKind::Dock | CellKind::Green)
+            {
+                occ.set(bx, bz, CellKind::Boat, true);
+                grow(bx, bz);
+            }
+        }
+    }
     let facing = out.opposite();
     let (ww, wd) = BuildingKind::Blacksmith.size();
     let mut workshop = None;
-    for (along, across) in [(-16, 12), (-14, -12), (-18, 8), (-12, 14)] {
+    for (along, across) in [(-14, 8), (-12, -10), (-16, 6), (-8, 10), (-14, -8)] {
         let (wx, wz) = yard_at(x, z, out, along, across);
         let rect = Rect::new(wx, wz, wx + ww - 1, wz + wd - 1);
         if force_lot(
@@ -2452,13 +2485,20 @@ fn paint_shipyard(
     }
     if workshop.is_none() {
         let (cw, cd) = BuildingKind::Cottage.size();
-        for (along, across) in [(-16, 12), (-14, -12), (-18, 8)] {
+        'cottage: for (along, across) in [(-14, 8), (-12, -10), (-16, 6), (-10, -9), (-8, 10)] {
             let (wx, wz) = yard_at(x, z, out, along, across);
-            let rect = Rect::new(wx, wz, wx + cw - 1, wz + cd - 1);
-            if force_lot(occ, grid, lots, seed, BuildingKind::Cottage, rect, facing).is_some() {
-                grow(rect.min_x, rect.min_z);
-                grow(rect.max_x, rect.max_z);
-                break;
+            for (ox, oz) in [
+                (wx, wz),
+                (wx - cw + 1, wz),
+                (wx, wz - cd + 1),
+                (wx - cw + 1, wz - cd + 1),
+            ] {
+                let rect = Rect::new(ox, oz, ox + cw - 1, oz + cd - 1);
+                if force_lot(occ, grid, lots, seed, BuildingKind::Cottage, rect, facing).is_some() {
+                    grow(rect.min_x, rect.min_z);
+                    grow(rect.max_x, rect.max_z);
+                    break 'cottage;
+                }
             }
         }
     }
@@ -2587,19 +2627,24 @@ fn shipyard_fill(
                         | CellKind::TownTower
                         | CellKind::TownGate
                 )
-                || (kind != CellKind::Slipway && near_curtain(occ, sx, sz, 8))
+                || (!matches!(
+                    kind,
+                    CellKind::Slipway | CellKind::Crane | CellKind::Dock | CellKind::Boat
+                ) && near_curtain(occ, sx, sz, 8))
             {
                 continue;
             }
             if matches!(
                 here,
-                CellKind::Slipway
-                    | CellKind::Ropewalk
+                CellKind::Ropewalk
                     | CellKind::CutStone
                     | CellKind::Sawpit
                     | CellKind::Crane
                     | CellKind::Ship
             ) {
+                continue;
+            }
+            if here == CellKind::Slipway && kind != CellKind::Crane {
                 continue;
             }
             if !shipyard_claimable(here)
@@ -13905,8 +13950,13 @@ mod tests {
         let mut rope = 0;
         let mut timber = 0;
         let mut hull = 0;
+        let mut hull_on_slip = 0;
+        let mut hull_dry = 0;
         let mut pit = 0;
         let mut crane = 0;
+        let mut crane_dry = 0;
+        let mut dock = 0;
+        let mut boat = 0;
         let mut wall_hits = 0;
         for z in yard.rect.min_z..=yard.rect.max_z {
             for x in yard.rect.min_x..=yard.rect.max_x {
@@ -13914,9 +13964,29 @@ mod tests {
                     CellKind::Slipway => slip += 1,
                     CellKind::Ropewalk => rope += 1,
                     CellKind::CutStone => timber += 1,
-                    CellKind::Ship => hull += 1,
+                    CellKind::Ship => {
+                        hull += 1;
+                        if harbour_plan.heights.is_dry(x, z) {
+                            hull_dry += 1;
+                        }
+                        if harbour_plan.heights.is_dry(x, z)
+                            || crate::geom::Dir::ALL.iter().any(|dir| {
+                                harbour_plan.occ.kind(x + dir.dx(), z + dir.dz())
+                                    == CellKind::Slipway
+                            })
+                        {
+                            hull_on_slip += 1;
+                        }
+                    }
                     CellKind::Sawpit => pit += 1,
-                    CellKind::Crane => crane += 1,
+                    CellKind::Crane => {
+                        crane += 1;
+                        if harbour_plan.heights.is_dry(x, z) {
+                            crane_dry += 1;
+                        }
+                    }
+                    CellKind::Dock => dock += 1,
+                    CellKind::Boat => boat += 1,
                     CellKind::TownWall | CellKind::TownTower | CellKind::TownGate => {
                         wall_hits += 1;
                     }
@@ -13928,8 +13998,13 @@ mod tests {
         assert!(rope >= 8, "ropewalk {rope}");
         assert!(timber >= 4, "timber stacks {timber}");
         assert!(hull >= 24, "slipway cog {hull}");
-        assert!(pit >= 4, "sawpit {pit}");
+        assert!(hull_on_slip >= 8, "cog on the slip {hull_on_slip}");
+        assert!(hull_dry >= 10, "cog keel on land {hull_dry}");
+        assert!(pit >= 3, "sawpit {pit}");
         assert!(crane >= 4, "yard crane {crane}");
+        assert!(crane_dry >= 4, "crane on dry shore {crane_dry}");
+        assert!(dock >= 4, "yard pier {dock}");
+        assert!(boat >= 4, "moored boats {boat}");
         assert!(
             wall_hits * 4 < slip + hull,
             "yard boxed by curtain walls wall={wall_hits} slip={slip} hull={hull}"

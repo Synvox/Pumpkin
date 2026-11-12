@@ -1285,30 +1285,39 @@ fn shipyard_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
     };
     for z in fallback.min_z..=fallback.max_z {
         for x in fallback.min_x..=fallback.max_x {
-            if plan.occ.kind(x, z) == CellKind::Slipway {
-                grow(&mut rect, x, z);
+            if !plan.has_scene(x, z, SceneKind::Shipyard) {
+                continue;
             }
-            if plan.occ.kind(x, z) == CellKind::Ship
-                && Dir::ALL
-                    .iter()
-                    .any(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) == CellKind::Slipway)
-            {
-                grow(&mut rect, x, z);
-            }
-        }
-    }
-    let core = rect.unwrap_or(fallback);
-    for z in core.min_z.saturating_sub(6)..=core.max_z + 6 {
-        for x in core.min_x.saturating_sub(6)..=core.max_x + 6 {
             if matches!(
                 plan.occ.kind(x, z),
-                CellKind::Crane | CellKind::Ropewalk | CellKind::CutStone | CellKind::Sawpit
+                CellKind::Slipway
+                    | CellKind::Ship
+                    | CellKind::Crane
+                    | CellKind::Ropewalk
+                    | CellKind::CutStone
+                    | CellKind::Sawpit
+                    | CellKind::Dock
+                    | CellKind::Boat
             ) {
                 grow(&mut rect, x, z);
             }
         }
     }
-    rect.unwrap_or(fallback).inflate(6)
+    let core = rect.unwrap_or(fallback);
+    for lot in &plan.lots {
+        if matches!(lot.kind, BuildingKind::Blacksmith | BuildingKind::Cottage)
+            && (lot.rect.intersects(core) || lot.rect.intersects(fallback))
+            && plan.has_scene(
+                (lot.rect.min_x + lot.rect.max_x) / 2,
+                (lot.rect.min_z + lot.rect.max_z) / 2,
+                SceneKind::Shipyard,
+            )
+        {
+            grow(&mut rect, lot.rect.min_x, lot.rect.min_z);
+            grow(&mut rect, lot.rect.max_x, lot.rect.max_z);
+        }
+    }
+    rect.unwrap_or(fallback).inflate(3)
 }
 
 fn festival_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {

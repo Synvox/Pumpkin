@@ -676,7 +676,12 @@ fn floating_in_rect(
         let block = volume
             .get(x, y, z)
             .map(|state| Block::from_state_id(state.id));
-        if size <= 2 && block.is_some_and(|b| is_hanging_decoration(b.id) || is_fence(b.id)) {
+        if size <= 2 && block.is_some_and(|b| is_fence(b.id)) {
+            continue;
+        }
+        if size <= 2
+            && block.is_some_and(|b| is_hanging_decoration(b.id) && b.id != Block::LANTERN.id)
+        {
             continue;
         }
         let name = block.map_or("block", |b| b.name);
@@ -692,6 +697,95 @@ fn floating_in_rect(
     }
     if !leftover.is_empty() {
         fails.push(format!("{tag} {} more floating blocks", leftover.len()));
+    }
+    fails.extend(unrooted_water_posts(
+        plan, volume, min_x, max_x, min_z, max_z, tag,
+    ));
+    fails
+}
+
+fn unrooted_water_posts(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    min_x: i32,
+    max_x: i32,
+    min_z: i32,
+    max_z: i32,
+    tag: &str,
+) -> Vec<String> {
+    let sea = plan.heights.sea_level;
+    let mut fails = Vec::new();
+    for z in min_z..=max_z {
+        for x in min_x..=max_x {
+            let kind = plan.occ.kind(x, z);
+            if !matches!(
+                kind,
+                CellKind::Harbor | CellKind::Empty | CellKind::Green | CellKind::Crane
+            ) {
+                continue;
+            }
+            if plan.heights.is_dry(x, z) {
+                continue;
+            }
+            let Some((top, state)) = volume.top(x, z) else {
+                continue;
+            };
+            let top_id = Block::from_state_id(state.id).id;
+            let lantern = top_id == Block::LANTERN.id || top_id == Block::SOUL_LANTERN.id;
+            let gold = top_id == Block::GOLD_BLOCK.id
+                || top_id == Block::RAW_GOLD_BLOCK.id
+                || top_id == Block::YELLOW_WOOL.id;
+            let stub = top_id == Block::COBBLESTONE.id
+                || top_id == Block::STONE.id
+                || top_id == Block::STONE_BRICKS.id
+                || top_id == Block::MOSSY_COBBLESTONE.id
+                || top_id == Block::MOSSY_STONE_BRICKS.id
+                || top_id == Block::ANDESITE.id;
+            if !lantern && !gold && !stub && kind != CellKind::Crane {
+                continue;
+            }
+            let mut logs = 0;
+            let mut solids = 0;
+            for y in sea + 1..=top {
+                let Some(here) = volume.get(x, y, z) else {
+                    continue;
+                };
+                if here.is_air() || is_water_block(here) {
+                    continue;
+                }
+                solids += 1;
+                if is_log(Block::from_state_id(here.id).id) {
+                    logs += 1;
+                }
+            }
+            let moored = Dir::ALL.iter().any(|dir| {
+                matches!(
+                    plan.occ.kind(x + dir.dx(), z + dir.dz()),
+                    CellKind::Dock
+                        | CellKind::Quay
+                        | CellKind::Slipway
+                        | CellKind::Ship
+                        | CellKind::Boat
+                )
+            });
+            let beside_post = Dir::ALL.iter().any(|dir| {
+                volume
+                    .top(x + dir.dx(), z + dir.dz())
+                    .is_some_and(|(ny, ns)| ny > sea && !ns.is_air() && !is_water_block(ns))
+            });
+            let crane_stub = kind == CellKind::Crane
+                && plan.has_scene(x, z, SceneKind::Shipyard)
+                && logs == 0
+                && solids <= 6
+                && !beside_post;
+            let stray_post =
+                (lantern || gold || stub) && logs == 0 && solids <= 4 && !moored && !beside_post;
+            if stray_post || crane_stub {
+                fails.push(format!(
+                    "{tag} unrooted water post at {x},{top},{z} kind={kind:?}"
+                ));
+            }
+        }
     }
     fails
 }
