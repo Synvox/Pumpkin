@@ -25,8 +25,9 @@ use crate::info::{GateInfo, GateKind, RoadInfo, TownInfo};
 use crate::palette::PaletteKind;
 use crate::rng::TownRng;
 use crate::scenes::{
-    Scene, SceneKind, TREE_STRIP_MARGIN, force_lot, paint_fish_market, paint_harbour_town,
-    paint_scene_yards, paint_wind_sails, place_scenes, rect_hits_mill_sail, try_lot, water_body_ok,
+    Scene, SceneKind, TREE_STRIP_MARGIN, force_lot, paint_festival, paint_fish_market,
+    paint_harbour_town, paint_scene_yards, paint_wind_sails, place_scenes, rect_hits_mill_sail,
+    try_lot, water_body_ok,
 };
 use crate::town::{
     CELL_SIZE, TownPos, border_crossing, border_goal, town_containing, town_in_cell,
@@ -37,7 +38,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 24;
+pub const PLAN_CACHE_VERSION: u32 = 25;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -445,6 +446,14 @@ impl TownPlan {
             .find(|scene| scene.rect.contains(x, z))
     }
 
+    /// Whether any scene of `kind` covers this column.
+    #[must_use]
+    pub fn has_scene(&self, x: i32, z: i32, kind: SceneKind) -> bool {
+        self.scenes
+            .iter()
+            .any(|scene| scene.kind == kind && scene.rect.contains(x, z))
+    }
+
     /// True inside any scene footprint plus [`crate::scenes::scene_tree_margin`].
     /// Frontier and ruin yards take extra so hanging Features canopies do
     /// not float over the close-up crop.
@@ -799,6 +808,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         kind: SceneKind::Plaza,
         rect: market,
     });
+    paint_festival(&mut occ, &mut lots, market, &mut scenes);
     paint_water_uses(&mut occ, &grid, bounds, castle_rect);
     paint_harbour_town(
         &mut occ,
@@ -2066,6 +2076,9 @@ fn paint_poi_roads(
         SceneKind::Beacon,
         SceneKind::Quarry,
         SceneKind::Monastery,
+        SceneKind::HuntingLodge,
+        SceneKind::Manor,
+        SceneKind::RidgeMill,
     ];
     for scene in scenes.iter().filter(|scene| kinds.contains(&scene.kind)) {
         let Some(start) = poi_road_anchor(occ, grid, scene) else {
@@ -2137,6 +2150,9 @@ fn poi_road_anchor(occ: &Occupancy, grid: &HeightGrid, scene: &Scene) -> Option<
                         | CellKind::Eave
                         | CellKind::Beacon
                         | CellKind::CutStone
+                        | CellKind::Maypole
+                        | CellKind::MarketCross
+                        | CellKind::Pillory
                 )
             {
                 return Some((x, z));
@@ -3843,7 +3859,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 24);
+        assert_eq!(PLAN_CACHE_VERSION, 25);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -3881,8 +3897,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 24;
-    const PLAN_LAYOUT_HASH: u64 = 0x8b4c_6996_3cc2_0ab7;
+    const PLAN_LAYOUT_VERSION: u32 = 25;
+    const PLAN_LAYOUT_HASH: u64 = 0x8243_73bf_2158_5ff4;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

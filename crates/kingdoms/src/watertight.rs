@@ -227,6 +227,12 @@ fn planned_timber(kind: CellKind) -> bool {
             | CellKind::Beacon
             | CellKind::Weir
             | CellKind::HerbGarden
+            | CellKind::Maypole
+            | CellKind::MarketCross
+            | CellKind::Pillory
+            | CellKind::Ropewalk
+            | CellKind::Slipway
+            | CellKind::Sawpit
     )
 }
 
@@ -334,6 +340,12 @@ fn flags_as_floating_kind(kind: CellKind) -> bool {
             | CellKind::Weir
             | CellKind::CutStone
             | CellKind::HerbGarden
+            | CellKind::Maypole
+            | CellKind::MarketCross
+            | CellKind::Pillory
+            | CellKind::Ropewalk
+            | CellKind::Slipway
+            | CellKind::Sawpit
             | CellKind::WindSail
             | CellKind::SiegeTreb
             | CellKind::SiegeRam
@@ -398,7 +410,16 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
     let max_x = (volume.min_x + volume.sx - 1).min(plan.bounds.max_x);
     let mut fails = floating_in_rect(plan, volume, min_x, max_x, min_z, max_z, "town");
     for scene in &plan.scenes {
-        if !matches!(scene.kind, SceneKind::Quarry | SceneKind::SiegeCamp) {
+        if !matches!(
+            scene.kind,
+            SceneKind::Quarry
+                | SceneKind::SiegeCamp
+                | SceneKind::RidgeMill
+                | SceneKind::HuntingLodge
+                | SceneKind::Shipyard
+                | SceneKind::Festival
+                | SceneKind::Manor
+        ) {
             continue;
         }
         let crop = scene.rect.inflate(4);

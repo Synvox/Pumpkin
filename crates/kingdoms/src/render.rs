@@ -364,7 +364,11 @@ fn write_scene_renders(
             | SceneKind::MillHamlet
             | SceneKind::Beacon
             | SceneKind::Quarry
-            | SceneKind::SiegeCamp => 6,
+            | SceneKind::SiegeCamp
+            | SceneKind::HuntingLodge
+            | SceneKind::Shipyard
+            | SceneKind::Festival
+            | SceneKind::RidgeMill => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -558,12 +562,23 @@ fn write_scene_renders(
         SceneKind::Quarry,
         SceneKind::SiegeCamp,
         SceneKind::Riverside,
+        SceneKind::Manor,
+        SceneKind::HuntingLodge,
+        SceneKind::Shipyard,
+        SceneKind::Festival,
+        SceneKind::RidgeMill,
     ] {
         let Some(scene) = plan.scenes.iter().find(|scene| scene.kind == kind) else {
             continue;
         };
         let rect = if kind == SceneKind::Quarry {
             quarry_focus_rect(plan, scene.rect)
+        } else if kind == SceneKind::Shipyard {
+            shipyard_focus_rect(plan, scene.rect)
+        } else if kind == SceneKind::Festival {
+            festival_focus_rect(plan, scene.rect)
+        } else if kind == SceneKind::RidgeMill {
+            mill_focus_rect(plan, scene.rect)
         } else {
             scene.rect.inflate(2)
         };
@@ -590,6 +605,15 @@ fn write_scene_renders(
                 "Siege camp · trebuchets outside, tent rows, palisade, ditch and bank"
             }
             SceneKind::Riverside => "Riverside village · stone bridge, ford and fishing weirs",
+            SceneKind::Manor => "Motte-and-bailey · raised keep, palisade bailey, hall and stables",
+            SceneKind::HuntingLodge => {
+                "Hunting lodge · deer park, kennels and stables in the forest"
+            }
+            SceneKind::Shipyard => {
+                "Shipyard · terraced yard, slipway hull, ropewalk, stacks, sawpit and crane"
+            }
+            SceneKind::Festival => "Festival square · maypole, market cross and pillory",
+            SceneKind::RidgeMill => "Ridge mill · oak-stock sails fixed to the hub",
             _ => kind.label(),
         };
         save(
@@ -727,6 +751,9 @@ pub fn overview_bounds(plan: &TownPlan) -> Rect {
                 CellKind::Quay,
                 CellKind::Crane,
                 CellKind::Dock,
+                CellKind::Slipway,
+                CellKind::Ropewalk,
+                CellKind::Sawpit,
             ] {
                 if let Some(blob) = largest_blob(plan, kind) {
                     bounds = union_rect(bounds, blob.inflate(10));
@@ -759,6 +786,9 @@ fn megacity_bounds(plan: &TownPlan) -> Rect {
         CellKind::WaterWheel,
         CellKind::Quay,
         CellKind::MillRace,
+        CellKind::Slipway,
+        CellKind::Ropewalk,
+        CellKind::Sawpit,
     ] {
         if let Some(blob) = largest_blob(plan, kind) {
             bounds = union_rect(bounds, blob.inflate(10));
@@ -1236,6 +1266,171 @@ fn quarry_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
         }
     }
     rect.unwrap_or(fallback).inflate(3)
+}
+
+fn shipyard_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
+    let mut rect: Option<Rect> = None;
+    let grow = |rect: &mut Option<Rect>, x: i32, z: i32| {
+        *rect = Some(rect.map_or_else(
+            || Rect::new(x, z, x, z),
+            |r| {
+                Rect::new(
+                    r.min_x.min(x),
+                    r.min_z.min(z),
+                    r.max_x.max(x),
+                    r.max_z.max(z),
+                )
+            },
+        ));
+    };
+    for z in fallback.min_z..=fallback.max_z {
+        for x in fallback.min_x..=fallback.max_x {
+            if matches!(
+                plan.occ.kind(x, z),
+                CellKind::Slipway | CellKind::Ropewalk | CellKind::CutStone | CellKind::Sawpit
+            ) {
+                grow(&mut rect, x, z);
+            }
+            if plan.occ.kind(x, z) == CellKind::Crane
+                && Dir::ALL.iter().any(|dir| {
+                    matches!(
+                        plan.occ.kind(x + dir.dx(), z + dir.dz()),
+                        CellKind::Slipway | CellKind::Sawpit | CellKind::Harbor | CellKind::Dock
+                    )
+                })
+            {
+                grow(&mut rect, x, z);
+            }
+            if plan.occ.kind(x, z) == CellKind::Ship
+                && Dir::ALL
+                    .iter()
+                    .any(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) == CellKind::Slipway)
+            {
+                grow(&mut rect, x, z);
+            }
+        }
+    }
+    let core = rect.unwrap_or(fallback);
+    for lot in &plan.lots {
+        if matches!(lot.kind, BuildingKind::Blacksmith | BuildingKind::Cottage)
+            && lot.rect.intersects(core)
+            && !lot_near_curtain(plan, lot)
+        {
+            grow(&mut rect, lot.rect.min_x, lot.rect.min_z);
+            grow(&mut rect, lot.rect.max_x, lot.rect.max_z);
+        }
+    }
+    rect.unwrap_or(fallback).inflate(2)
+}
+
+fn festival_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
+    let mut rect: Option<Rect> = None;
+    let grow = |rect: &mut Option<Rect>, x: i32, z: i32| {
+        *rect = Some(rect.map_or_else(
+            || Rect::new(x, z, x, z),
+            |r| {
+                Rect::new(
+                    r.min_x.min(x),
+                    r.min_z.min(z),
+                    r.max_x.max(x),
+                    r.max_z.max(z),
+                )
+            },
+        ));
+    };
+    for z in fallback.min_z..=fallback.max_z {
+        for x in fallback.min_x..=fallback.max_x {
+            if matches!(
+                plan.occ.kind(x, z),
+                CellKind::Maypole
+                    | CellKind::MarketCross
+                    | CellKind::Pillory
+                    | CellKind::Well
+                    | CellKind::Fountain
+            ) {
+                grow(&mut rect, x, z);
+            }
+        }
+    }
+    complete_house_lots(plan, rect.unwrap_or(fallback).inflate(8))
+}
+
+fn complete_house_lots(plan: &TownPlan, rect: Rect) -> Rect {
+    let mut out = rect;
+    for lot in &plan.lots {
+        if matches!(
+            lot.kind,
+            BuildingKind::Cathedral
+                | BuildingKind::Monastery
+                | BuildingKind::TownHall
+                | BuildingKind::Church
+                | BuildingKind::StaveChurch
+        ) {
+            continue;
+        }
+        if lot.rect.width() > 16 || lot.rect.depth() > 14 {
+            continue;
+        }
+        if lot.rect.intersects(rect) {
+            out = Rect::new(
+                out.min_x.min(lot.rect.min_x),
+                out.min_z.min(lot.rect.min_z),
+                out.max_x.max(lot.rect.max_x),
+                out.max_z.max(lot.rect.max_z),
+            );
+        }
+    }
+    out
+}
+
+fn lot_near_curtain(plan: &TownPlan, lot: &Lot) -> bool {
+    for z in lot.rect.min_z.saturating_sub(2)..=lot.rect.max_z + 2 {
+        for x in lot.rect.min_x.saturating_sub(2)..=lot.rect.max_x + 2 {
+            if matches!(
+                plan.occ.kind(x, z),
+                CellKind::TownWall
+                    | CellKind::TownTower
+                    | CellKind::TownGate
+                    | CellKind::Breakwater
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn mill_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
+    let mut rect: Option<Rect> = None;
+    let grow = |rect: &mut Option<Rect>, x: i32, z: i32| {
+        *rect = Some(rect.map_or_else(
+            || Rect::new(x, z, x, z),
+            |r| {
+                Rect::new(
+                    r.min_x.min(x),
+                    r.min_z.min(z),
+                    r.max_x.max(x),
+                    r.max_z.max(z),
+                )
+            },
+        ));
+    };
+    for lot in &plan.lots {
+        if lot.kind == BuildingKind::Windmill && fallback.intersects(lot.rect) {
+            grow(&mut rect, lot.rect.min_x - 6, lot.rect.min_z - 6);
+            grow(&mut rect, lot.rect.max_x + 6, lot.rect.max_z + 6);
+        }
+        if matches!(
+            lot.kind,
+            BuildingKind::Cottage | BuildingKind::Barn | BuildingKind::Timber | BuildingKind::Stall
+        ) && lot.rect.intersects(fallback)
+            && !lot_near_curtain(plan, lot)
+        {
+            grow(&mut rect, lot.rect.min_x, lot.rect.min_z);
+            grow(&mut rect, lot.rect.max_x, lot.rect.max_z);
+        }
+    }
+    rect.unwrap_or(fallback).inflate(4)
 }
 
 fn render_room(
