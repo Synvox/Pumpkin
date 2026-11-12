@@ -610,7 +610,7 @@ fn write_scene_renders(
                 "Hunting lodge · deer park, kennels and stables in the forest"
             }
             SceneKind::Shipyard => {
-                "Shipyard · terraced yard, slipway hull, ropewalk, stacks, sawpit and crane"
+                "Shipyard · sloping slip, half-framed cog, treadwheel crane, pier and sawpit"
             }
             SceneKind::Festival => "Festival square · maypole, market cross and pillory",
             SceneKind::RidgeMill => "Ridge mill · oak-stock sails fixed to the hub",
@@ -624,6 +624,16 @@ fn write_scene_renders(
             &out_dir.join(format!("{stem}-scene-{name}-close-sw.png")),
             &render_exterior_rot(volume, rect, 2, title, 1),
         )?;
+        if kind == SceneKind::Shipyard {
+            save(
+                &out_dir.join(format!("{stem}-scene-{name}-close-se.png")),
+                &render_exterior_rot(volume, rect, 2, title, 2),
+            )?;
+            save(
+                &out_dir.join(format!("{stem}-scene-{name}-close-nw.png")),
+                &render_exterior_rot(volume, rect, 2, title, 3),
+            )?;
+        }
     }
     if let Some(market) = fish_market_lot(plan) {
         save(
@@ -1285,27 +1295,20 @@ fn shipyard_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
     };
     for z in fallback.min_z..=fallback.max_z {
         for x in fallback.min_x..=fallback.max_x {
+            if !plan.has_scene(x, z, SceneKind::Shipyard) {
+                continue;
+            }
             if matches!(
                 plan.occ.kind(x, z),
-                CellKind::Slipway | CellKind::Ropewalk | CellKind::CutStone | CellKind::Sawpit
+                CellKind::Slipway
+                    | CellKind::Ship
+                    | CellKind::Crane
+                    | CellKind::Ropewalk
+                    | CellKind::CutStone
+                    | CellKind::Sawpit
+                    | CellKind::Dock
+                    | CellKind::Boat
             ) {
-                grow(&mut rect, x, z);
-            }
-            if plan.occ.kind(x, z) == CellKind::Crane
-                && Dir::ALL.iter().any(|dir| {
-                    matches!(
-                        plan.occ.kind(x + dir.dx(), z + dir.dz()),
-                        CellKind::Slipway | CellKind::Sawpit | CellKind::Harbor | CellKind::Dock
-                    )
-                })
-            {
-                grow(&mut rect, x, z);
-            }
-            if plan.occ.kind(x, z) == CellKind::Ship
-                && Dir::ALL
-                    .iter()
-                    .any(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) == CellKind::Slipway)
-            {
                 grow(&mut rect, x, z);
             }
         }
@@ -1313,14 +1316,18 @@ fn shipyard_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
     let core = rect.unwrap_or(fallback);
     for lot in &plan.lots {
         if matches!(lot.kind, BuildingKind::Blacksmith | BuildingKind::Cottage)
-            && lot.rect.intersects(core)
-            && !lot_near_curtain(plan, lot)
+            && (lot.rect.intersects(core) || lot.rect.intersects(fallback))
+            && plan.has_scene(
+                (lot.rect.min_x + lot.rect.max_x) / 2,
+                (lot.rect.min_z + lot.rect.max_z) / 2,
+                SceneKind::Shipyard,
+            )
         {
             grow(&mut rect, lot.rect.min_x, lot.rect.min_z);
             grow(&mut rect, lot.rect.max_x, lot.rect.max_z);
         }
     }
-    rect.unwrap_or(fallback).inflate(2)
+    rect.unwrap_or(fallback).inflate(3)
 }
 
 fn festival_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
