@@ -119,21 +119,33 @@ pub fn shot_done(age: u32, y: f64, target_y: f64, flight: u32) -> bool {
 }
 
 /// Spawn a cobble display at `origin` aimed at `target`.
-pub fn fire_trebuchet(world: &Arc<World>, origin: Vector3<f64>, target: Vector3<f64>) -> TrebShot {
+///
+/// `visible` is the display entity. A far shot still flies and punches; spawning
+/// the cobble at an unloaded camp was the 700 ms first-town engines hitch.
+pub fn fire_trebuchet(
+    world: &Arc<World>,
+    origin: Vector3<f64>,
+    target: Vector3<f64>,
+    visible: bool,
+) -> TrebShot {
     let (vx, vy, vz) = aim_arc(
         (origin.x, origin.y, origin.z),
         (target.x, target.y, target.z),
         f64::from(TREB_FLIGHT),
         TREB_GRAVITY,
     );
-    let entity = Entity::new(world.clone(), origin, &EntityType::BLOCK_DISPLAY);
-    let display = BlockDisplayEntity::new(entity);
-    display.set_block_state(i32::from(Block::COBBLESTONE.default_state.id.as_u16()));
-    display.display.set_teleport_duration(1);
-    let part = display.get_entity().entity_id;
-    let spawned = world.spawn_entity(display);
+    let part = if visible {
+        let entity = Entity::new(world.clone(), origin, &EntityType::BLOCK_DISPLAY);
+        let display = BlockDisplayEntity::new(entity);
+        display.set_block_state(i32::from(Block::COBBLESTONE.default_state.id.as_u16()));
+        display.display.set_teleport_duration(1);
+        let id = display.get_entity().entity_id;
+        if world.spawn_entity(display) { id } else { -1 }
+    } else {
+        -1
+    };
     TrebShot {
-        part: if spawned { part } else { -1 },
+        part,
         x: origin.x,
         y: origin.y,
         z: origin.z,
@@ -231,6 +243,9 @@ pub fn collect_punch_hits(world: &World, x: i32, z: i32, keep: Rect, top_y: i32)
 /// Replace one punched block with air. Returns whether the world changed.
 pub fn apply_punch_hit(world: &Arc<World>, hit: PunchHit) -> bool {
     let pos = BlockPos::new(hit.x, hit.y, hit.z);
+    if !world.is_loaded(&pos) {
+        return false;
+    }
     let state = world.get_block_state(&pos);
     if !state.is_solid() {
         return false;
@@ -267,6 +282,9 @@ pub fn place_assault_ladders(
             break;
         }
         let pos = BlockPos::new(lx, floor_y + dy, lz);
+        if !world.is_loaded(&pos) {
+            continue;
+        }
         let (block, _) = world.get_block_and_state(&pos);
         if block.id != Block::AIR.id && block.id != Block::LADDER.id {
             continue;
@@ -367,7 +385,10 @@ pub fn spawn_tower(world: &Arc<World>, origin: Vector3<f64>) -> SiegeTower {
 }
 
 /// Push the tower toward `dest`. Returns true once it is against the wall.
-pub fn tick_tower(world: &World, tower: &mut SiegeTower, dest: ScenePost) -> bool {
+///
+/// `visible` updates display entities. Far towns still march the origin so
+/// arrival and ladders stay on schedule without a tracker hitch.
+pub fn tick_tower(world: &World, tower: &mut SiegeTower, dest: ScenePost, visible: bool) -> bool {
     if tower.arrived {
         return true;
     }
@@ -381,6 +402,9 @@ pub fn tick_tower(world: &World, tower: &mut SiegeTower, dest: ScenePost) -> boo
     let step = TOWER_STEP.min(dist);
     tower.x += dx / dist * step;
     tower.z += dz / dist * step;
+    if !visible {
+        return false;
+    }
     for (i, id) in tower.parts.iter().enumerate() {
         let Some(&(ox, oy, oz, _)) = tower_offsets().get(i) else {
             continue;

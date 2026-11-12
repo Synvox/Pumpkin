@@ -151,8 +151,14 @@ const ARM_PER_TICK: usize = 4;
 const PHASE_WARN_MS: f64 = 20.0;
 /// Ranked-player squad order range.
 const SQUAD_RANGE: f64 = 48.0;
+/// Nearby friendly soldiers a player can lead.
+const SQUAD_CAP: u32 = 12;
 /// Goat-horn command cooldown.
 const HORN_COOLDOWN_TICKS: u32 = 40;
+/// Extra live ticks before engines so 3 fronts do not dump on the same tick.
+const ENGINE_STAGGER_TICKS: u32 = 24;
+/// Night pillager band on a peacetime village. Captures still need the plate.
+const NIGHT_RAID_SIZE: u16 = 16;
 /// First live ticks skip engines so join does not dump 200 ms of town work.
 const JOIN_AMORTIZE_TICKS: u32 = 40;
 /// AI bodies per amortised town tick (plate counts still cover everyone).
@@ -347,6 +353,14 @@ impl SquadOrder {
         }
     }
 
+    const fn reply(self) -> &'static str {
+        match self {
+            Self::Follow => "Aye. On your banner.",
+            Self::Hold => "We hold. None pass.",
+            Self::Charge => "For the colours!",
+        }
+    }
+
     const fn next(self) -> Self {
         match self {
             Self::Follow => Self::Hold,
@@ -365,6 +379,27 @@ struct SquadCommand {
     y: f64,
     z: f64,
     at_tick: u32,
+    player: String,
+    name: String,
+    target: Option<i32>,
+    target_x: f64,
+    target_z: f64,
+    members: u32,
+}
+
+/// Ranked-player squad as shown on `GET /state`.
+#[derive(Clone, Debug)]
+pub struct SquadState {
+    pub uuid: String,
+    pub name: String,
+    pub kingdom: String,
+    pub order: &'static str,
+    pub size: u32,
+    pub hold: (i32, i32, i32),
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub target: Option<i32>,
 }
 
 /// Named commander the Sails director can drive per kingdom.
@@ -399,6 +434,8 @@ pub struct Director {
     pending_keep_tp: HashSet<String>,
     squad_orders: HashMap<String, SquadCommand>,
     saved_wars: HashMap<String, siege::SavedTown>,
+    last_player_target: HashMap<String, i32>,
+    last_night_raid_tick: u32,
 }
 
 struct PendingFlip {
@@ -560,6 +597,8 @@ impl Director {
             pending_keep_tp: HashSet::new(),
             squad_orders: HashMap::new(),
             saved_wars: HashMap::new(),
+            last_player_target: HashMap::new(),
+            last_night_raid_tick: 0,
         }
     }
 
@@ -1095,7 +1134,34 @@ impl Director {
         if self.last_hit.len() > 512 {
             self.last_hit.clear();
         }
+        if self.last_player_target.len() > 512 {
+            self.last_player_target.clear();
+        }
+        self.last_player_target
+            .insert(attacker_uuid.clone(), victim);
         self.last_hit.insert(victim, attacker_uuid);
+    }
+
+    #[must_use]
+    pub fn squad_states(&self) -> Vec<SquadState> {
+        let mut out: Vec<SquadState> = self
+            .squad_orders
+            .iter()
+            .map(|(uuid, cmd)| SquadState {
+                uuid: uuid.clone(),
+                name: cmd.name.clone(),
+                kingdom: cmd.kingdom.as_str().to_owned(),
+                order: cmd.order.as_str(),
+                size: cmd.members.min(SQUAD_CAP),
+                hold: (cmd.hold.x, cmd.hold.y, cmd.hold.z),
+                x: cmd.x,
+                y: cmd.y,
+                z: cmd.z,
+                target: cmd.target,
+            })
+            .collect();
+        out.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+        out
     }
 
     fn note_death(&mut self, entity_id: i32) -> Option<(String, siege::Rank)> {
@@ -2258,6 +2324,7 @@ pub fn tick_world(world: &Arc<World>) {
     log_slow_phase(tick, "towns", towns_started);
     let clock_started = Instant::now();
     maybe_war_clock(world, tick);
+    maybe_night_raid(world, tick);
     log_slow_phase(tick, "clock", clock_started);
 
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -3008,6 +3075,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     arm_militia_tick(&snapshots, alarm);
     shout_named_npcs(world, town_id, tick, alarm, inner_gate_dest);
     let squads = collect_squads(world);
+    let mut squad_taken: HashMap<String, u32> = HashMap::new();
 
     let mut n_ticking = 0u32;
     let mut n_loaded = 0u32;
@@ -3304,12 +3372,24 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             keep_dest,
             civilian_duty(base, id),
         );
-        let squad_dest = overlay_squad_order(dest, faction, pos.x, pos.z, &squads, march_dest);
-        if squad_dest != dest {
+        let (squad_dest, in_squad) = overlay_squad_order(
+            dest,
+            faction,
+            pos.x,
+            pos.z,
+            &squads,
+            march_dest,
+            &mut squad_taken,
+        );
+        if in_squad {
             squad_n += 1;
         }
         let dest = squad_dest;
-        let dest = overlay_siege_role_dest(dest, id, role, alarm, capturing);
+        let dest = if in_squad {
+            dest
+        } else {
+            overlay_siege_role_dest(dest, id, role, alarm, capturing)
+        };
         if matches!(faction, Faction::Pillager) && ladders_placed {
             let near_ladders =
                 (pos.x - f64::from(ladder_dest.x)).hypot(pos.z - f64::from(ladder_dest.z)) < 10.0;
@@ -3369,20 +3449,35 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             }
             n_slid += 1;
         }
-        if tick.is_multiple_of(LIVE_MELEE_PERIOD)
-            && let Some(h) = melee_hostile
-            && let Some(target) = world.get_entity_by_id(h.entity_id)
-        {
-            let _ = target.damage_with_context(
-                target.as_ref(),
-                LIVE_MELEE_DAMAGE,
-                DamageType::MOB_ATTACK,
-                None,
-                Some(entity.as_ref()),
-                Some(entity.as_ref()),
-            );
-            n_melee += 1;
-        } else if tick.is_multiple_of(LIVE_RANGED_PERIOD)
+        let mut did_melee = false;
+        if tick.is_multiple_of(LIVE_MELEE_PERIOD) {
+            let mut hit = melee_hostile.map(|h| h.entity_id);
+            if in_squad
+                && let Some(tid) = squad_attack_target(faction, pos.x, pos.z, &squads)
+                && let Some(t) = world.get_entity_by_id(tid)
+            {
+                let tp = t.get_entity().pos.load();
+                if (pos.x - tp.x).hypot(pos.z - tp.z) <= LIVE_MELEE_RANGE {
+                    hit = Some(tid);
+                }
+            }
+            if let Some(id) = hit
+                && let Some(target) = world.get_entity_by_id(id)
+            {
+                let _ = target.damage_with_context(
+                    target.as_ref(),
+                    LIVE_MELEE_DAMAGE,
+                    DamageType::MOB_ATTACK,
+                    None,
+                    Some(entity.as_ref()),
+                    Some(entity.as_ref()),
+                );
+                did_melee = true;
+                n_melee += 1;
+            }
+        }
+        if !did_melee
+            && tick.is_multiple_of(LIVE_RANGED_PERIOD)
             && n_ranged < LIVE_RANGED_HITS_PER_VOLLEY
             && is_ranged_fighter(base, role)
             && let Some(h) = ranged_hostile
@@ -3416,6 +3511,14 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         {
             mob.get_mob_entity().living_entity.swing_hand();
             n_repair += 1;
+        }
+    }
+    {
+        let mut dir = lock();
+        for (uuid, n) in &squad_taken {
+            if let Some(cmd) = dir.squad_orders.get_mut(uuid) {
+                cmd.members = *n;
+            }
         }
     }
     tick_ghosts(
@@ -3492,7 +3595,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         prewarm_siege_columns(world, town_id);
         continue_engine_spawns(world, town_id);
     }
-    let run_heavy = !amortizing && take_heavy_town();
+    let engines_age = JOIN_AMORTIZE_TICKS.saturating_add(engine_stagger(town_id));
+    let run_heavy = !amortizing && live_age >= engines_age && take_heavy_town();
     if run_heavy {
         let engines_started = Instant::now();
         tick_siege_engines(world, town_id, tick, alarm);
@@ -5491,7 +5595,11 @@ fn continue_engine_spawns(world: &Arc<World>, town_id: &str) -> bool {
     if let Some(t) = tower.as_mut()
         && !engines::tower_complete(t)
     {
-        let n = engines::append_tower_parts(world, t, engines::ENGINE_PARTS_PER_TICK);
+        let n = if player_near(world, t.x, t.z, PLAYER_SIM_RANGE) {
+            engines::append_tower_parts(world, t, engines::ENGINE_PARTS_PER_TICK)
+        } else {
+            0
+        };
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
             war.siege_tower = tower;
@@ -5512,7 +5620,11 @@ fn continue_engine_spawns(world: &Arc<World>, town_id: &str) -> bool {
         && !r.destroyed
         && !crate::ram::ram_complete(r)
     {
-        let n = crate::ram::append_ram_parts(world, r, crate::ram::RAM_PARTS_PER_TICK);
+        let n = if player_near(world, r.x, r.z, PLAYER_SIM_RANGE) {
+            crate::ram::append_ram_parts(world, r, crate::ram::RAM_PARTS_PER_TICK)
+        } else {
+            0
+        };
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
             war.ram = ram;
@@ -5585,7 +5697,9 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
             y,
             f64::from(origin.z) + 0.5,
         ));
-        engines::append_tower_parts(world, &mut tower, engines::ENGINE_PARTS_PER_TICK);
+        if player_near(world, tower.x, tower.z, PLAYER_SIM_RANGE) {
+            engines::append_tower_parts(world, &mut tower, engines::ENGINE_PARTS_PER_TICK);
+        }
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
             war.siege_tower = Some(tower);
@@ -5639,10 +5753,17 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
     if should_fire {
         let oy = f64::from(standing_y(world, origin) + 8);
         let ty = f64::from(wall_top);
+        let visible = player_near(
+            world,
+            f64::from(origin.x),
+            f64::from(origin.z),
+            PLAYER_SIM_RANGE,
+        );
         let fired = engines::fire_trebuchet(
             world,
             Vector3::new(f64::from(origin.x) + 0.5, oy, f64::from(origin.z) + 0.5),
             Vector3::new(f64::from(wall.x) + 0.5, ty, f64::from(wall.z) + 0.5),
+            visible,
         );
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
@@ -5686,7 +5807,8 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
     }
 
     if let Some(mut moving) = tower {
-        let arrived = engines::tick_tower(world, &mut moving, wall);
+        let visible = player_near(world, moving.x, moving.z, PLAYER_SIM_RANGE);
+        let arrived = engines::tick_tower(world, &mut moving, wall, visible);
         if arrived && !ladders_done && !wrote {
             let n = raise_ladders(world, wall, camp, ladder_floor);
             let mut dir = lock();
@@ -5752,6 +5874,9 @@ fn treb_wall_target(
 }
 
 fn raise_ladders(world: &Arc<World>, wall: ScenePost, camp: ScenePost, floor: i32) -> u32 {
+    if !world.is_loaded(&BlockPos::new(wall.x, floor + 1, wall.z)) {
+        return 0;
+    }
     let mut n = engines::place_assault_ladders(world, wall, camp, floor);
     if n > 0 {
         return n;
@@ -5978,6 +6103,7 @@ pub fn try_fire_trebuchet(player: &Player) -> Result<String, String> {
         &world,
         Vector3::new(f64::from(origin.x) + 0.5, oy, f64::from(origin.z) + 0.5),
         Vector3::new(f64::from(wall.x) + 0.5, ty, f64::from(wall.z) + 0.5),
+        true,
     );
     let mut dir = lock();
     let tick = dir.tick;
@@ -6031,6 +6157,13 @@ pub fn try_rally(player: &Player, order: SquadOrder) -> Result<String, String> {
         z: pos.z.floor() as i32,
     };
     let tick = dir.tick;
+    let target = dir.last_player_target.get(&uuid).copied();
+    let (target_x, target_z) = target.map_or((pos.x, pos.z), |id| {
+        world.get_entity_by_id(id).map_or((pos.x, pos.z), |e| {
+            let p = e.get_entity().pos.load();
+            (p.x, p.z)
+        })
+    });
     dir.squad_orders.insert(
         uuid,
         SquadCommand {
@@ -6041,10 +6174,17 @@ pub fn try_rally(player: &Player, order: SquadOrder) -> Result<String, String> {
             y: pos.y,
             z: pos.z,
             at_tick: tick,
+            player: player.gameprofile.id.to_string(),
+            name: player.gameprofile.name.clone(),
+            target,
+            target_x,
+            target_z,
+            members: 0,
         },
     );
     let town_id = nearest_town_id(&world, pos.x.floor() as i32, pos.z.floor() as i32);
-    let _ = chat::try_shout_as(
+    let speaker = squad_reply_speaker(tick);
+    if chat::try_shout_as(
         &world,
         tick,
         &town_id,
@@ -6052,9 +6192,11 @@ pub fn try_rally(player: &Player, order: SquadOrder) -> Result<String, String> {
         pos.x,
         pos.z,
         &mut dir.last_shout,
-        &player.gameprofile.name,
-        Some(order.line()),
-    );
+        speaker,
+        Some(order.reply()),
+    ) {
+        dir.last_any_shout = tick;
+    }
     tracing::info!(
         player = %player.gameprofile.name,
         order = order.as_str(),
@@ -6177,11 +6319,43 @@ fn overlay_squad_order(
     z: f64,
     squads: &[SquadCommand],
     charge_dest: PostTarget,
-) -> PostTarget {
+    taken: &mut HashMap<String, u32>,
+) -> (PostTarget, bool) {
     let Faction::Kingdom(kingdom) = faction else {
-        return dest;
+        return (dest, false);
     };
-    let Some(cmd) = squads
+    let Some(cmd) = nearest_squad(kingdom, x, z, squads) else {
+        return (dest, false);
+    };
+    let n = taken.entry(cmd.player.clone()).or_insert(0);
+    if *n >= SQUAD_CAP {
+        return (dest, false);
+    }
+    *n += 1;
+    let dest = match cmd.order {
+        SquadOrder::Follow if cmd.target.is_some() => PostTarget {
+            x: cmd.target_x.floor() as i32,
+            y: cmd.y.floor() as i32,
+            z: cmd.target_z.floor() as i32,
+        },
+        SquadOrder::Follow => PostTarget {
+            x: cmd.x.floor() as i32,
+            y: cmd.y.floor() as i32,
+            z: cmd.z.floor() as i32,
+        },
+        SquadOrder::Hold => cmd.hold,
+        SquadOrder::Charge => charge_dest,
+    };
+    (dest, true)
+}
+
+fn nearest_squad<'a>(
+    kingdom: &KingdomId,
+    x: f64,
+    z: f64,
+    squads: &'a [SquadCommand],
+) -> Option<&'a SquadCommand> {
+    squads
         .iter()
         .filter(|s| s.kingdom == *kingdom)
         .filter(|s| (s.x - x).hypot(s.z - z) <= SQUAD_RANGE)
@@ -6190,17 +6364,28 @@ fn overlay_squad_order(
             let db = (b.x - x).hypot(b.z - z);
             da.total_cmp(&db)
         })
-    else {
-        return dest;
+}
+
+fn squad_attack_target(faction: &Faction, x: f64, z: f64, squads: &[SquadCommand]) -> Option<i32> {
+    let Faction::Kingdom(kingdom) = faction else {
+        return None;
     };
-    match cmd.order {
-        SquadOrder::Follow => PostTarget {
-            x: cmd.x.floor() as i32,
-            y: cmd.y.floor() as i32,
-            z: cmd.z.floor() as i32,
-        },
-        SquadOrder::Hold => cmd.hold,
-        SquadOrder::Charge => charge_dest,
+    nearest_squad(kingdom, x, z, squads).and_then(|s| s.target)
+}
+
+fn holding_banner(player: &Player) -> bool {
+    is_banner_item(player.inventory.held_item().item)
+}
+
+fn is_banner_item(item: &Item) -> bool {
+    item.registry_key.ends_with("_banner")
+}
+
+const fn squad_reply_speaker(tick: u32) -> &'static str {
+    match tick % 3 {
+        0 => "guardsman",
+        1 => "militia",
+        _ => "sergeant",
     }
 }
 
@@ -6210,6 +6395,36 @@ fn collect_squads(world: &World) -> Vec<SquadCommand> {
     let mut out = Vec::new();
     for player in players.iter() {
         let uuid = player.gameprofile.id.to_string();
+        let Some(kingdom) = dir.player_kingdom(&uuid).cloned() else {
+            continue;
+        };
+        let tick = dir.tick;
+        let target = dir.last_player_target.get(&uuid).copied();
+        if holding_banner(player) && !dir.squad_orders.contains_key(&uuid) {
+            let pos = player.living_entity.entity.pos.load();
+            dir.squad_orders.insert(
+                uuid.clone(),
+                SquadCommand {
+                    order: SquadOrder::Follow,
+                    kingdom: kingdom.clone(),
+                    hold: PostTarget {
+                        x: pos.x.floor() as i32,
+                        y: pos.y.floor() as i32,
+                        z: pos.z.floor() as i32,
+                    },
+                    x: pos.x,
+                    y: pos.y,
+                    z: pos.z,
+                    at_tick: tick,
+                    player: uuid.clone(),
+                    name: player.gameprofile.name.clone(),
+                    target,
+                    target_x: pos.x,
+                    target_z: pos.z,
+                    members: 0,
+                },
+            );
+        }
         let Some(cmd) = dir.squad_orders.get_mut(&uuid) else {
             continue;
         };
@@ -6217,6 +6432,16 @@ fn collect_squads(world: &World) -> Vec<SquadCommand> {
         cmd.x = pos.x;
         cmd.y = pos.y;
         cmd.z = pos.z;
+        cmd.name.clone_from(&player.gameprofile.name);
+        cmd.members = 0;
+        if let Some(tid) = target {
+            cmd.target = Some(tid);
+            if let Some(e) = world.get_entity_by_id(tid) {
+                let p = e.get_entity().pos.load();
+                cmd.target_x = p.x;
+                cmd.target_z = p.z;
+            }
+        }
         if cmd.order == SquadOrder::Follow {
             cmd.hold = PostTarget {
                 x: pos.x.floor() as i32,
@@ -6550,6 +6775,102 @@ fn war_clock_defenders() -> u16 {
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(0)
         .min(400)
+}
+
+fn engine_stagger(town_id: &str) -> u32 {
+    town_id
+        .bytes()
+        .fold(0u32, |a, b| a.wrapping_mul(33).wrapping_add(u32::from(b)))
+        % ENGINE_STAGGER_TICKS
+}
+
+fn night_raids_enabled() -> bool {
+    if soaking() {
+        return false;
+    }
+    std::env::var("KINGDOMS_NIGHT_RAIDS").map_or(true, |v| {
+        !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    })
+}
+
+fn maybe_night_raid(world: &Arc<World>, tick: u32) {
+    if !night_raids_enabled() {
+        return;
+    }
+    if crate::http::external_director_connected() {
+        return;
+    }
+    if !schedule::is_night(world.get_time_of_day()) {
+        return;
+    }
+    {
+        let dir = lock();
+        if dir.towns.values().any(|w| w.raid.is_some()) {
+            return;
+        }
+        if tick.saturating_sub(dir.last_night_raid_tick) < DEFAULT_WAR_CLOCK_TICKS {
+            return;
+        }
+    }
+    let Some(town_id) = pick_night_village(tick) else {
+        return;
+    };
+    let spec = RaidSpec::new(NIGHT_RAID_SIZE).with_side(RaidSide::Pillager);
+    match start_raid(world, &town_id, spec) {
+        Ok(id) => {
+            let mut dir = lock();
+            dir.last_night_raid_tick = tick;
+            dir.push_event(CombatEvent {
+                tick,
+                kind: CombatKind::RaidStart,
+                actor: id.0 as i32,
+                other: None,
+                x: 0.0,
+                z: 0.0,
+                note: format!("night raid {} on {town_id}", id.0),
+            });
+            dir.mark_dirty();
+            drop(dir);
+            tracing::info!(
+                raid = id.0,
+                town = town_id.as_str(),
+                size = NIGHT_RAID_SIZE,
+                "kingdoms night raid started"
+            );
+        }
+        Err(err) => {
+            tracing::debug!(town = town_id.as_str(), %err, "night raid skipped");
+        }
+    }
+}
+
+fn pick_night_village(tick: u32) -> Option<String> {
+    let dir = lock();
+    let mut candidates: Vec<String> = dir
+        .towns
+        .values()
+        .filter(|w| {
+            night_raid_candidate(
+                w.owner.is_pillager(),
+                w.raid.is_some(),
+                tick < w.repair_until,
+            )
+        })
+        .map(|w| w.info_id.clone())
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort();
+    let start = dir.next_raid_id as usize % candidates.len();
+    Some(candidates[start].clone())
+}
+
+const fn night_raid_candidate(owner_pillager: bool, raid_active: bool, repair_open: bool) -> bool {
+    !owner_pillager && !raid_active && !repair_open
 }
 
 fn maybe_war_clock(world: &Arc<World>, tick: u32) {
@@ -9508,6 +9829,30 @@ mod tests {
         assert_eq!((wall_guard.x, wall_guard.z), (wall[0].x, wall[0].z));
     }
 
+    fn test_squad(
+        order: SquadOrder,
+        kingdom: KingdomId,
+        x: f64,
+        z: f64,
+        player: &str,
+    ) -> SquadCommand {
+        SquadCommand {
+            order,
+            kingdom,
+            hold: PostTarget { x: 5, y: 64, z: 5 },
+            x,
+            y: 64.0,
+            z,
+            at_tick: 1,
+            player: player.to_owned(),
+            name: player.to_owned(),
+            target: None,
+            target_x: x,
+            target_z: z,
+            members: 0,
+        }
+    }
+
     #[test]
     fn squad_orders_follow_hold_and_charge() {
         let dest = PostTarget { x: 0, y: 64, z: 0 };
@@ -9517,30 +9862,36 @@ mod tests {
             z: 20,
         };
         let alder = KingdomId::new("alder");
-        let cmd = SquadCommand {
-            order: SquadOrder::Charge,
-            kingdom: alder.clone(),
-            hold: PostTarget { x: 5, y: 64, z: 5 },
-            x: 1.0,
-            y: 64.0,
-            z: 1.0,
-            at_tick: 1,
-        };
-        let out = overlay_squad_order(
+        let cmd = test_squad(SquadOrder::Charge, alder.clone(), 1.0, 1.0, "p");
+        let mut taken = HashMap::new();
+        let (out, in_squad) = overlay_squad_order(
             dest,
             &Faction::Kingdom(alder.clone()),
             1.0,
             1.0,
             std::slice::from_ref(&cmd),
             charge,
+            &mut taken,
         );
+        assert!(in_squad);
         assert_eq!((out.x, out.z), (charge.x, charge.z));
         let mut hold = cmd;
         hold.order = SquadOrder::Hold;
-        let out = overlay_squad_order(dest, &Faction::Kingdom(alder), 1.0, 1.0, &[hold], charge);
+        taken.clear();
+        let (out, in_squad) = overlay_squad_order(
+            dest,
+            &Faction::Kingdom(alder),
+            1.0,
+            1.0,
+            &[hold],
+            charge,
+            &mut taken,
+        );
+        assert!(in_squad);
         assert_eq!((out.x, out.z), (5, 5));
         assert_eq!(SquadOrder::parse("rally"), Some(SquadOrder::Follow));
         assert_eq!(SquadOrder::Follow.next(), SquadOrder::Hold);
+        assert_eq!(SquadOrder::Hold.reply(), "We hold. None pass.");
         assert_eq!(PUNCH_REPAIR_PER_TICK, 2);
         assert_eq!(PUNCH_BREAK_PER_TICK, 2);
         assert_eq!(PORTCULLIS_BARS_PER_TICK, 2);
@@ -9548,5 +9899,80 @@ mod tests {
         assert_eq!(crate::ram::RAM_PARTS_PER_TICK, 2);
         assert!((PHASE_WARN_MS - 20.0).abs() < f64::EPSILON);
         assert_eq!(resolve_stand_y(117, None, 63), 117);
+        assert_eq!(SQUAD_CAP, 12);
+        assert_eq!(NIGHT_RAID_SIZE, 16);
+    }
+
+    #[test]
+    fn squad_cap_stops_at_twelve() {
+        let dest = PostTarget { x: 0, y: 64, z: 0 };
+        let alder = KingdomId::new("alder");
+        let cmd = test_squad(SquadOrder::Hold, alder.clone(), 0.0, 0.0, "captain");
+        let mut taken = HashMap::new();
+        let mut assigned = 0u32;
+        for i in 0..20 {
+            let (out, in_squad) = overlay_squad_order(
+                dest,
+                &Faction::Kingdom(alder.clone()),
+                f64::from(i),
+                0.0,
+                std::slice::from_ref(&cmd),
+                dest,
+                &mut taken,
+            );
+            if in_squad {
+                assigned += 1;
+                assert_eq!(out.x, 5);
+            }
+        }
+        assert_eq!(assigned, SQUAD_CAP);
+        assert_eq!(taken.get("captain").copied(), Some(SQUAD_CAP));
+    }
+
+    #[test]
+    fn squad_follow_marches_on_the_player_target() {
+        let dest = PostTarget { x: 0, y: 64, z: 0 };
+        let alder = KingdomId::new("alder");
+        let mut cmd = test_squad(SquadOrder::Follow, alder.clone(), 1.0, 1.0, "p");
+        cmd.target = Some(42);
+        cmd.target_x = 30.4;
+        cmd.target_z = -8.9;
+        let mut taken = HashMap::new();
+        let (out, in_squad) = overlay_squad_order(
+            dest,
+            &Faction::Kingdom(alder),
+            1.0,
+            1.0,
+            std::slice::from_ref(&cmd),
+            dest,
+            &mut taken,
+        );
+        assert!(in_squad);
+        assert_eq!((out.x, out.z), (30, -9));
+        assert_eq!(
+            squad_attack_target(&Faction::Kingdom(cmd.kingdom.clone()), 1.0, 1.0, &[cmd]),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn night_raid_picks_peacetime_villages_only() {
+        assert!(night_raid_candidate(false, false, false));
+        assert!(!night_raid_candidate(true, false, false));
+        assert!(!night_raid_candidate(false, true, false));
+        assert!(!night_raid_candidate(false, false, true));
+        assert!(schedule::is_night(13_000));
+        assert!(!schedule::is_night(1_000));
+        assert!(is_banner_item(&Item::GREEN_BANNER));
+        assert!(is_banner_item(&Item::BLUE_BANNER));
+        assert!(!is_banner_item(&Item::IRON_SWORD));
+        assert_eq!(
+            engine_stagger("20261025:-1:0") % ENGINE_STAGGER_TICKS,
+            engine_stagger("20261025:-1:0")
+        );
+        assert_ne!(
+            engine_stagger("20261025:-1:0"),
+            engine_stagger("20261025:0:0")
+        );
     }
 }
