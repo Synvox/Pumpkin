@@ -33,6 +33,10 @@ pub const TREE_STRIP_MARGIN: i32 = 16;
 const COG_LEN: i32 = 19;
 const COG_BEAM: i32 = 7;
 
+/// Round 32 keeps the shipyard stamp helpers but does not claim shoreline.
+/// Placement is the headline of round 33.
+const PLACE_SHIPYARD: bool = false;
+
 /// What a hinterland rect is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SceneKind {
@@ -2117,6 +2121,9 @@ fn paint_shipyard(
     docks: &[(i32, i32)],
     scenes: &mut Vec<Scene>,
 ) {
+    if !PLACE_SHIPYARD {
+        return;
+    }
     if scenes.iter().any(|scene| scene.kind == SceneKind::Shipyard) {
         return;
     }
@@ -13634,7 +13641,7 @@ mod tests {
     }
 
     #[test]
-    fn round32_hunting_lodge_shipyard_manor_festival_and_ridge_mill() {
+    fn round32_hunting_lodge_manor_festival_and_ridge_mill() {
         let origin = town_in_cell(20_261_025, 0, 0);
         let grid = HeightGrid::synthetic_slope(
             origin.x - 360,
@@ -13752,36 +13759,13 @@ mod tests {
             origin.z + 40,
         );
         let harbour_plan = build_plan(3, origin, water, PaletteKind::Oak);
-        if let Some(yard) = harbour_plan
-            .scenes
-            .iter()
-            .find(|s| s.kind == SceneKind::Shipyard)
-        {
-            let mut slip = 0;
-            let mut rope = 0;
-            let mut timber = 0;
-            let mut hull = 0;
-            let mut pit = 0;
-            let mut crane = 0;
-            for z in yard.rect.min_z..=yard.rect.max_z {
-                for x in yard.rect.min_x..=yard.rect.max_x {
-                    match harbour_plan.occ.kind(x, z) {
-                        CellKind::Slipway => slip += 1,
-                        CellKind::Ropewalk => rope += 1,
-                        CellKind::CutStone => timber += 1,
-                        CellKind::Ship => hull += 1,
-                        CellKind::Sawpit => pit += 1,
-                        CellKind::Crane => crane += 1,
-                        _ => {}
-                    }
-                }
-            }
-            assert!(slip >= 8, "slipway {slip}");
-            assert!(rope >= 6, "ropewalk {rope}");
-            assert!(timber >= 4, "timber stacks {timber}");
-            assert!(hull >= 8, "slipway cog {hull}");
-            assert!(pit >= 4, "sawpit {pit}");
-            assert!(crane >= 2, "yard crane {crane}");
-        }
+        assert!(
+            !harbour_plan
+                .scenes
+                .iter()
+                .any(|s| s.kind == SceneKind::Shipyard),
+            "shipyard placement is deferred to round 33"
+        );
+        const { assert!(!PLACE_SHIPYARD) };
     }
 }
