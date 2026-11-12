@@ -178,6 +178,8 @@ pub enum CellKind {
     Ropewalk,
     /// Timber slipway for a hull under construction.
     Slipway,
+    /// Sawpit beside a shipyard slip.
+    Sawpit,
 }
 
 impl CellKind {

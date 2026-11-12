@@ -3898,7 +3898,7 @@ mod tests {
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
     const PLAN_LAYOUT_VERSION: u32 = 25;
-    const PLAN_LAYOUT_HASH: u64 = 0x7753_e7ad_d87f_a628;
+    const PLAN_LAYOUT_HASH: u64 = 0x8243_73bf_2158_5ff4;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

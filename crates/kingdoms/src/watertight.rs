@@ -232,6 +232,7 @@ fn planned_timber(kind: CellKind) -> bool {
             | CellKind::Pillory
             | CellKind::Ropewalk
             | CellKind::Slipway
+            | CellKind::Sawpit
     )
 }
 
@@ -344,6 +345,7 @@ fn flags_as_floating_kind(kind: CellKind) -> bool {
             | CellKind::Pillory
             | CellKind::Ropewalk
             | CellKind::Slipway
+            | CellKind::Sawpit
             | CellKind::WindSail
             | CellKind::SiegeTreb
             | CellKind::SiegeRam
