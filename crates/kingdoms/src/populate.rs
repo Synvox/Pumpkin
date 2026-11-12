@@ -131,6 +131,10 @@ pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
         return;
     }
     let kingdom = scene.kingdom();
+    let budget = director::recruit_budget(&kingdom);
+    if budget == 0 {
+        return;
+    }
     let mut spawned = 0usize;
     for slot in slots {
         let home_chunk =
@@ -162,7 +166,7 @@ pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
             .is_some()
         {
             spawned += 1;
-            if spawned >= RESPAWN_PER_TICK {
+            if spawned >= budget.min(RESPAWN_PER_TICK) {
                 break;
             }
         }

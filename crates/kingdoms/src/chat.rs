@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use pumpkin_core::entity::player::Player;
 use pumpkin_core::world::World;
 use pumpkin_util::text::TextComponent;
 use pumpkin_util::text::color::NamedColor;
@@ -16,6 +17,8 @@ use serde::{Deserialize, Serialize};
 pub const CHAT_RANGE: f64 = 48.0;
 /// Minimum ticks between the same shout kind in one town (~10 s).
 pub const CHAT_COOLDOWN_TICKS: u32 = 200;
+/// Per-player gap for squad IC replies (~1 s). Town captain lines do not share this.
+pub const SQUAD_REPLY_COOLDOWN_TICKS: u32 = 20;
 
 /// Combat beats that get a spoken line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -125,6 +128,8 @@ pub fn all_lines() -> HashMap<&'static str, String> {
 
 /// Rate-limit table keyed by town and shout kind.
 pub type ShoutLog = HashMap<(String, ShoutKind), u32>;
+/// Per-player last-tick for squad IC replies.
+pub type SquadReplyLog = HashMap<String, u32>;
 
 /// Speak to players within [`CHAT_RANGE`] of `(x, z)` if the cooldown has elapsed.
 pub fn try_shout(
@@ -188,6 +193,62 @@ pub fn try_shout_as(
     true
 }
 
+/// True when this player can hear another squad reply.
+#[must_use]
+pub fn squad_reply_ready(last: Option<u32>, tick: u32) -> bool {
+    last.is_none_or(|t| tick.saturating_sub(t) >= SQUAD_REPLY_COOLDOWN_TICKS)
+}
+
+/// Player-directed IC reply. Does not touch the town captain/blacksmith shout log.
+#[allow(clippy::implicit_hasher)]
+pub fn try_squad_reply(
+    world: &World,
+    tick: u32,
+    commander: &Player,
+    speaker: &str,
+    text: &str,
+    last: &mut SquadReplyLog,
+) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let uuid = commander.gameprofile.id.to_string();
+    if !squad_reply_ready(last.get(&uuid).copied(), tick) {
+        return false;
+    }
+    last.insert(uuid, tick);
+    let speaker = speaker.trim();
+    let speaker = if speaker.is_empty() {
+        "soldier"
+    } else {
+        speaker
+    };
+    let msg = TextComponent::text(format!("<{speaker}> {text}")).color_named(NamedColor::Gold);
+    commander.send_system_message(&msg);
+    let origin = commander.living_entity.entity.pos.load();
+    let commander_id = commander.gameprofile.id;
+    let mut heard = 1u32;
+    for player in world.players.load().iter() {
+        if player.gameprofile.id == commander_id {
+            continue;
+        }
+        let pos = player.living_entity.entity.pos.load();
+        if (pos.x - origin.x).hypot(pos.z - origin.z) <= CHAT_RANGE {
+            player.send_system_message(&msg);
+            heard += 1;
+        }
+    }
+    tracing::info!(
+        player = %commander.gameprofile.name,
+        speaker,
+        text,
+        heard,
+        "kingdoms squad reply"
+    );
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +277,16 @@ mod tests {
         assert_eq!(line(ShoutKind::Rally), "Banners high.");
         set_line(ShoutKind::Rally, "");
         assert_eq!(line(ShoutKind::Rally), ShoutKind::Rally.default_line());
+    }
+
+    #[test]
+    fn squad_reply_has_its_own_short_cooldown() {
+        assert!(squad_reply_ready(None, 0));
+        assert!(!squad_reply_ready(Some(10), 29));
+        assert!(squad_reply_ready(Some(10), 30));
+        const { assert!(SQUAD_REPLY_COOLDOWN_TICKS < CHAT_COOLDOWN_TICKS) };
+        // Follow then hold 4 s apart (soak bot) always prints.
+        assert!(squad_reply_ready(Some(100), 180));
     }
 
     #[test]
