@@ -610,7 +610,7 @@ fn write_scene_renders(
                 "Hunting lodge · deer park, kennels and stables in the forest"
             }
             SceneKind::Shipyard => {
-                "Shipyard · open-shore slip, cog in frames, ropewalk, stacks and crane"
+                "Shipyard · sloping slip, half-framed cog, treadwheel crane, pier and sawpit"
             }
             SceneKind::Festival => "Festival square · maypole, market cross and pillory",
             SceneKind::RidgeMill => "Ridge mill · oak-stock sails fixed to the hub",
@@ -624,6 +624,16 @@ fn write_scene_renders(
             &out_dir.join(format!("{stem}-scene-{name}-close-sw.png")),
             &render_exterior_rot(volume, rect, 2, title, 1),
         )?;
+        if kind == SceneKind::Shipyard {
+            save(
+                &out_dir.join(format!("{stem}-scene-{name}-close-se.png")),
+                &render_exterior_rot(volume, rect, 2, title, 2),
+            )?;
+            save(
+                &out_dir.join(format!("{stem}-scene-{name}-close-nw.png")),
+                &render_exterior_rot(volume, rect, 2, title, 3),
+            )?;
+        }
     }
     if let Some(market) = fish_market_lot(plan) {
         save(
