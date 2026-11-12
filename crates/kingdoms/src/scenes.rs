@@ -33,8 +33,8 @@ pub const TREE_STRIP_MARGIN: i32 = 16;
 const COG_LEN: i32 = 19;
 const COG_BEAM: i32 = 7;
 
-/// Harbour shipyard on open shoreline outside the town walls.
-const PLACE_SHIPYARD: bool = true;
+/// Harbour shipyard stamp is kept but not placed.
+const PLACE_SHIPYARD: bool = false;
 const SLIP_HULL_LEN: i32 = 17;
 const SLIP_HULL_BEAM: i32 = 5;
 
@@ -13925,88 +13925,66 @@ mod tests {
             origin.z + 40,
         );
         let harbour_plan = build_plan(3, origin, water, PaletteKind::Oak);
-        let yard = harbour_plan
+        assert!(
+            harbour_plan
+                .scenes
+                .iter()
+                .all(|s| s.kind != SceneKind::Shipyard),
+            "shipyard stays unplaced"
+        );
+        let harbour = harbour_plan
             .scenes
             .iter()
-            .find(|s| s.kind == SceneKind::Shipyard)
-            .expect("open-shore shipyard");
+            .find(|s| s.kind == SceneKind::Harbour)
+            .expect("harbour");
         let mut slip = 0;
         let mut rope = 0;
-        let mut timber = 0;
-        let mut hull = 0;
-        let mut hull_on_slip = 0;
-        let mut hull_dry = 0;
         let mut pit = 0;
-        let mut crane = 0;
-        let mut crane_dry = 0;
+        let mut quay = 0;
         let mut dock = 0;
-        let mut boat = 0;
-        let mut wall_hits = 0;
-        for z in yard.rect.min_z..=yard.rect.max_z {
-            for x in yard.rect.min_x..=yard.rect.max_x {
+        for z in harbour_plan.bounds.min_z..=harbour_plan.bounds.max_z {
+            for x in harbour_plan.bounds.min_x..=harbour_plan.bounds.max_x {
                 match harbour_plan.occ.kind(x, z) {
                     CellKind::Slipway => slip += 1,
                     CellKind::Ropewalk => rope += 1,
-                    CellKind::CutStone => timber += 1,
-                    CellKind::Ship => {
-                        hull += 1;
-                        if harbour_plan.heights.is_dry(x, z) {
-                            hull_dry += 1;
-                        }
-                        if harbour_plan.heights.is_dry(x, z)
-                            || crate::geom::Dir::ALL.iter().any(|dir| {
-                                harbour_plan.occ.kind(x + dir.dx(), z + dir.dz())
-                                    == CellKind::Slipway
-                            })
-                        {
-                            hull_on_slip += 1;
-                        }
-                    }
                     CellKind::Sawpit => pit += 1,
-                    CellKind::Crane => {
-                        crane += 1;
-                        if harbour_plan.heights.is_dry(x, z) {
-                            crane_dry += 1;
-                        }
-                    }
-                    CellKind::Dock => dock += 1,
-                    CellKind::Boat => boat += 1,
-                    CellKind::TownWall | CellKind::TownTower | CellKind::TownGate => {
-                        wall_hits += 1;
-                    }
+                    CellKind::Quay if harbour.rect.contains(x, z) => quay += 1,
+                    CellKind::Dock if harbour.rect.contains(x, z) => dock += 1,
                     _ => {}
                 }
             }
         }
-        assert!(slip >= 12, "slipway {slip}");
-        assert!(rope >= 8, "ropewalk {rope}");
-        assert!(timber >= 4, "timber stacks {timber}");
-        assert!(hull >= 24, "slipway cog {hull}");
-        assert!(hull_on_slip >= 8, "cog on the slip {hull_on_slip}");
-        assert!(hull_dry >= 10, "cog keel on land {hull_dry}");
-        assert!(pit >= 3, "sawpit {pit}");
-        assert!(crane >= 4, "yard crane {crane}");
-        assert!(crane_dry >= 4, "crane on dry shore {crane_dry}");
-        assert!(dock >= 4, "yard pier {dock}");
-        assert!(boat >= 8, "moored boats {boat}");
-        assert!(
-            wall_hits * 4 < slip + hull,
-            "yard boxed by curtain walls wall={wall_hits} slip={slip} hull={hull}"
-        );
-        assert!(
-            harbour_plan.lots.iter().any(|lot| {
-                matches!(lot.kind, BuildingKind::Blacksmith | BuildingKind::Cottage)
-                    && yard.rect.inflate(8).intersects(lot.rect)
-            }),
-            "shipyard workshop"
-        );
+        assert_eq!(slip, 0, "leftover slipway {slip}");
+        assert_eq!(rope, 0, "leftover ropewalk {rope}");
+        assert_eq!(pit, 0, "leftover sawpit {pit}");
+        assert!(quay + dock >= 8, "harbour quay/dock {quay}+{dock}");
         let volume = crate::stamp::fill_volume(&harbour_plan);
+        let sea = harbour_plan.heights.sea_level;
+        let mut shore_pits = 0;
+        for z in harbour.rect.min_z..=harbour.rect.max_z {
+            for x in harbour.rect.min_x..=harbour.rect.max_x {
+                if !harbour_plan.heights.is_dry(x, z) {
+                    continue;
+                }
+                if !crate::geom::Dir::ALL
+                    .iter()
+                    .any(|dir| !harbour_plan.heights.is_dry(x + dir.dx(), z + dir.dz()))
+                {
+                    continue;
+                }
+                let top = volume.top(x, z).map_or(sea - 8, |(y, _)| y);
+                if top + 3 < sea {
+                    shore_pits += 1;
+                }
+            }
+        }
+        assert_eq!(shore_pits, 0, "shore pits where the yard was {shore_pits}");
         let floating = crate::watertight::check_floating_fragments(&harbour_plan, &volume);
         assert!(
             floating.is_empty(),
-            "open-shore shipyard floating:\n{}",
+            "harbour without shipyard floating:\n{}",
             floating.join("\n")
         );
-        const { assert!(PLACE_SHIPYARD) };
+        const { assert!(!PLACE_SHIPYARD) };
     }
 }
