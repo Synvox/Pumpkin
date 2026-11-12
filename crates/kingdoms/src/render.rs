@@ -610,7 +610,7 @@ fn write_scene_renders(
                 "Hunting lodge · deer park, kennels and stables in the forest"
             }
             SceneKind::Shipyard => {
-                "Shipyard · terraced yard, slipway hull, ropewalk, stacks, sawpit and crane"
+                "Shipyard · open-shore slip, cog in frames, ropewalk, stacks and crane"
             }
             SceneKind::Festival => "Festival square · maypole, market cross and pillory",
             SceneKind::RidgeMill => "Ridge mill · oak-stock sails fixed to the hub",
@@ -1285,20 +1285,7 @@ fn shipyard_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
     };
     for z in fallback.min_z..=fallback.max_z {
         for x in fallback.min_x..=fallback.max_x {
-            if matches!(
-                plan.occ.kind(x, z),
-                CellKind::Slipway | CellKind::Ropewalk | CellKind::CutStone | CellKind::Sawpit
-            ) {
-                grow(&mut rect, x, z);
-            }
-            if plan.occ.kind(x, z) == CellKind::Crane
-                && Dir::ALL.iter().any(|dir| {
-                    matches!(
-                        plan.occ.kind(x + dir.dx(), z + dir.dz()),
-                        CellKind::Slipway | CellKind::Sawpit | CellKind::Harbor | CellKind::Dock
-                    )
-                })
-            {
+            if plan.occ.kind(x, z) == CellKind::Slipway {
                 grow(&mut rect, x, z);
             }
             if plan.occ.kind(x, z) == CellKind::Ship
@@ -1311,16 +1298,17 @@ fn shipyard_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
         }
     }
     let core = rect.unwrap_or(fallback);
-    for lot in &plan.lots {
-        if matches!(lot.kind, BuildingKind::Blacksmith | BuildingKind::Cottage)
-            && lot.rect.intersects(core)
-            && !lot_near_curtain(plan, lot)
-        {
-            grow(&mut rect, lot.rect.min_x, lot.rect.min_z);
-            grow(&mut rect, lot.rect.max_x, lot.rect.max_z);
+    for z in core.min_z.saturating_sub(6)..=core.max_z + 6 {
+        for x in core.min_x.saturating_sub(6)..=core.max_x + 6 {
+            if matches!(
+                plan.occ.kind(x, z),
+                CellKind::Crane | CellKind::Ropewalk | CellKind::CutStone | CellKind::Sawpit
+            ) {
+                grow(&mut rect, x, z);
+            }
         }
     }
-    rect.unwrap_or(fallback).inflate(2)
+    rect.unwrap_or(fallback).inflate(6)
 }
 
 fn festival_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {

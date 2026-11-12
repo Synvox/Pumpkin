@@ -1659,7 +1659,7 @@ fn place_timber_stack(
     };
     let lo = ground.min(y).max(sink.floor_min() + 2);
     for yy in lo..=y {
-        sink.put(x, yy, z, palette.path);
+        sink.put(x, yy, z, Block::DIRT.default_state);
     }
     clear_above(sink, x, y + 1, y + 8, z);
     for n in 1..=h {
@@ -1841,10 +1841,8 @@ fn place_slipway(
             z,
             if yy == deck {
                 palette.planks
-            } else if yy == deck - 1 {
-                palette.cobble
             } else {
-                palette.andesite
+                palette.bricks
             },
         );
     }
@@ -2307,7 +2305,7 @@ fn place_trebuchet(
             sink.put(x, mast + 1, z, Block::DARK_OAK_FENCE.default_state);
             sink.put(x, mast + 2, z, Block::DARK_OAK_FENCE.default_state);
             for dy in 1..=4 {
-                sink.put(x, mast - dy, z, Block::IRON_CHAIN.default_state);
+                sink.put(x, mast - dy, z, Block::DARK_OAK_FENCE.default_state);
             }
             sink.put(x, mast - 5, z, palette.cobble);
         } else if t > pivot {
@@ -6099,11 +6097,6 @@ fn place_shipyard_yard(
 ) {
     let sea = plan.heights.sea_level;
     let y = shipyard_bench_y(plan, x, z).max(sea);
-    if y > sea + 6 {
-        sink.put(x, ground.min(y), z, palette.grass);
-        clear_above(sink, x, ground.min(y) + 1, y + 12, z);
-        return;
-    }
     let lo = ground.min(y).max(sink.floor_min() + 2);
     for yy in lo..=y {
         sink.put(
@@ -6111,9 +6104,7 @@ fn place_shipyard_yard(
             yy,
             z,
             if yy == y {
-                Block::COARSE_DIRT.default_state
-            } else if (x + z + yy) % 3 == 0 {
-                palette.cobble
+                palette.grass
             } else {
                 Block::DIRT.default_state
             },
@@ -6123,9 +6114,9 @@ fn place_shipyard_yard(
     for dir in Dir::ALL {
         let ny = shipyard_bench_y(plan, x + dir.dx(), z + dir.dz());
         if ny < y {
-            sink.put(x, y, z, palette.cobble);
+            sink.put(x, y, z, palette.bricks);
             if ny <= y - 3 {
-                sink.put(x, y + 1, z, palette.cobble_wall);
+                sink.put(x, y + 1, z, palette.brick_wall);
             }
             break;
         }
@@ -6483,16 +6474,16 @@ fn place_slip_hull(
         Dir::East => (x - rect.min_x, rect.width(), z - rect.min_z, rect.depth()),
         Dir::West => (rect.max_x - x, rect.width(), z - rect.min_z, rect.depth()),
     };
-    let core_beam = if beam >= 6 { beam - 1 } else { beam };
-    let scaffold = beam >= 6 && across == 0;
-    let hull_across = if beam >= 6 { across - 1 } else { across };
+    let core_beam = if beam >= 7 { beam - 1 } else { beam };
+    let scaffold = beam >= 7 && across == 0;
+    let hull_across = if beam >= 7 { across - 1 } else { across };
     let mid = (core_beam - 1) / 2;
     let from_keel = if scaffold {
         core_beam
     } else {
         (hull_across - mid).abs()
     };
-    let hull_half = hull_half_beam(along, length, mid.clamp(1, 2));
+    let hull_half = hull_half_beam(along, length, mid.clamp(2, 3));
     let deck = slip_deck_y(plan, &slip, x, z, ground, sea);
     let lo = ground.min(deck).max(sink.floor_min() + 2);
     for yy in lo..=deck {
@@ -6503,11 +6494,11 @@ fn place_slip_hull(
             if yy == deck {
                 palette.planks
             } else {
-                palette.cobble
+                palette.bricks
             },
         );
     }
-    clear_above(sink, x, deck + 1, deck + 12, z);
+    clear_above(sink, x, deck + 1, deck + 14, z);
     if scaffold || from_keel > hull_half {
         sink.put(x, deck, z, palette.planks);
         sink.put(x, deck + 1, z, palette.log);
@@ -6515,6 +6506,7 @@ fn place_slip_hull(
             sink.put(x, deck + 2, z, palette.log);
             sink.put(x, deck + 3, z, palette.fence);
             sink.put(x, deck + 4, z, palette.slab);
+            sink.put(x, deck + 5, z, palette.slab);
         } else {
             sink.put(x, deck + 2, z, palette.fence);
             sink.put(x, deck + 3, z, palette.fence);
@@ -6522,36 +6514,38 @@ fn place_slip_hull(
         return;
     }
     let rib = along % 2 == 0;
-    let planked = along > length / 3;
+    let planked = along > length / 2;
+    let keel = Block::DARK_OAK_LOG.default_state;
     sink.put(
         x,
         deck,
         z,
-        if from_keel == 0 {
-            Block::DARK_OAK_LOG.default_state
-        } else {
-            palette.planks
-        },
+        if from_keel == 0 { keel } else { palette.planks },
     );
     if from_keel == 0 {
-        sink.put(x, deck + 1, z, Block::DARK_OAK_LOG.default_state);
+        sink.put(x, deck + 1, z, keel);
+        sink.put(x, deck + 2, z, keel);
         if rib {
-            sink.put(x, deck + 2, z, Block::DARK_OAK_LOG.default_state);
+            sink.put(x, deck + 3, z, keel);
         }
     }
-    if rib && from_keel == hull_half {
-        for h in 1..=4 {
-            sink.put(x, deck + h, z, Block::DARK_OAK_LOG.default_state);
+    if rib {
+        let rib_h = 2 + (hull_half - from_keel).clamp(0, 4);
+        for h in 1..=rib_h {
+            sink.put(x, deck + h, z, keel);
         }
     } else if from_keel == hull_half {
         sink.put(x, deck + 1, z, Block::DARK_OAK_FENCE.default_state);
         sink.put(x, deck + 2, z, Block::DARK_OAK_FENCE.default_state);
+        sink.put(x, deck + 3, z, Block::DARK_OAK_FENCE.default_state);
     }
-    if planked && from_keel > 0 && from_keel < hull_half {
-        sink.put(x, deck + 1, z, Block::SPRUCE_PLANKS.default_state);
-        sink.put(x, deck + 2, z, Block::SPRUCE_PLANKS.default_state);
-        if along > length / 2 {
-            sink.put(x, deck + 3, z, Block::SPRUCE_PLANKS.default_state);
+    if planked && from_keel > 0 && from_keel <= hull_half {
+        let h = if from_keel == hull_half { 3 } else { 4 };
+        for yy in 1..=h {
+            sink.put(x, deck + yy, z, Block::SPRUCE_PLANKS.default_state);
+        }
+        if from_keel == hull_half {
+            sink.put(x, deck + h + 1, z, Block::DARK_OAK_FENCE.default_state);
         }
     }
 }
@@ -6892,6 +6886,29 @@ fn quarry_crane_boom_dir(plan: &TownPlan, x: i32, z: i32) -> Dir {
     best
 }
 
+fn crane_mast_cell(plan: &TownPlan, x: i32, z: i32) -> (i32, i32) {
+    let rect = blob_of(plan, x, z, CellKind::Crane);
+    let mut best = (x, z);
+    let mut best_pad = -1i32;
+    for zz in rect.min_z..=rect.max_z {
+        for xx in rect.min_x..=rect.max_x {
+            if plan.occ.kind(xx, zz) != CellKind::Crane {
+                continue;
+            }
+            let pad = crane_pad(plan, xx, zz);
+            if pad > best_pad {
+                best_pad = pad;
+                best = (xx, zz);
+            }
+        }
+    }
+    best
+}
+
+fn boom_step_from_mast(x: i32, z: i32, mx: i32, mz: i32, boom: Dir) -> Option<i32> {
+    (0..=8).find(|&step| mx + boom.dx() * step == x && mz + boom.dz() * step == z)
+}
+
 fn place_quarry_crane(
     sink: &mut impl BlockSink,
     plan: &TownPlan,
@@ -6900,67 +6917,57 @@ fn place_quarry_crane(
     z: i32,
     palette: &Palette,
 ) {
+    let (mx, mz) = crane_mast_cell(plan, x, z);
+    let boom = quarry_crane_boom_dir(plan, mx, mz);
+    let mast_y = plan.heights.height(mx, mz);
     let y = ground;
-    let pad = crane_pad(plan, x, z);
-    let boom = quarry_crane_boom_dir(plan, x, z);
     sink.put(x, y, z, Block::STONE_BRICKS.default_state);
     sink.put(x, y + 1, z, palette.cobble);
-    clear_above(sink, x, y + 2, y + 14, z);
+    clear_above(sink, x, y + 2, mast_y + 14, z);
     let log = Block::OAK_LOG.default_state;
-    if pad >= 8 {
-        for h in 2..=10 {
-            sink.put(x, y + h, z, log);
+    let step = boom_step_from_mast(x, z, mx, mz, boom);
+    if x == mx && z == mz {
+        for yy in y + 2..=mast_y.max(y) + 10 {
+            sink.put(x, yy, z, log);
         }
-        sink.put(x, y + 11, z, Block::OAK_FENCE.default_state);
-        sink.put(x, y + 12, z, Block::LANTERN.default_state);
+        sink.put(x, mast_y.max(y) + 11, z, Block::OAK_FENCE.default_state);
+        sink.put(x, mast_y.max(y) + 12, z, Block::LANTERN.default_state);
         return;
     }
-    let back = boom.opposite();
-    let toward_mast = plan.occ.kind(x + back.dx(), z + back.dz()) == CellKind::Crane
-        && crane_pad(plan, x + back.dx(), z + back.dz()) >= 8;
-    let toward_tip = plan.occ.kind(x + boom.dx(), z + boom.dz()) == CellKind::Crane
-        && crane_pad(plan, x + back.dx() * 2, z + back.dz() * 2) >= 8;
-    if toward_mast {
-        sink.put(x, y + 4, z, Block::OAK_FENCE.default_state);
-        sink.put(x, y + 5, z, Block::OAK_FENCE.default_state);
-        sink.put(x, y + 6, z, Block::OAK_FENCE.default_state);
-        sink.put(x, y + 8, z, log);
-        sink.put(x, y + 9, z, log);
-        sink.put(x, y + 10, z, log);
-        return;
-    }
-    if toward_tip {
-        sink.put(x, y + 8, z, log);
-        sink.put(x, y + 9, z, log);
-        for dy in 1..=5 {
-            sink.put(x, y + 8 - dy, z, Block::IRON_CHAIN.default_state);
+    if let Some(dist) = step.filter(|&d| d >= 1) {
+        let jib = mast_y.max(y) + 9;
+        sink.put(x, jib, z, log);
+        sink.put(x, jib + 1, z, log);
+        if dist >= 3 {
+            for dy in 1..=5 {
+                let cy = mast_y + 9 - dy;
+                if cy > y + 2 {
+                    sink.put(x, cy, z, Block::IRON_CHAIN.default_state);
+                }
+            }
+            sink.put(x, y + 2, z, Block::IRON_BARS.default_state);
         }
-        sink.put(x, y + 2, z, Block::IRON_BARS.default_state);
-        sink.put(x, y + 1, z, palette.bricks);
-        return;
     }
-    sink.put(x, y + 4, z, Block::OAK_FENCE.default_state);
-    sink.put(x, y + 5, z, Block::OAK_FENCE.default_state);
-    sink.put(x, y + 6, z, Block::OAK_TRAPDOOR.default_state);
 }
 
 fn shipyard_crane_boom_dir(plan: &TownPlan, x: i32, z: i32) -> Dir {
-    if let Some(slip) = slip_rect_near(plan, x, z) {
+    let (mx, mz) = crane_mast_cell(plan, x, z);
+    let rect = blob_of(plan, mx, mz, CellKind::Crane);
+    let arms = [
+        (Dir::East, rect.max_x - mx),
+        (Dir::West, mx - rect.min_x),
+        (Dir::South, rect.max_z - mz),
+        (Dir::North, mz - rect.min_z),
+    ];
+    if let Some((dir, len)) = arms.iter().copied().max_by_key(|(_, len)| *len)
+        && len > 0
+    {
+        return dir;
+    }
+    if let Some(slip) = slip_rect_near(plan, mx, mz) {
         return slip_water_dir(plan, slip);
     }
-    Dir::ALL
-        .iter()
-        .copied()
-        .max_by_key(|dir| {
-            (1..=6)
-                .filter(|step| {
-                    !plan
-                        .heights
-                        .is_dry(x + dir.dx() * step, z + dir.dz() * step)
-                })
-                .count()
-        })
-        .unwrap_or(Dir::South)
+    Dir::South
 }
 
 fn place_shipyard_crane(
@@ -6972,48 +6979,43 @@ fn place_shipyard_crane(
     sea: i32,
     palette: &Palette,
 ) {
+    let (mx, mz) = crane_mast_cell(plan, x, z);
+    let boom = shipyard_crane_boom_dir(plan, mx, mz);
+    let mast_y = shipyard_bench_y(plan, mx, mz)
+        .max(plan.heights.height(mx, mz))
+        .max(sea);
     let y = shipyard_bench_y(plan, x, z).max(ground).max(sea);
-    let pad = crane_pad(plan, x, z);
-    let boom = shipyard_crane_boom_dir(plan, x, z);
-    let lo = ground.min(y).max(sink.floor_min() + 2);
+    let bed = plan.heights.height(x, z).min(ground).min(y);
+    let lo = bed.max(sink.floor_min() + 2);
     for yy in lo..=y {
         sink.put(x, yy, z, Block::STONE_BRICKS.default_state);
     }
     sink.put(x, y + 1, z, palette.cobble);
-    clear_above(sink, x, y + 2, y + 16, z);
+    clear_above(sink, x, y + 2, mast_y + 16, z);
     let log = Block::OAK_LOG.default_state;
-    if pad >= 8 {
-        for h in 2..=10 {
-            sink.put(x, y + h, z, log);
+    if x == mx && z == mz {
+        for yy in y + 2..=mast_y.max(y) + 10 {
+            sink.put(x, yy, z, log);
         }
-        sink.put(x, y + 11, z, Block::OAK_FENCE.default_state);
-        sink.put(x, y + 12, z, Block::LANTERN.default_state);
+        let top = mast_y.max(y);
+        sink.put(x, top + 11, z, Block::OAK_FENCE.default_state);
+        sink.put(x, top + 12, z, Block::LANTERN.default_state);
         return;
     }
-    let back = boom.opposite();
-    let toward_mast = plan.occ.kind(x + back.dx(), z + back.dz()) == CellKind::Crane
-        && crane_pad(plan, x + back.dx(), z + back.dz()) >= 8;
-    let toward_tip = plan.occ.kind(x + boom.dx(), z + boom.dz()) == CellKind::Crane
-        && crane_pad(plan, x + back.dx() * 2, z + back.dz() * 2) >= 8;
-    if toward_mast {
-        sink.put(x, y + 8, z, log);
-        sink.put(x, y + 9, z, log);
-        sink.put(x, y + 10, z, log);
-        return;
-    }
-    if toward_tip {
-        sink.put(x, y + 8, z, log);
-        sink.put(x, y + 9, z, log);
-        for dy in 1..=5 {
-            sink.put(x, y + 8 - dy, z, Block::IRON_CHAIN.default_state);
+    if let Some(dist) = boom_step_from_mast(x, z, mx, mz, boom).filter(|&d| d >= 1) {
+        let jib = mast_y + 9;
+        sink.put(x, jib, z, log);
+        sink.put(x, jib + 1, z, log);
+        if dist >= 3 {
+            for dy in 1..=5 {
+                let cy = mast_y + 9 - dy;
+                if cy > y + 2 {
+                    sink.put(x, cy, z, Block::IRON_CHAIN.default_state);
+                }
+            }
+            sink.put(x, y + 2, z, Block::IRON_BARS.default_state);
         }
-        sink.put(x, y + 2, z, Block::IRON_BARS.default_state);
-        return;
     }
-    for h in 2..=8 {
-        sink.put(x, y + h, z, log);
-    }
-    sink.put(x, y + 9, z, Block::OAK_FENCE.default_state);
 }
 
 fn place_crane(

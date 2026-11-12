@@ -184,6 +184,7 @@ fn is_log(id: pumpkin_data::BlockId) -> bool {
         || id == Block::DARK_OAK_LOG.id
         || id == Block::CHERRY_LOG.id
         || id == Block::MANGROVE_LOG.id
+        || id == Block::PALE_OAK_LOG.id
 }
 
 fn planned_timber(kind: CellKind) -> bool {
@@ -290,6 +291,52 @@ fn is_water_block(state: &pumpkin_data::BlockState) -> bool {
     Block::from_state_id(state.id).id == Block::WATER.id
 }
 
+fn is_structural_block(state: &pumpkin_data::BlockState) -> bool {
+    if state.is_air() || is_water_block(state) {
+        return false;
+    }
+    !is_hanging_decoration(Block::from_state_id(state.id).id)
+}
+
+fn is_fence(id: pumpkin_data::BlockId) -> bool {
+    id == Block::OAK_FENCE.id
+        || id == Block::SPRUCE_FENCE.id
+        || id == Block::BIRCH_FENCE.id
+        || id == Block::JUNGLE_FENCE.id
+        || id == Block::ACACIA_FENCE.id
+        || id == Block::DARK_OAK_FENCE.id
+        || id == Block::CHERRY_FENCE.id
+        || id == Block::MANGROVE_FENCE.id
+        || id == Block::BAMBOO_FENCE.id
+        || id == Block::CRIMSON_FENCE.id
+        || id == Block::WARPED_FENCE.id
+        || id == Block::NETHER_BRICK_FENCE.id
+}
+
+/// Horizontal log that is not a post and not a roof timber on a `Building` lot.
+fn is_exposed_beam(volume: &VolumeSink, plan: &TownPlan, pos: (i32, i32, i32)) -> bool {
+    let (x, y, z) = pos;
+    if !flags_as_floating_kind(plan.occ.kind(x, z)) {
+        return false;
+    }
+    let Some(state) = volume.get(x, y, z) else {
+        return false;
+    };
+    if !is_log(Block::from_state_id(state.id).id) {
+        return false;
+    }
+    if volume.get(x, y - 1, z).is_some_and(|below| {
+        is_structural_block(below) && is_log(Block::from_state_id(below.id).id)
+    }) {
+        return false;
+    }
+    [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dz)| {
+        volume
+            .get(x + dx, y, z + dz)
+            .is_some_and(|n| is_log(Block::from_state_id(n.id).id))
+    })
+}
+
 fn is_hanging_decoration(id: pumpkin_data::BlockId) -> bool {
     id == Block::LANTERN.id
         || id == Block::SOUL_LANTERN.id
@@ -394,8 +441,13 @@ fn hangs_from_parent(
 /// Solids not 6-connected to terrain, water, or a grounded parent structure.
 ///
 /// Hanging lanterns and similar bits must reach the roof through chain or
-/// fence in the same column. Isolated mid-air timber (cog stays, crane booms,
-/// leftover Features canopies) is a failure.
+/// fence in the same column. Isolated mid-air timber (cog stays, crane jibs,
+/// leftover Features canopies) is a failure. Chains and lanterns are not
+/// structural: a log beam may not count as grounded only because a chain
+/// hangs from it down to a pad. A crane jib, or any other non-roof log beam,
+/// must share a face with its mast or neighbour beam; a one- or two-block
+/// air gap does not count as attached. Roof beams on `Building` lots are
+/// skipped (`Building` is not a floating kind).
 ///
 /// Scene close-up crops are checked again with out-of-crop neighbours ignored.
 /// A mill sail whose hub sits outside the crop used to pass the town-wide
@@ -422,7 +474,20 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
         ) {
             continue;
         }
-        let crop = scene.rect.inflate(4);
+        let mut crop = scene.rect.inflate(4);
+        if scene.kind == SceneKind::RidgeMill {
+            for lot in &plan.lots {
+                if lot.kind == BuildingKind::Windmill && lot.rect.intersects(scene.rect) {
+                    let mill = lot.rect.inflate(crate::scenes::MILL_SAIL_RADIUS);
+                    crop = Rect::new(
+                        crop.min_x.min(mill.min_x),
+                        crop.min_z.min(mill.min_z),
+                        crop.max_x.max(mill.max_x),
+                        crop.max_z.max(mill.max_z),
+                    );
+                }
+            }
+        }
         let cx0 = crop.min_x.max(volume.min_x);
         let cx1 = crop.max_x.min(volume.min_x + volume.sx - 1);
         let cz0 = crop.min_z.max(volume.min_z);
@@ -478,12 +543,22 @@ fn floating_in_rect(
                     }
                     is_water_block(nstate) || ny < plan.heights.height(nx, nz)
                 });
-                if supported {
+                if supported && is_structural_block(state) {
                     seeds.push_back((x, y, z));
                 }
             }
         }
     }
+    let structural_at = |pos: (i32, i32, i32)| {
+        volume
+            .get(pos.0, pos.1, pos.2)
+            .is_some_and(is_structural_block)
+    };
+    let hanging_at = |pos: (i32, i32, i32)| {
+        volume.get(pos.0, pos.1, pos.2).is_some_and(|state| {
+            !state.is_air() && is_hanging_decoration(Block::from_state_id(state.id).id)
+        })
+    };
     let mut seen = HashSet::new();
     while let Some(pos) = seeds.pop_front() {
         if !seen.insert(pos) {
@@ -492,14 +567,14 @@ fn floating_in_rect(
         let (x, y, z) = pos;
         for (dx, dy, dz) in FACE {
             let next = (x + dx, y + dy, z + dz);
-            if above.contains(&next) && !seen.contains(&next) {
+            if above.contains(&next) && structural_at(next) && !seen.contains(&next) {
                 seeds.push_back(next);
             }
         }
     }
     // One or two air of gap still counts as hanging from the parent
-    // structure (lanterns, banners, mill sails, jettied eaves). Isolated
-    // mid-air timber several blocks out does not.
+    // (mill sails, jettied eaves). Crane jibs and other non-roof beams
+    // must share a face with the mast; chains and air gaps do not count.
     let mut grew = true;
     while grew {
         grew = false;
@@ -507,7 +582,10 @@ fn floating_in_rect(
             .iter()
             .copied()
             .filter(|pos| {
-                !seen.contains(pos) && hangs_from_parent(volume, plan, &seen, *pos, in_crop)
+                !seen.contains(pos)
+                    && structural_at(*pos)
+                    && !is_exposed_beam(volume, plan, *pos)
+                    && hangs_from_parent(volume, plan, &seen, *pos, in_crop)
             })
             .collect();
         for pos in hanging {
@@ -517,7 +595,34 @@ fn floating_in_rect(
                 while let Some((x, y, z)) = q.pop_front() {
                     for (dx, dy, dz) in FACE {
                         let next = (x + dx, y + dy, z + dz);
-                        if above.contains(&next) && seen.insert(next) {
+                        if above.contains(&next) && structural_at(next) && seen.insert(next) {
+                            q.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    grew = true;
+    while grew {
+        grew = false;
+        let hanging: Vec<(i32, i32, i32)> = above
+            .iter()
+            .copied()
+            .filter(|pos| {
+                !seen.contains(pos)
+                    && hanging_at(*pos)
+                    && hangs_from_parent(volume, plan, &seen, *pos, in_crop)
+            })
+            .collect();
+        for pos in hanging {
+            if seen.insert(pos) {
+                grew = true;
+                let mut q = VecDeque::from([pos]);
+                while let Some((x, y, z)) = q.pop_front() {
+                    for (dx, dy, dz) in FACE {
+                        let next = (x + dx, y + dy, z + dz);
+                        if above.contains(&next) && hanging_at(next) && seen.insert(next) {
                             q.push_back(next);
                         }
                     }
@@ -528,7 +633,23 @@ fn floating_in_rect(
     let mut leftover: HashSet<(i32, i32, i32)> = above
         .difference(&seen)
         .copied()
-        .filter(|&(x, _, z)| flags_as_floating_kind(plan.occ.kind(x, z)))
+        .filter(|&(x, _, z)| {
+            let kind = plan.occ.kind(x, z);
+            if !flags_as_floating_kind(kind) {
+                return false;
+            }
+            // A neighbouring mill's blade clipped by this crop is not a floater;
+            // the hub sits outside in_crop so the town-wide flood already passed.
+            if kind == CellKind::WindSail
+                && let Some(mill) = crate::stamp::nearest_mill(plan, x, z)
+            {
+                let (cx, cz) = mill.rect.center();
+                if !in_crop(cx, cz) {
+                    return false;
+                }
+            }
+            true
+        })
         .collect();
     if leftover.is_empty() {
         return Vec::new();
@@ -555,13 +676,19 @@ fn floating_in_rect(
         let block = volume
             .get(x, y, z)
             .map(|state| Block::from_state_id(state.id));
-        if size <= 2 && block.is_some_and(|b| is_hanging_decoration(b.id)) {
+        if size <= 2 && block.is_some_and(|b| is_hanging_decoration(b.id) || is_fence(b.id)) {
             continue;
         }
         let name = block.map_or("block", |b| b.name);
-        fails.push(format!(
-            "{tag} floating {size}-block fragment at {x},{y},{z} ({name}) kind={kind:?}"
-        ));
+        if block.is_some_and(|b| is_log(b.id)) {
+            fails.push(format!(
+                "{tag} unattached beam at {x},{y},{z} ({name}) size={size} kind={kind:?}"
+            ));
+        } else {
+            fails.push(format!(
+                "{tag} floating {size}-block fragment at {x},{y},{z} ({name}) kind={kind:?}"
+            ));
+        }
     }
     if !leftover.is_empty() {
         fails.push(format!("{tag} {} more floating blocks", leftover.len()));
@@ -2416,6 +2543,81 @@ mod tests {
         );
         assert!(spokes >= 4, "wheel spokes {spokes}");
         assert!(axle >= 1, "visible axle {axle}");
+    }
+
+    #[test]
+    fn unattached_crane_jib_fails_floating_check() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let water = HeightGrid::synthetic_river(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+            origin.z + 40,
+        );
+        let plan = build_plan(3, origin, water, PaletteKind::Oak);
+        let mut volume = fill_volume(&plan);
+        let before = check_floating_fragments(&plan, &volume);
+        assert!(
+            before.is_empty(),
+            "attached yard should pass:\n{}",
+            before.join("\n")
+        );
+
+        let mut placed = false;
+        let log = Block::OAK_LOG.default_state;
+        'search: for z in plan.bounds.min_z..=plan.bounds.max_z {
+            for x in plan.bounds.min_x..=plan.bounds.max_x {
+                if plan.occ.kind(x, z) != CellKind::Crane {
+                    continue;
+                }
+                let Some((top, state)) = volume.top(x, z) else {
+                    continue;
+                };
+                if !is_log(Block::from_state_id(state.id).id) {
+                    continue;
+                }
+                for dir in crate::geom::Dir::ALL {
+                    let ax = x + dir.dx() * 2;
+                    let az = z + dir.dz() * 2;
+                    let bx = x + dir.dx() * 3;
+                    let bz = z + dir.dz() * 3;
+                    if !plan.bounds.contains(ax, az) || !plan.bounds.contains(bx, bz) {
+                        continue;
+                    }
+                    if !flags_as_floating_kind(plan.occ.kind(ax, az))
+                        || !flags_as_floating_kind(plan.occ.kind(bx, bz))
+                    {
+                        continue;
+                    }
+                    let mid = volume.get(x + dir.dx(), top, z + dir.dz());
+                    if mid.is_some_and(|s| !s.is_air() && !is_water_block(s)) {
+                        continue;
+                    }
+                    if volume.get(ax, top, az).is_some_and(|s| !s.is_air()) {
+                        continue;
+                    }
+                    if volume.get(bx, top, bz).is_some_and(|s| !s.is_air()) {
+                        continue;
+                    }
+                    volume.put(ax, top, az, log);
+                    volume.put(bx, top, bz, log);
+                    placed = true;
+                    break 'search;
+                }
+            }
+        }
+        assert!(placed, "could not inject a detached jib next to a crane");
+        let after = check_floating_fragments(&plan, &volume);
+        assert!(
+            after.iter().any(|line| line.contains("unattached beam")),
+            "detached jib should fail:\n{}",
+            after.join("\n")
+        );
     }
 
     struct DamageGuard(String);
