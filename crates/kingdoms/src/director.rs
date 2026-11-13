@@ -23,6 +23,7 @@ use pumpkin_data::dimension::Dimension;
 use pumpkin_data::entity::EntityType;
 use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
+use pumpkin_data::sound::{Sound, SoundCategory};
 use pumpkin_util::Hand;
 use pumpkin_util::math::boundingbox::BoundingBox;
 use pumpkin_util::math::position::BlockPos;
@@ -40,15 +41,15 @@ use crate::bounty::{self, BountyKind};
 use crate::chat::{self, ShoutKind};
 use crate::engines;
 use crate::faction::{
-    Faction, KingdomId, TAG_ARMED, TAG_BEARER, TAG_CAPTAIN, TAG_MILITIA, TAG_NPC_BLACKSMITH,
-    TAG_NPC_PRIEST, TAG_RAIDER, TAG_ROUTED, TAG_SUPPLY, TAG_TEMP, faction_of_entity, has_tag,
-    is_allied, is_hostile, is_kingdoms_tagged, kingdom_color_rgb, kingdom_tag, role_from_tags,
+    Faction, KingdomId, TAG_ARMED, TAG_BEARER, TAG_CAPTAIN, TAG_CITIZEN, TAG_MILITIA,
+    TAG_NPC_BLACKSMITH, TAG_NPC_PRIEST, TAG_RAIDER, TAG_ROUTED, TAG_SUPPLY, TAG_TEMP,
+    faction_of_entity, has_tag, is_allied, is_hostile, is_kingdoms_tagged, kingdom_color_rgb,
+    kingdom_tag, role_from_tags,
 };
 use crate::flow::{DIRECT_RANGE, FlowField, is_squad_leader, should_refresh_path};
 use crate::geom::Rect;
 use crate::goals::{
-    PostTarget, already_wired, bind_citizen, bind_golem, bind_raider, drive_live, equip,
-    shoot_arrow,
+    PostTarget, bind_citizen, bind_golem, bind_raider, drive_live, equip, shoot_arrow,
 };
 use crate::info::{GateInfo, TownInfo};
 use crate::lod::{
@@ -2690,6 +2691,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         remove_ephemeral(world, &drop_ids);
     }
     entities = sweep_restored_orphans(world, town_id, entities);
+    for entity in &entities {
+        rebind_if_needed(entity.as_ref());
+    }
 
     let mut buckets = SpatialBuckets::new();
     let mut snapshots: Vec<(Arc<dyn EntityBase>, Faction)> = Vec::new();
@@ -2788,6 +2792,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     let mut dump_plots = false;
     let mut should_close_gates = false;
     let mut credit_defense: Option<(ScenePost, KingdomId)> = None;
+    let mut ring_bell = false;
     {
         let mut dir = lock();
         {
@@ -2844,6 +2849,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     note: format!("{town_id} alarm"),
                 });
                 tracing::info!(town = town_id, "town alarm");
+                ring_bell = true;
             }
             if alarm_before && !now_alarm {
                 tracing::info!(town = town_id, "town alarm cleared");
@@ -3033,6 +3039,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         for event in pending_events {
             dir.push_event(event);
         }
+    }
+    if ring_bell {
+        ring_town_bell(world, &snapshots);
     }
     if !pending_despawn.is_empty() {
         let mut dir = lock();
@@ -4356,18 +4365,49 @@ pub fn spawn_citizen(
     spawned.then_some(id)
 }
 
-/// Re-bind AI on tagged entities that were loaded from disk.
-pub fn rebind_if_needed(entity: &dyn EntityBase) {
-    let base = entity.get_entity();
-    if already_wired(base) {
+fn ring_town_bell(world: &World, snapshots: &[(Arc<dyn EntityBase>, Faction)]) {
+    for (entity, faction) in snapshots {
+        if !faction.is_kingdom() {
+            continue;
+        }
+        let base = entity.get_entity();
+        if has_tag(base, TAG_RAIDER) {
+            continue;
+        }
+        let civilian = has_tag(base, TAG_CITIZEN)
+            || role_from_tags(base)
+                .as_deref()
+                .is_some_and(|r| r == VillagerRole::Civilian.as_str());
+        if !civilian {
+            continue;
+        }
+        let pos = base.pos.load();
+        world.play_sound(Sound::BlockBellUse, SoundCategory::Blocks, &pos);
+        tracing::info!(
+            entity = base.entity_id,
+            x = pos.x,
+            z = pos.z,
+            "civilian rang the town bell"
+        );
         return;
     }
+}
+
+/// Re-bind AI on tagged entities that were loaded from disk.
+///
+/// `kingdoms:wired` persists in NBT, but goals and `director_driven` do not.
+/// Skip only when this process already attached AI.
+pub fn rebind_if_needed(entity: &dyn EntityBase) {
+    let base = entity.get_entity();
     if !is_kingdoms_tagged(base) {
         return;
     }
     let Some(mob) = entity.get_mob() else {
         return;
     };
+    if mob.get_mob_entity().is_director_driven() {
+        return;
+    }
     let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
     let tags = base
         .scoreboard_tags
