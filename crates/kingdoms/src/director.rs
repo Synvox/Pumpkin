@@ -14,7 +14,7 @@ use pumpkin_core::entity::EntityBase;
 use pumpkin_core::entity::mob::Mob;
 use pumpkin_core::entity::player::{Player, TitleMode};
 use pumpkin_core::world::World;
-use pumpkin_core::world::bossbar::{Bossbar, BossbarColor, BossbarDivisions};
+use pumpkin_core::world::bossbar::{Bossbar, BossbarDivisions};
 use pumpkin_core::world::scoreboard::{CollisionRule, NameTagVisibility, Team};
 use pumpkin_data::damage::DamageType;
 use pumpkin_data::data_component::DataComponent;
@@ -252,6 +252,7 @@ pub struct WarTownLine {
     pub flag_defenders: u32,
     pub morale: i32,
     pub bounty: Option<String>,
+    pub cutoff: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -279,6 +280,17 @@ pub struct BattleState {
     pub flag_defenders: u32,
     pub morale: i32,
     pub bounty: Option<String>,
+    pub cutoff: bool,
+}
+
+/// Live supply cart as shown on `GET /state`.
+#[derive(Clone, Debug)]
+pub struct SupplyState {
+    pub from: String,
+    pub to: String,
+    pub kingdom: String,
+    pub x: f64,
+    pub z: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -315,6 +327,41 @@ pub enum CombatKind {
     CapturePaused,
     FlagChanged,
     Bounty,
+    RankUp,
+    SupplyAmbush,
+    SupplyArrived,
+}
+
+impl CombatKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Alarm => "alarm",
+            Self::Wave => "wave",
+            Self::Kill => "kill",
+            Self::RaidStart => "raid_start",
+            Self::RaidStop => "raid_stop",
+            Self::Victory => "victory",
+            Self::Capture => "capture",
+            Self::Retake => "retake",
+            Self::Breach => "breach",
+            Self::Rout => "rout",
+            Self::RamDestroyed => "ram_destroyed",
+            Self::WarClock => "war_clock",
+            Self::Trebuchet => "trebuchet",
+            Self::TrebuchetDestroyed => "trebuchet_destroyed",
+            Self::LaddersRaised => "ladders_raised",
+            Self::Portcullis => "portcullis",
+            Self::CaptureStarted => "capture_started",
+            Self::CaptureProgress => "capture_progress",
+            Self::CapturePaused => "capture_paused",
+            Self::FlagChanged => "flag_changed",
+            Self::Bounty => "bounty",
+            Self::RankUp => "rank_up",
+            Self::SupplyAmbush => "supply_ambush",
+            Self::SupplyArrived => "supply_arrived",
+        }
+    }
 }
 
 /// Order a ranked player can give nearby kingdom soldiers.
@@ -455,6 +502,20 @@ pub struct Director {
     last_night_raid_tick: u32,
     last_squad_reply: HashMap<String, u32>,
     morale: HashMap<String, crate::morale::KingdomShock>,
+    supply: Vec<SupplyRun>,
+}
+
+struct SupplyRun {
+    id: i32,
+    escort: Option<i32>,
+    from: String,
+    to: String,
+    kingdom: KingdomId,
+    waypoint: u8,
+    route: Vec<(i32, i32)>,
+    ambush: u32,
+    x: f64,
+    z: f64,
 }
 
 struct PendingFlip {
@@ -545,6 +606,9 @@ struct TownWar {
     morale: i32,
     plate_holds: HashMap<String, u32>,
     supply_cart: Option<i32>,
+    last_delivery: u32,
+    cutoff: bool,
+    inbound_lost: bool,
 }
 
 #[derive(Clone)]
@@ -626,6 +690,7 @@ impl Director {
             last_night_raid_tick: 0,
             last_squad_reply: HashMap::new(),
             morale: HashMap::new(),
+            supply: Vec::new(),
         }
     }
 
@@ -783,6 +848,7 @@ impl Director {
         let _ = entity.add_scoreboard_tag(&kingdom_tag(&kingdom));
         let world = entity.world.load();
         add_to_team(&world, &kingdom, &player.gameprofile.name);
+        crate::hud::apply_tab_name(player, kingdom.as_str());
         self.player_kingdoms.insert(uuid.clone(), kingdom.clone());
         let rank = self.player_stats.entry(uuid.clone()).or_default().rank();
         kit_player(player, &kingdom, rank, true);
@@ -1088,6 +1154,7 @@ impl Director {
             flag_defenders: war.flag_defenders,
             morale: war.morale,
             bounty: war.bounty.map(BountyKind::as_str).map(str::to_owned),
+            cutoff: war.cutoff,
         })
     }
 
@@ -1155,6 +1222,7 @@ impl Director {
                     flag_defenders: war.flag_defenders,
                     morale: war.morale,
                     bounty: war.bounty.map(BountyKind::as_str).map(str::to_owned),
+                    cutoff: war.cutoff,
                 }
             })
             .collect();
@@ -1258,6 +1326,20 @@ impl Director {
                     shock_until: shock.shock_until,
                     holds_capital: holds,
                 }
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn supply_states(&self) -> Vec<SupplyState> {
+        self.supply
+            .iter()
+            .map(|run| SupplyState {
+                from: run.from.clone(),
+                to: run.to.clone(),
+                kingdom: run.kingdom.as_str().to_owned(),
+                x: run.x,
+                z: run.z,
             })
             .collect()
     }
@@ -1543,6 +1625,9 @@ impl TownWar {
             morale: bounty::TOWN_MORALE_START,
             plate_holds: HashMap::new(),
             supply_cart: None,
+            last_delivery: 0,
+            cutoff: false,
+            inbound_lost: false,
         }
     }
 }
@@ -1852,7 +1937,7 @@ fn parse_cell(s: &str) -> Option<(i32, i32)> {
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
-fn parse_town_id(town_id: &str) -> Option<(u64, i32, i32)> {
+pub(crate) fn parse_town_id(town_id: &str) -> Option<(u64, i32, i32)> {
     let mut parts = town_id.split(':');
     let seed: u64 = parts.next()?.parse().ok()?;
     let cell_x: i32 = parts.next()?.parse().ok()?;
@@ -2332,6 +2417,7 @@ pub fn restore_player(player: &Player) {
     let _ = entity.add_scoreboard_tag(&kingdom_tag(&kingdom));
     let world = entity.world.load();
     add_to_team(&world, &kingdom, &player.gameprofile.name);
+    crate::hud::apply_tab_name(player, kingdom.as_str());
     kit_player(player, &kingdom, rank, false);
     let dir = lock();
     set_keep_respawn(player, &world, &kingdom, &dir.towns);
@@ -2363,6 +2449,7 @@ pub fn note_entity_death(entity_id: i32) {
 }
 
 fn announce_rank(player: &Player, rank: siege::Rank) {
+    let pos = player.get_entity().pos.load();
     let msg = TextComponent::text(format!(
         "You are now a {} (renown {}).",
         rank.as_str(),
@@ -2378,6 +2465,17 @@ fn announce_rank(player: &Player, rank: siege::Rank) {
         rank = rank.as_str(),
         "kingdoms rank up"
     );
+    let mut dir = lock();
+    let tick = dir.tick;
+    dir.push_event(CombatEvent {
+        tick,
+        kind: CombatKind::RankUp,
+        actor: player.get_entity().entity_id,
+        other: None,
+        x: pos.x,
+        z: pos.z,
+        note: format!("{} ranked {}", player.gameprofile.name, rank.as_str()),
+    });
 }
 
 /// One server tick: alarm, targets, LOD, raid waves.
@@ -2426,6 +2524,8 @@ pub fn tick_world(world: &Arc<World>) {
     }
     let towns_us = towns_started.elapsed().as_micros();
     log_slow_phase(tick, "towns", towns_started);
+    tick_supply_lines(world, tick);
+    tick_player_hud(world, tick);
     let clock_started = Instant::now();
     maybe_war_clock(world, tick);
     maybe_night_raid(world, tick);
@@ -3904,19 +4004,16 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         attackers_near,
         defenders_near,
     };
-    apply_capture(
-        town_id,
-        tick,
-        presence,
-        occupier_from_flag(&snapshots, flag_xz, &owner_faction),
-        1,
-    );
+    let occupier = occupier_from_flag(&snapshots, flag_xz, &owner_faction);
+    let occupier_side = occupier.as_str().to_owned();
+    apply_capture(town_id, tick, presence, occupier, 1);
     update_capture_meter(
         world,
         town_id,
         keep_dest,
         presence.attackers_on_plate,
         presence.defenders_near,
+        &occupier_side,
     );
 
     if alarm && tick.is_multiple_of(20) {
@@ -6693,9 +6790,15 @@ fn complete_bounty(world: &World, town_id: &str, tick: u32, kind: BountyKind, x:
         return;
     };
     let uuid = nearest_enlisted(&dir, world, &owner, x, z);
+    let mut ranked = None;
     if let Some(id) = uuid.as_ref() {
         let stats = dir.player_stats.entry(id.clone()).or_default();
+        let before = stats.rank();
         stats.bounties = stats.bounties.saturating_add(1);
+        let after = stats.rank();
+        if after != before {
+            ranked = Some((id.clone(), after));
+        }
     }
     let cart = dir.towns.get_mut(town_id).and_then(|war| {
         war.morale = bounty::apply_morale(war.morale);
@@ -6722,11 +6825,367 @@ fn complete_bounty(world: &World, town_id: &str, tick: u32, kind: BountyKind, x:
         "kingdoms bounty complete"
     );
     drop(dir);
+    if let Some((uuid, rank)) = ranked {
+        for player in world.players.load().iter() {
+            if player.gameprofile.id.to_string() == uuid {
+                announce_rank(player, rank);
+                break;
+            }
+        }
+    }
     if let Some(id) = cart
+        && let Some(entity) = world.get_entity_by_id(id)
+        && lock().supply.iter().all(|run| run.id != id)
+    {
+        entity.get_entity().remove();
+    }
+}
+
+fn tick_player_hud(world: &World, tick: u32) {
+    if !tick.is_multiple_of(20) {
+        return;
+    }
+    let snap = {
+        let dir = lock();
+        let mut alder_towns = 0i32;
+        let mut raven_towns = 0i32;
+        let mut alder_morale = 0i32;
+        let mut raven_morale = 0i32;
+        let mut alder_n = 0i32;
+        let mut raven_n = 0i32;
+        for war in dir.towns.values() {
+            match war.owner.as_str() {
+                "alder" => {
+                    alder_towns += 1;
+                    alder_morale += war.morale;
+                    alder_n += 1;
+                }
+                "raven" => {
+                    raven_towns += 1;
+                    raven_morale += war.morale;
+                    raven_n += 1;
+                }
+                _ => {}
+            }
+        }
+        let mut players = HashMap::new();
+        for (uuid, kingdom) in &dir.player_kingdoms {
+            let stats = dir.player_stats.get(uuid).cloned().unwrap_or_default();
+            players.insert(
+                uuid.clone(),
+                crate::hud::HudPlayer {
+                    kingdom: kingdom.as_str().to_owned(),
+                    rank: crate::hud::rank_score(stats.rank().enlist().as_str()),
+                    renown: stats.renown() as i32,
+                },
+            );
+        }
+        crate::hud::HudSnapshot {
+            alder_towns,
+            raven_towns,
+            alder_morale: if alder_n == 0 {
+                0
+            } else {
+                alder_morale / alder_n
+            },
+            raven_morale: if raven_n == 0 {
+                0
+            } else {
+                raven_morale / raven_n
+            },
+            players,
+            paint_tab: tick.is_multiple_of(100),
+        }
+    };
+    crate::hud::tick(world, &snap);
+}
+
+fn tick_supply_lines(world: &Arc<World>, tick: u32) {
+    let mut slides: Vec<(i32, Option<i32>, f64, f64, f64, f64)> = Vec::new();
+    let mut arrived: Vec<SupplyRun> = Vec::new();
+    let mut ambushed: Vec<SupplyRun> = Vec::new();
+    let mut spawn_plan: Option<(ScenePost, String, String, KingdomId, Vec<(i32, i32)>)> = None;
+    {
+        let mut dir = lock();
+        let owners: Vec<(String, String)> = dir
+            .towns
+            .iter()
+            .map(|(id, w)| (id.clone(), w.owner.as_str().to_owned()))
+            .collect();
+        let in_flight: HashSet<String> = dir.supply.iter().map(|r| r.to.clone()).collect();
+        let due = tick.is_multiple_of(crate::supply::CUTOFF_MORALE_PERIOD);
+        for war in dir.towns.values_mut() {
+            let kingdom = war.kingdom.as_str();
+            let owned = war.owner.as_str() == kingdom;
+            let has = owned && crate::supply::has_friendly_neighbor(&war.info_id, &owners, kingdom);
+            if war.last_delivery == 0 && has {
+                war.last_delivery = tick;
+            }
+            let age = tick.saturating_sub(war.last_delivery);
+            let flight = in_flight.contains(&war.info_id);
+            war.cutoff = !owned || crate::supply::is_cutoff(has, war.inbound_lost, flight, age);
+            war.morale = crate::supply::morale_after_cutoff(war.morale, war.cutoff, due);
+        }
+        let mut keep = Vec::new();
+        let runs = std::mem::take(&mut dir.supply);
+        for mut run in runs {
+            let alive = world.get_entity_by_id(run.id).is_some();
+            if !alive {
+                ambushed.push(run);
+                continue;
+            }
+            let hostile = supply_hostile_near(&dir, world, &run);
+            if hostile {
+                run.ambush = run.ambush.saturating_add(1);
+            } else {
+                run.ambush = 0;
+            }
+            if crate::supply::should_ambush(hostile, run.ambush)
+                || dir.last_hit.contains_key(&run.id)
+            {
+                ambushed.push(run);
+                continue;
+            }
+            let wp = usize::from(run.waypoint);
+            let Some(&dest) = run.route.get(wp) else {
+                arrived.push(run);
+                continue;
+            };
+            if crate::supply::waypoint_reached(run.x, run.z, dest) {
+                run.waypoint = run.waypoint.saturating_add(1);
+                if usize::from(run.waypoint) >= run.route.len() {
+                    arrived.push(run);
+                    continue;
+                }
+            }
+            let dest = run
+                .route
+                .get(usize::from(run.waypoint))
+                .copied()
+                .unwrap_or(dest);
+            let (nx, nz) = crate::supply::step_towards(
+                run.x,
+                run.z,
+                f64::from(dest.0) + 0.5,
+                f64::from(dest.1) + 0.5,
+                crate::supply::CART_STEP,
+            );
+            let (ex, ez) = crate::supply::step_towards(nx, nz, run.x, run.z, 2.0);
+            slides.push((run.id, run.escort, nx, nz, ex, ez));
+            run.x = nx;
+            run.z = nz;
+            keep.push(run);
+        }
+        dir.supply = keep;
+        let need = dir
+            .towns
+            .values()
+            .any(|w| w.inbound_lost && !dir.supply.iter().any(|r| r.to == w.info_id));
+        let first = dir.supply.is_empty() && tick >= 200;
+        if dir.supply.len() < crate::supply::SUPPLY_CAP
+            && (tick.is_multiple_of(crate::supply::CART_PERIOD) || first || need)
+            && let Some((from, to)) = pick_supply_pair(&dir)
+        {
+            let from_war = dir.towns.get(&from);
+            let to_war = dir.towns.get(&to);
+            if let (Some(fw), Some(tw)) = (from_war, to_war) {
+                let from_keep = fw.scene.keep();
+                let to_keep = tw.scene.keep();
+                let from_road = fw.scene.road_approach().map(|p| (p.x, p.z));
+                let to_road = tw.scene.road_approach().map(|p| (p.x, p.z));
+                let route = crate::supply::route(
+                    (from_keep.x, from_keep.z),
+                    from_road,
+                    to_road,
+                    (to_keep.x, to_keep.z),
+                );
+                let kingdom = fw.kingdom.clone();
+                spawn_plan = Some((from_keep, from, to, kingdom, route));
+            }
+        }
+    }
+    for (id, escort, x, z, ex, ez) in slides {
+        if let Some(entity) = world.get_entity_by_id(id) {
+            let p = entity.get_entity().pos.load();
+            entity.get_entity().set_pos(Vector3::new(x, p.y, z));
+        }
+        if let Some(eid) = escort
+            && let Some(entity) = world.get_entity_by_id(eid)
+        {
+            let p = entity.get_entity().pos.load();
+            entity.get_entity().set_pos(Vector3::new(ex, p.y, ez));
+        }
+    }
+    for run in arrived {
+        remove_supply_bodies(world, &run);
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(&run.to) {
+            war.last_delivery = tick;
+            war.inbound_lost = false;
+            war.cutoff = false;
+        }
+        dir.push_event(CombatEvent {
+            tick,
+            kind: CombatKind::SupplyArrived,
+            actor: run.id,
+            other: run.escort,
+            x: run.x,
+            z: run.z,
+            note: format!("{} supplied {}", run.from, run.to),
+        });
+        tracing::info!(
+            from = run.from.as_str(),
+            to = run.to.as_str(),
+            x = run.x,
+            z = run.z,
+            "kingdoms supply arrived"
+        );
+    }
+    for run in ambushed {
+        remove_supply_bodies(world, &run);
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(&run.to) {
+            war.inbound_lost = true;
+            war.cutoff = true;
+        }
+        dir.push_event(CombatEvent {
+            tick,
+            kind: CombatKind::SupplyAmbush,
+            actor: run.id,
+            other: run.escort,
+            x: run.x,
+            z: run.z,
+            note: format!("{} ambushed cart to {}", run.from, run.to),
+        });
+        tracing::info!(
+            "kingdoms supply ambush from={} to={} x={:.1} z={:.1}",
+            run.from,
+            run.to,
+            run.x,
+            run.z
+        );
+    }
+    if let Some((post, from, to, kingdom, route)) = spawn_plan
+        && let Some(id) = spawn_supply_cart(world, post)
+    {
+        let escort = spawn_carter(world, post, &kingdom);
+        let start = route.first().copied().unwrap_or((post.x, post.z));
+        let mut dir = lock();
+        dir.supply.push(SupplyRun {
+            id,
+            escort,
+            from: from.clone(),
+            to: to.clone(),
+            kingdom,
+            waypoint: 1,
+            route,
+            ambush: 0,
+            x: f64::from(start.0) + 0.5,
+            z: f64::from(start.1) + 0.5,
+        });
+        tracing::info!(
+            from = from.as_str(),
+            to = to.as_str(),
+            id,
+            "kingdoms supply cart"
+        );
+    }
+}
+
+fn supply_hostile_near(dir: &Director, world: &World, run: &SupplyRun) -> bool {
+    if dir.last_hit.contains_key(&run.id) {
+        return true;
+    }
+    let cart_fac = Faction::Kingdom(run.kingdom.clone());
+    for player in world.players.load().iter() {
+        let uuid = player.gameprofile.id.to_string();
+        if dir.player_kingdom(&uuid).is_some_and(|k| k == &run.kingdom) {
+            continue;
+        }
+        let pos = player.living_entity.entity.pos.load();
+        if (pos.x - run.x).hypot(pos.z - run.z) <= crate::supply::AMBUSH_RANGE {
+            return true;
+        }
+    }
+    for tid in [&run.from, &run.to] {
+        let Some(war) = dir.towns.get(tid) else {
+            continue;
+        };
+        for wired in war.wired.values() {
+            if !is_hostile(&wired.faction, &cart_fac) {
+                continue;
+            }
+            if (wired.x - run.x).hypot(wired.z - run.z) <= crate::supply::AMBUSH_RANGE {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn pick_supply_pair(dir: &Director) -> Option<(String, String)> {
+    let mut best: Option<(u32, String, String)> = None;
+    let ids: Vec<String> = dir.towns.keys().cloned().collect();
+    for from in &ids {
+        let Some(fw) = dir.towns.get(from) else {
+            continue;
+        };
+        if fw.owner.as_str() != fw.kingdom.as_str() {
+            continue;
+        }
+        if dir.supply.iter().any(|r| r.from == *from || r.to == *from) {
+            continue;
+        }
+        let neighbors = crate::supply::neighbor_ids(from);
+        for to in &ids {
+            if from == to {
+                continue;
+            }
+            let Some(tw) = dir.towns.get(to) else {
+                continue;
+            };
+            if tw.kingdom != fw.kingdom || tw.owner.as_str() != tw.kingdom.as_str() {
+                continue;
+            }
+            if !neighbors.iter().any(|n| n == to) {
+                continue;
+            }
+            if dir.supply.iter().any(|r| r.from == *to || r.to == *to) {
+                continue;
+            }
+            let age = tick_since(dir.tick, tw.last_delivery);
+            if best.as_ref().is_none_or(|(best_age, _, _)| age > *best_age) {
+                best = Some((age, from.clone(), to.clone()));
+            }
+        }
+    }
+    best.map(|(_, f, t)| (f, t))
+}
+
+fn remove_supply_bodies(world: &World, run: &SupplyRun) {
+    if let Some(entity) = world.get_entity_by_id(run.id) {
+        entity.get_entity().remove();
+    }
+    if let Some(id) = run.escort
         && let Some(entity) = world.get_entity_by_id(id)
     {
         entity.get_entity().remove();
     }
+}
+
+fn spawn_carter(world: &Arc<World>, post: ScenePost, kingdom: &KingdomId) -> Option<i32> {
+    let y = f64::from(standing_y(world, post));
+    let pos = Vector3::new(f64::from(post.x) + 0.5, y, f64::from(post.z) + 0.5);
+    let entity = Entity::new(world.clone(), pos, &EntityType::VILLAGER);
+    let base: Arc<dyn EntityBase> =
+        pumpkin_core::entity::passive::villager::VillagerEntity::new(entity) as Arc<dyn EntityBase>;
+    let id = base.get_entity().entity_id;
+    let _ = base.get_entity().add_scoreboard_tag(TAG_MILITIA);
+    let _ = base.get_entity().add_scoreboard_tag(&kingdom_tag(kingdom));
+    base.get_entity()
+        .set_custom_name(TextComponent::text("Carter"));
+    base.get_entity().set_custom_name_visible(true);
+    world.spawn_entity(base).then_some(id)
 }
 
 fn spawn_supply_cart(world: &Arc<World>, post: ScenePost) -> Option<i32> {
@@ -6737,6 +7196,9 @@ fn spawn_supply_cart(world: &Arc<World>, post: ScenePost) -> Option<i32> {
         pumpkin_core::entity::passive::villager::VillagerEntity::new(entity) as Arc<dyn EntityBase>;
     let id = base.get_entity().entity_id;
     let _ = base.get_entity().add_scoreboard_tag(TAG_SUPPLY);
+    base.get_entity()
+        .set_custom_name(TextComponent::text("Supply cart"));
+    base.get_entity().set_custom_name_visible(true);
     world.spawn_entity(base).then_some(id)
 }
 
@@ -6766,6 +7228,15 @@ fn tick_town_bounties(world: &Arc<World>, town_id: &str, tick: u32) {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "captain".to_owned());
         let mut posted_event = None;
+        let live_cart = dir
+            .supply
+            .iter()
+            .find(|r| r.from == town_id || r.to == town_id)
+            .map(|r| {
+                let dest = r.route.last().copied().unwrap_or((0, 0));
+                (r.id, dest)
+            });
+        let live_ids: HashSet<i32> = dir.supply.iter().map(|r| r.id).collect();
         {
             let Some(war) = dir.towns.get_mut(town_id) else {
                 return;
@@ -6778,7 +7249,10 @@ fn tick_town_bounties(world: &Arc<World>, town_id: &str, tick: u32) {
             let origin = war.threatened.unwrap_or(keep);
             if !war.alarm {
                 if war.bounty.take().is_some() {
-                    drop_cart = war.supply_cart.take();
+                    let cart = war.supply_cart.take();
+                    if cart.is_some_and(|id| !live_ids.contains(&id)) {
+                        drop_cart = cart;
+                    }
                     war.plate_holds.clear();
                 }
             } else if war.bounty.is_none() {
@@ -6792,11 +7266,15 @@ fn tick_town_bounties(world: &Arc<World>, town_id: &str, tick: u32) {
                     enlisted,
                 ));
                 if kind == BountyKind::EscortCart {
-                    spawn_at = Some(
-                        war.scene
-                            .road_approach()
-                            .unwrap_or(ScenePost::new(origin.x, origin.z)),
-                    );
+                    if let Some((id, _)) = live_cart {
+                        war.supply_cart = Some(id);
+                    } else {
+                        spawn_at = Some(
+                            war.scene
+                                .road_approach()
+                                .unwrap_or(ScenePost::new(origin.x, origin.z)),
+                        );
+                    }
                 }
                 posted_event = Some(CombatEvent {
                     tick,
@@ -6832,6 +7310,11 @@ fn tick_town_bounties(world: &Arc<World>, town_id: &str, tick: u32) {
                     }
                 }
             } else if war.bounty == Some(BountyKind::EscortCart) {
+                if war.supply_cart.is_none()
+                    && let Some((id, _)) = live_cart
+                {
+                    war.supply_cart = Some(id);
+                }
                 if let Some(id) = war.supply_cart {
                     if let Some(entity) = world.get_entity_by_id(id) {
                         let p = entity.get_entity().pos.load();
@@ -6839,10 +7322,13 @@ fn tick_town_bounties(world: &Arc<World>, town_id: &str, tick: u32) {
                             kingdoms.contains_key(uuid)
                                 && (*x - p.x).hypot(*z - p.z) <= bounty::ESCORT_RANGE
                         });
-                        let dist = (p.x - f64::from(keep.x)).hypot(p.z - f64::from(keep.z));
+                        let dest = live_cart
+                            .filter(|(cid, _)| *cid == id)
+                            .map_or((keep.x, keep.z), |(_, d)| d);
+                        let dist = (p.x - f64::from(dest.0)).hypot(p.z - f64::from(dest.1));
                         if bounty::cart_complete(dist) {
                             finish = Some((BountyKind::EscortCart, p.x, p.z));
-                        } else if escorted {
+                        } else if escorted && live_cart.map(|(cid, _)| cid) != Some(id) {
                             slide = Some((id, f64::from(keep.x) + 0.5, f64::from(keep.z) + 0.5));
                         }
                     }
@@ -7338,20 +7824,23 @@ fn update_capture_meter(
     keep: PostTarget,
     raiders_in_keep: u32,
     defenders_in_keep: u32,
+    occupier: &str,
 ) {
-    let (hold, need, bar, capturing) = {
+    let (hold, ticks, bar, capturing, occupy, kingdom, log_bar) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
             return;
         };
-        let surviving = war.raid.as_ref().map_or(0, |r| r.living.len() as u32);
-        let need = capture_need(surviving.max(raiders_in_keep));
         let hold = war.occupy_hold.max(war.retake_hold);
+        let ticks = hold_ticks();
         (
             hold,
-            need,
+            ticks,
             war.capture_bar,
             war.occupy_hold > 0 || war.retake_hold > 0,
+            war.occupy_hold > 0,
+            war.kingdom.as_str().to_owned(),
+            war.capture_bar.is_none() || hold.is_multiple_of(40),
         )
     };
     let players: Vec<Arc<Player>> = world
@@ -7376,11 +7865,11 @@ fn update_capture_meter(
         }
         return;
     }
-    let ticks = hold_ticks();
-    let progress = (hold as f32 / ticks as f32).clamp(0.0, 1.0);
-    let title = TextComponent::text(format!(
-        "Flag {raiders_in_keep}/{need}  hold {hold}/{ticks}  def {defenders_in_keep}"
-    ));
+    let side = crate::hud::capturing_side(occupy, occupier, &kingdom);
+    let title_s = crate::hud::capture_title(&crate::hud::town_label(town_id), side, hold, ticks);
+    let progress = crate::hud::capture_progress(hold, ticks);
+    let color = crate::hud::capture_color(side);
+    let title = TextComponent::text(title_s);
     let uuid = bar.unwrap_or_else(Uuid::new_v4);
     if bar.is_none() {
         let mut dir = lock();
@@ -7390,7 +7879,7 @@ fn update_capture_meter(
         let mut boss = Bossbar::new(title.clone());
         boss.uuid = uuid;
         boss.health = progress;
-        boss.color = BossbarColor::Red;
+        boss.color = color;
         boss.division = BossbarDivisions::Notches10;
         for p in &players {
             p.send_bossbar(&boss);
@@ -7399,7 +7888,14 @@ fn update_capture_meter(
         for p in &players {
             p.update_bossbar_health(&uuid, progress);
             p.update_bossbar_title(&uuid, title.clone());
+            p.update_bossbar_style(&uuid, color, BossbarDivisions::Notches10);
         }
+    }
+    if log_bar {
+        tracing::info!(
+            "kingdoms capture bar town={town_id} side={side} hold={hold}/{ticks} color={} raiders={raiders_in_keep} def={defenders_in_keep}",
+            crate::hud::color_name(color)
+        );
     }
     for p in &players {
         p.show_title(&title, &TitleMode::ActionBar);
@@ -7810,6 +8306,23 @@ fn note_lost_town(dir: &mut Director, kingdom: &KingdomId, tick: u32) {
 /// Citizen respawns this tick for `kingdom` (0..=2).
 #[must_use]
 pub fn recruit_budget(kingdom: &KingdomId) -> usize {
+    recruit_budget_inner(kingdom, None)
+}
+
+/// Citizen respawns this tick for one town, reduced when the town is cut off.
+#[must_use]
+pub fn recruit_budget_for_town(town_id: &str) -> usize {
+    let kingdom = {
+        let dir = lock();
+        dir.towns.get(town_id).map(|w| w.kingdom.clone())
+    };
+    let Some(kingdom) = kingdom else {
+        return 0;
+    };
+    recruit_budget_inner(&kingdom, Some(town_id))
+}
+
+fn recruit_budget_inner(kingdom: &KingdomId, town_id: Option<&str>) -> usize {
     let dir = lock();
     let tick = dir.tick;
     let holds = holds_capital(&dir, kingdom);
@@ -7818,7 +8331,9 @@ pub fn recruit_budget(kingdom: &KingdomId) -> usize {
         .get(kingdom.as_str())
         .cloned()
         .unwrap_or_default();
-    crate::morale::recruit_budget(&shock, tick, holds)
+    let base = crate::morale::recruit_budget(&shock, tick, holds);
+    let cutoff = town_id.is_some_and(|id| dir.towns.get(id).is_some_and(|w| w.cutoff));
+    crate::supply::recruit_hit(base, cutoff)
 }
 
 fn tick_desertion(town_id: &str, tick: u32, snapshots: &[(Arc<dyn EntityBase>, Faction)]) {
@@ -10571,6 +11086,7 @@ mod tests {
             flag_defenders: 0,
             morale: 50,
             bounty: None,
+            cutoff: false,
         };
         assert_eq!(state.owner, "pillager");
         assert!(state.gate_breached);
@@ -10851,5 +11367,22 @@ mod tests {
             engine_stagger("20261025:-1:0"),
             engine_stagger("20261025:0:0")
         );
+    }
+
+    #[test]
+    fn combat_kind_names_cover_war_events() {
+        assert_eq!(CombatKind::Capture.as_str(), "capture");
+        assert_eq!(CombatKind::RaidStart.as_str(), "raid_start");
+        assert_eq!(CombatKind::RaidStop.as_str(), "raid_stop");
+        assert_eq!(CombatKind::Alarm.as_str(), "alarm");
+        assert_eq!(CombatKind::RamDestroyed.as_str(), "ram_destroyed");
+        assert_eq!(
+            CombatKind::TrebuchetDestroyed.as_str(),
+            "trebuchet_destroyed"
+        );
+        assert_eq!(CombatKind::Bounty.as_str(), "bounty");
+        assert_eq!(CombatKind::RankUp.as_str(), "rank_up");
+        assert_eq!(CombatKind::SupplyAmbush.as_str(), "supply_ambush");
+        assert_eq!(CombatKind::SupplyArrived.as_str(), "supply_arrived");
     }
 }
