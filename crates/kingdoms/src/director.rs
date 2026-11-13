@@ -979,7 +979,7 @@ impl Director {
                 {
                     despawn.push(shot.part);
                 }
-                war.alarm = false;
+                clear_town_alarm(war, id);
                 war.occupy_hold = 0;
                 war.retake_hold = 0;
                 tickets.append(&mut war.ticketed);
@@ -3379,7 +3379,16 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                         dest
                     }
                 }
-                _ => march_dest,
+                _ => overlay_civilian_posts(
+                    march_dest,
+                    role,
+                    alarm,
+                    capturing,
+                    inner_gate_dest,
+                    bailey_dest,
+                    keep_dest,
+                    civilian_duty(base, base.entity_id),
+                ),
             };
             let rush_plate = dest_is_plate(dest, keep_dest);
             if rush_plate || far_tier.should_tick(base.entity_id, tick) {
@@ -3585,9 +3594,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         let follower = !in_combat && !is_squad_leader(id);
         // Followers refresh every 24 ticks (~0.2 blk/s), too slow to cross a
         // two-ring capital before the soak ends. Raiders use the alarm period.
-        let due = if is_builder && repair_dest.is_some()
-            || (matches!(faction, Faction::Pillager) && dest_is_plate(dest, keep_dest))
-        {
+        let due = if is_builder && repair_dest.is_some() || dest_is_plate(dest, keep_dest) {
             true
         } else if matches!(faction, Faction::Pillager) && alarm {
             tick.is_multiple_of(period)
@@ -4369,6 +4376,14 @@ pub fn spawn_citizen(
         }
     }
     spawned.then_some(id)
+}
+
+fn clear_town_alarm(war: &mut TownWar, town_id: &str) {
+    if !war.alarm {
+        return;
+    }
+    war.alarm = false;
+    tracing::info!(town = town_id, "town alarm cleared");
 }
 
 fn ring_town_bell(world: &World, snapshots: &[(Arc<dyn EntityBase>, Faction)]) {
@@ -6916,15 +6931,12 @@ fn overlay_civilian_posts(
     dest: PostTarget,
     role: Option<VillagerRole>,
     alarm: bool,
-    capturing: bool,
+    _capturing: bool,
     _inner_gate: PostTarget,
     bailey: PostTarget,
     keep: PostTarget,
     duty: CivilianDuty,
 ) -> PostTarget {
-    if capturing && role == Some(VillagerRole::Civilian) {
-        return dest;
-    }
     match duty {
         CivilianDuty::Priest => keep,
         CivilianDuty::Blacksmith => dest,
@@ -8623,7 +8635,7 @@ fn tick_town_flag(
             ids.push(shot.part);
         }
         war.pending_despawn.extend(ids);
-        war.alarm = false;
+        clear_town_alarm(war, town_id);
         begin_repair(war, tick, true);
     }
     (
@@ -8988,7 +9000,7 @@ fn finish_abstract_victory(_world: &Arc<World>, town_id: &str, tick: u32) {
     let Some(raid) = war.raid.take() else {
         return;
     };
-    war.alarm = false;
+    clear_town_alarm(war, town_id);
     begin_repair(war, tick, false);
     dir.push_event(CombatEvent {
         tick,
@@ -10470,6 +10482,21 @@ mod tests {
             (militia.x, militia.z),
             (keep.x, keep.z),
             "capturing overlay leaves militia dest unchanged"
+        );
+        let townsfolk = overlay_civilian_posts(
+            work,
+            Some(VillagerRole::Civilian),
+            true,
+            true,
+            march,
+            work,
+            keep,
+            CivilianDuty::Townsfolk,
+        );
+        assert_eq!(
+            (townsfolk.x, townsfolk.z),
+            (keep.x, keep.z),
+            "alarmed townsfolk still flee to the keep while the plate is held"
         );
         let dest = overlay_flag_dest(
             march,
