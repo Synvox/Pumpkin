@@ -3610,7 +3610,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             if amortizing
                 || (follower && dist < DIRECT_RANGE)
                 || (matches!(faction, Faction::Pillager) && dist <= STUCK_STORM_RANGE)
-                || (matches!(faction, Faction::Pillager) && dest_is_plate(dest, keep_dest))
+                || dest_is_plate(dest, keep_dest)
                 || (is_builder && repair_dest.is_some())
             {
                 slide_direct(base, dest);
