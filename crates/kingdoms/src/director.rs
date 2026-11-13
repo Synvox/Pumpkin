@@ -66,8 +66,8 @@ use crate::scene::{ScenePost, TownInfoScene, TownScene};
 use crate::schedule::{self, CivilianPost};
 use crate::siege::{
     self, FLAG_MAST_FENCES, FLAG_PANEL_HEIGHT, FLAG_PANEL_WIDTH, FlagPresence, HOLD_TICKS,
-    MarchJob, TownOwner, WALL_WALK_LIFT, capture_need, hold_ticks, in_capture_zone, in_courtyard,
-    near_flag, on_flag_plate, owner_banner, owner_wool, tick_flag_hold,
+    MarchJob, TownOwner, WALL_WALK_LIFT, capture_need, flag_dist, hold_ticks, in_capture_zone,
+    in_courtyard, near_flag, on_flag_plate, owner_banner, owner_wool, tick_flag_hold,
 };
 use crate::sim::{SimSnapshot, write_named_snapshots_with_kills};
 use crate::town::town_containing;
@@ -75,6 +75,8 @@ use crate::town::town_containing;
 const FORCELOAD_CAP: usize = 256;
 /// Director slide when the mob has not been world-ticked (blocks / tick).
 const SLIDE_STEP: f64 = 0.28;
+/// Allied bodies this close to the mast count as in the keep for `keep_d`.
+const KEEP_DEFENDER_RANGE: f64 = 24.0;
 /// Set a vanilla target only this close, so `HoldGroundAttackGoal` does not
 /// stop the navigator while they are still marching in.
 const SET_TARGET_RANGE: f64 = 12.0;
@@ -3303,6 +3305,10 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     defenders_near += 1;
                     defenders_in_keep += 1;
                 }
+            } else if is_allied(faction, &owner_faction)
+                && flag_dist(flag_xz, pos.x, pos.z) <= KEEP_DEFENDER_RANGE
+            {
+                defenders_in_keep += 1;
             }
             if matches!(faction, Faction::Pillager) && in_courtyard(gatehouse_rect, pos.x, pos.z) {
                 in_courtyard_n += 1;
@@ -3558,6 +3564,16 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             dest
         } else {
             overlay_siege_role_dest(dest, id, role, alarm, capturing)
+        };
+        let dest = if alarm
+            && matches!(faction, Faction::Kingdom(_))
+            && role != Some(VillagerRole::Guard)
+            && role != Some(VillagerRole::Archer)
+            && role != Some(VillagerRole::Builder)
+        {
+            keep_dest
+        } else {
+            dest
         };
         if matches!(faction, Faction::Pillager) && ladders_placed {
             let near_ladders =
@@ -3968,8 +3984,18 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             tick,
             last_prog,
         );
+        let civ_d = snapshots
+            .iter()
+            .filter(|(entity, faction)| {
+                faction.is_kingdom() && !has_tag(entity.get_entity(), TAG_RAIDER)
+            })
+            .map(|(entity, _)| {
+                let p = entity.get_entity().pos.load();
+                flag_dist(flag_xz, p.x, p.z)
+            })
+            .fold(f64::INFINITY, f64::min);
         tracing::info!(
-            "kingdoms raid entity tick town={town_id} ticking={n_ticking} loaded={n_loaded} active={n_active} no_ai={n_no_ai} sleep={n_sleep} slid={n_slid} melee={n_melee} ranged={n_ranged} arrows={n_arrows} repair={n_repair} loop_us={loop_us} keep_r={raiders_in_keep} keep_d={defenders_in_keep} entities={n_entities} ghosts={ghost_n}"
+            "kingdoms raid entity tick town={town_id} ticking={n_ticking} loaded={n_loaded} active={n_active} no_ai={n_no_ai} sleep={n_sleep} slid={n_slid} melee={n_melee} ranged={n_ranged} arrows={n_arrows} repair={n_repair} loop_us={loop_us} keep_r={raiders_in_keep} keep_d={defenders_in_keep} civ_d={civ_d:.1} entities={n_entities} ghosts={ghost_n}"
         );
         tracing::info!(
             "kingdoms raid outcome town={town_id} reason={reason} plate_r={attackers_on_plate} courtyard={in_courtyard_n} storming={storming} flag_d={flag_d:.1} ghosts={ghost_n}"
