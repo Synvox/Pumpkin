@@ -3379,6 +3379,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                         dest
                     }
                 }
+                _ if alarm => keep_dest,
                 _ => overlay_civilian_posts(
                     march_dest,
                     role,
@@ -6940,9 +6941,9 @@ fn overlay_civilian_posts(
     match duty {
         CivilianDuty::Priest => keep,
         CivilianDuty::Blacksmith => dest,
-        CivilianDuty::Militia if role == Some(VillagerRole::Civilian) && alarm => keep,
+        CivilianDuty::Militia if alarm => keep,
         CivilianDuty::Militia if role == Some(VillagerRole::Civilian) => bailey,
-        CivilianDuty::Townsfolk if role == Some(VillagerRole::Civilian) && alarm => keep,
+        CivilianDuty::Townsfolk if alarm => keep,
         _ => dest,
     }
 }
@@ -10594,6 +10595,21 @@ mod tests {
             CivilianDuty::Townsfolk,
         );
         assert_eq!((townsfolk.x, townsfolk.z), (keep.x, keep.z));
+        let untagged = overlay_civilian_posts(
+            home,
+            None,
+            true,
+            false,
+            inner,
+            bailey,
+            keep,
+            CivilianDuty::Townsfolk,
+        );
+        assert_eq!(
+            (untagged.x, untagged.z),
+            (keep.x, keep.z),
+            "alarmed townsfolk without a role tag still flee to the keep"
+        );
         let priest = overlay_civilian_posts(
             home,
             Some(VillagerRole::Civilian),
