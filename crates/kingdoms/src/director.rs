@@ -2755,6 +2755,12 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 ) {
                     continue;
                 }
+                // After a flip the defeated garrison is still inside the walls.
+                // Counting them as hostiles of the new owner kept the bell up
+                // and blocked civilian respawn for the rest of the night.
+                if raid_over && owner_faction == Faction::Pillager && faction.is_kingdom() {
+                    continue;
+                }
                 if hostile_raises_alarm((keep.x, keep.z), &walls, &camps, &engines, x, z) {
                     hostiles_in_town = true;
                     break;
@@ -3335,7 +3341,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         } else {
             base.no_physics.store(false, Ordering::Relaxed);
         }
-        if offscreen && idle_villager && !is_builder {
+        if offscreen && idle_villager && !is_builder && !alarm {
             mob.get_mob_entity().set_no_ai(true);
             mob.get_mob_entity().set_director_driven(true);
             n_sleep += 1;
