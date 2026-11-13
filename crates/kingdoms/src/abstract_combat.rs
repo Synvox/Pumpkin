@@ -106,6 +106,13 @@ pub fn hostile_raises_alarm(
     inside_town_for_alarm(keep, walls, x, z)
 }
 
+/// Leftover raid bodies after the raid ends. Collecting them only when the
+/// alarm is already clear deadlocks: interior leftovers hold the bell forever.
+#[must_use]
+pub fn leftover_raid_body(raid_over: bool, tagged_raider: bool, pillager: bool) -> bool {
+    raid_over && (tagged_raider || pillager)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +222,10 @@ mod tests {
         assert!(!hostile_raises_alarm(keep, &walls, &camps, &engines, 40, 0));
         assert!(inside_town_for_alarm(keep, &[], 0, 0));
         assert!(!inside_town_for_alarm(keep, &[], KEEP_ALARM_RADIUS + 1, 0));
+        assert!(leftover_raid_body(true, true, false));
+        assert!(leftover_raid_body(true, false, true));
+        assert!(!leftover_raid_body(false, true, true));
+        assert!(!leftover_raid_body(true, false, false));
     }
 
     #[test]

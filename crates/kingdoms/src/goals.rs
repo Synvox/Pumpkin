@@ -283,7 +283,8 @@ impl Goal for FleeToKeepGoal {
 }
 
 /// Ring once when the town first goes to alert. Plays the vanilla bell sound at
-/// the keep; towns may not have a bell block yet.
+/// the keep; towns may not have a bell block yet. Resets when the alarm clears
+/// so the next raid can ring again.
 pub struct RingBellGoal {
     rang: AtomicBool,
     alarmed: Arc<dyn Fn(&dyn Mob) -> bool + Send + Sync>,
@@ -297,11 +298,20 @@ impl RingBellGoal {
             alarmed: Arc::new(alarmed),
         }
     }
+
+    #[must_use]
+    pub fn should_ring(alarmed: bool, rang: &AtomicBool) -> bool {
+        if !alarmed {
+            rang.store(false, Ordering::Relaxed);
+            return false;
+        }
+        !rang.load(Ordering::Relaxed)
+    }
 }
 
 impl Goal for RingBellGoal {
     fn can_start(&mut self, mob: &dyn Mob) -> bool {
-        (self.alarmed)(mob) && !self.rang.load(Ordering::Relaxed)
+        Self::should_ring((self.alarmed)(mob), &self.rang)
     }
 
     fn should_continue(&mut self, mob: &dyn Mob) -> bool {
@@ -888,5 +898,15 @@ mod tests {
         let v = t.vec();
         assert!((v.x - 10.5).abs() < f64::EPSILON);
         assert!((v.z - 20.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn bell_rings_again_after_the_alarm_clears() {
+        let rang = AtomicBool::new(false);
+        assert!(RingBellGoal::should_ring(true, &rang));
+        rang.store(true, Ordering::Relaxed);
+        assert!(!RingBellGoal::should_ring(true, &rang));
+        assert!(!RingBellGoal::should_ring(false, &rang));
+        assert!(RingBellGoal::should_ring(true, &rang));
     }
 }

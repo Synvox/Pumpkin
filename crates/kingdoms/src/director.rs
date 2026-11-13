@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use crate::abstract_combat::{
     ABSTRACT_MARCH_TICKS, ABSTRACT_PERIOD, AbstractState, PLAYER_APPROACH_RANGE, PLAYER_LIVE_RANGE,
-    body_budget, hostile_raises_alarm, near_camp, step_abstract,
+    body_budget, hostile_raises_alarm, leftover_raid_body, near_camp, step_abstract,
 };
 use crate::bounty::{self, BountyKind};
 use crate::chat::{self, ShoutKind};
@@ -2735,13 +2735,22 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 .chain(war.scene.ladder_posts())
                 .map(|p| (p.x, p.z))
                 .collect();
+            let raid_over = war.raid.is_none();
             for (entity, faction) in &snapshots {
                 if !is_hostile(faction, &owner_faction) {
                     continue;
                 }
-                let p = entity.get_entity().pos.load();
+                let base = entity.get_entity();
+                let p = base.pos.load();
                 let x = p.x.floor() as i32;
                 let z = p.z.floor() as i32;
+                if leftover_raid_body(
+                    raid_over,
+                    has_tag(base, TAG_RAIDER),
+                    matches!(faction, Faction::Pillager),
+                ) {
+                    continue;
+                }
                 if hostile_raises_alarm((keep.x, keep.z), &walls, &camps, &engines, x, z) {
                     hostiles_in_town = true;
                     break;
@@ -2793,36 +2802,33 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             } else {
                 war.alarm = false;
             }
-            if !hostiles_in_town {
-                let bounds = inhabited_bounds(&war.scene);
-                let camps: Vec<(i32, i32)> = war
-                    .scene
-                    .raid_camps()
-                    .iter()
-                    .map(|c| (c.x, c.z))
-                    .chain(war.raid.as_ref().map(|r| (r.camp.x, r.camp.z)))
-                    .collect();
-                let raid_over = war.raid.is_none();
-                for (entity, faction) in &snapshots {
-                    let base = entity.get_entity();
-                    let p = base.pos.load();
-                    let x = p.x.floor() as i32;
-                    let z = p.z.floor() as i32;
-                    let outside = !bounds.contains(x, z) || near_camp(&camps, x, z);
-                    let camp_leftover = raid_over
-                        && near_camp(&camps, x, z)
-                        && matches!(faction, Faction::Pillager);
-                    if (has_tag(base, TAG_ROUTED) && outside)
-                        || (raid_over && has_tag(base, TAG_RAIDER))
-                        || camp_leftover
-                    {
-                        pending_despawn.push(base.entity_id);
-                    }
+            let bounds = inhabited_bounds(&war.scene);
+            let camps: Vec<(i32, i32)> = war
+                .scene
+                .raid_camps()
+                .iter()
+                .map(|c| (c.x, c.z))
+                .chain(war.raid.as_ref().map(|r| (r.camp.x, r.camp.z)))
+                .collect();
+            let raid_over = war.raid.is_none();
+            for (entity, faction) in &snapshots {
+                let base = entity.get_entity();
+                let p = base.pos.load();
+                let x = p.x.floor() as i32;
+                let z = p.z.floor() as i32;
+                let outside = !bounds.contains(x, z) || near_camp(&camps, x, z);
+                if leftover_raid_body(
+                    raid_over,
+                    has_tag(base, TAG_RAIDER),
+                    matches!(faction, Faction::Pillager),
+                ) || (has_tag(base, TAG_ROUTED) && outside)
+                {
+                    pending_despawn.push(base.entity_id);
                 }
-                if let Some(raid) = &mut war.raid {
-                    raid.living.retain(|id| !pending_despawn.contains(id));
-                    raid.temps.retain(|id| !pending_despawn.contains(id));
-                }
+            }
+            if let Some(raid) = &mut war.raid {
+                raid.living.retain(|id| !pending_despawn.contains(id));
+                raid.temps.retain(|id| !pending_despawn.contains(id));
             }
             let now_alarm = war.alarm;
             if now_alarm && !alarm_before {
