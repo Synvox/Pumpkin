@@ -16,6 +16,12 @@ pub const ABSTRACT_MARCH_TICKS: u32 = 400;
 pub const DEFAULT_BODY_BUDGET: usize = 240;
 /// Camp pillagers inside this Chebyshev radius do not keep the town alarm up.
 pub const CAMP_EXCLUDE: i32 = 32;
+/// Engine crews at ram / trebuchet / tower posts do not ring the bell.
+pub const ENGINE_EXCLUDE: i32 = 24;
+/// Hostiles this close to the keep count as in-town when the wall poly is empty.
+pub const KEEP_ALARM_RADIUS: i32 = 48;
+/// Hostiles this close to the curtain count as at the walls.
+pub const WALL_ALARM_PAD: i32 = 6;
 
 /// Process-wide live-body cap. Override with `KINGDOMS_BODY_BUDGET`.
 #[must_use]
@@ -58,9 +64,46 @@ pub fn step_abstract(mut state: AbstractState, period: u32) -> AbstractState {
 /// True when leftover camp soldiers at `(x, z)` should not ring the town bell.
 #[must_use]
 pub fn near_camp(camps: &[(i32, i32)], x: i32, z: i32) -> bool {
-    camps
+    near_posts(camps, x, z, CAMP_EXCLUDE)
+}
+
+/// Chebyshev test against a list of posts.
+#[must_use]
+pub fn near_posts(posts: &[(i32, i32)], x: i32, z: i32, range: i32) -> bool {
+    posts
         .iter()
-        .any(|(cx, cz)| (x - cx).abs() <= CAMP_EXCLUDE && (z - cz).abs() <= CAMP_EXCLUDE)
+        .any(|(px, pz)| (x - px).abs() <= range && (z - pz).abs() <= range)
+}
+
+/// True when `(x, z)` is inside the curtain, on the wall, or in the keep radius.
+#[must_use]
+pub fn inside_town_for_alarm(keep: (i32, i32), walls: &[(i32, i32)], x: i32, z: i32) -> bool {
+    if walls.len() >= 3
+        && (crate::geom::point_in_poly(x, z, walls)
+            || crate::geom::near_poly_edge(x, z, walls, WALL_ALARM_PAD))
+    {
+        return true;
+    }
+    let dx = i64::from(x - keep.0);
+    let dz = i64::from(z - keep.1);
+    dx * dx + dz * dz <= i64::from(KEEP_ALARM_RADIUS) * i64::from(KEEP_ALARM_RADIUS)
+}
+
+/// Town alarm counts only hostiles inside the walls or keep radius.
+/// Camp leftovers and distant engine crews are ignored even if a raid is live.
+#[must_use]
+pub fn hostile_raises_alarm(
+    keep: (i32, i32),
+    walls: &[(i32, i32)],
+    camps: &[(i32, i32)],
+    engines: &[(i32, i32)],
+    x: i32,
+    z: i32,
+) -> bool {
+    if near_camp(camps, x, z) || near_posts(engines, x, z, ENGINE_EXCLUDE) {
+        return false;
+    }
+    inside_town_for_alarm(keep, walls, x, z)
 }
 
 #[cfg(test)]
@@ -157,6 +200,21 @@ mod tests {
         assert!(!near_camp(&camps, 0, 0));
         assert!(near_camp(&camps, 100 + CAMP_EXCLUDE, 100));
         assert!(!near_camp(&camps, 100 + CAMP_EXCLUDE + 1, 100));
+    }
+
+    #[test]
+    fn alarm_counts_only_hostiles_inside_walls_or_keep() {
+        let keep = (0, 0);
+        let walls = [(10, 10), (10, -10), (-10, -10), (-10, 10)];
+        let camps = [(80, 0)];
+        let engines = [(60, 0)];
+        assert!(hostile_raises_alarm(keep, &walls, &camps, &engines, 0, 0));
+        assert!(hostile_raises_alarm(keep, &walls, &camps, &engines, 10, 0));
+        assert!(!hostile_raises_alarm(keep, &walls, &camps, &engines, 80, 0));
+        assert!(!hostile_raises_alarm(keep, &walls, &camps, &engines, 60, 0));
+        assert!(!hostile_raises_alarm(keep, &walls, &camps, &engines, 40, 0));
+        assert!(inside_town_for_alarm(keep, &[], 0, 0));
+        assert!(!inside_town_for_alarm(keep, &[], KEEP_ALARM_RADIUS + 1, 0));
     }
 
     #[test]

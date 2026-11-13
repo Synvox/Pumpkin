@@ -205,9 +205,19 @@ impl Rank {
             "levy" => Some(Self::Levy),
             "freeman" => Some(Self::Freeman),
             "sergeant" => Some(Self::Sergeant),
-            "knight" => Some(Self::Knight),
+            "knight" | "captain" => Some(Self::Knight),
             "banneret" => Some(Self::Banneret),
             _ => None,
+        }
+    }
+
+    /// Three-tier enlist rank shown to players and `GET /state`.
+    #[must_use]
+    pub const fn enlist(self) -> EnlistRank {
+        match self {
+            Self::Levy | Self::Freeman => EnlistRank::Levy,
+            Self::Sergeant => EnlistRank::Sergeant,
+            Self::Knight | Self::Banneret => EnlistRank::Captain,
         }
     }
 
@@ -224,6 +234,40 @@ impl Rank {
     }
 }
 
+/// Enlist kit and rally cap: levy, then sergeant, then captain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EnlistRank {
+    Levy,
+    Sergeant,
+    Captain,
+}
+
+impl EnlistRank {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Levy => "levy",
+            Self::Sergeant => "sergeant",
+            Self::Captain => "captain",
+        }
+    }
+
+    /// Nearby soldiers a player of this rank can lead. Levy cannot rally.
+    #[must_use]
+    pub const fn rally_cap(self) -> u32 {
+        match self {
+            Self::Levy => 0,
+            Self::Sergeant => 12,
+            Self::Captain => 24,
+        }
+    }
+
+    #[must_use]
+    pub const fn kit_name(self) -> &'static str {
+        self.as_str()
+    }
+}
+
 /// Persisted war record for one player.
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlayerStats {
@@ -234,6 +278,8 @@ pub struct PlayerStats {
     #[serde(default)]
     pub defenses: u32,
     #[serde(default)]
+    pub bounties: u32,
+    #[serde(default)]
     pub banner_given: bool,
 }
 
@@ -243,6 +289,7 @@ impl PlayerStats {
         self.kills
             .saturating_add(self.captures.saturating_mul(5))
             .saturating_add(self.defenses.saturating_mul(3))
+            .saturating_add(self.bounties.saturating_mul(crate::bounty::BOUNTY_RENOWN))
     }
 
     #[must_use]
@@ -1366,6 +1413,14 @@ mod tests {
         assert_eq!(levy.renown(), 0);
         assert_eq!(levy.rank(), Rank::Levy);
         assert_eq!(Rank::parse("Freeman"), Some(Rank::Freeman));
+        assert_eq!(Rank::parse("captain"), Some(Rank::Knight));
+        assert_eq!(Rank::Levy.enlist(), EnlistRank::Levy);
+        assert_eq!(Rank::Freeman.enlist(), EnlistRank::Levy);
+        assert_eq!(Rank::Sergeant.enlist(), EnlistRank::Sergeant);
+        assert_eq!(Rank::Knight.enlist(), EnlistRank::Captain);
+        assert_eq!(EnlistRank::Captain.rally_cap(), 24);
+        assert_eq!(EnlistRank::Sergeant.rally_cap(), 12);
+        assert_eq!(EnlistRank::Levy.rally_cap(), 0);
         assert_eq!(Rank::Freeman.min_kills(), 10);
         let freeman = PlayerStats {
             kills: 10,
@@ -1405,6 +1460,7 @@ mod tests {
                 kills: 3,
                 captures: 1,
                 defenses: 2,
+                bounties: 1,
                 banner_given: true,
             },
         );
@@ -1421,8 +1477,9 @@ mod tests {
         assert_eq!(got.kills, 3);
         assert_eq!(got.captures, 1);
         assert_eq!(got.defenses, 2);
+        assert_eq!(got.bounties, 1);
         assert!(got.banner_given);
-        assert_eq!(got.renown(), 14);
+        assert_eq!(got.renown(), 22);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
     }

@@ -131,6 +131,49 @@ pub type ShoutLog = HashMap<(String, ShoutKind), u32>;
 /// Per-player last-tick for squad IC replies.
 pub type SquadReplyLog = HashMap<String, u32>;
 
+/// Captain bounty line to nearby enlisted players. Does not share town shout cooldowns.
+#[allow(clippy::implicit_hasher)]
+pub fn try_bounty_shout(
+    world: &World,
+    town_id: &str,
+    x: f64,
+    z: f64,
+    speaker: &str,
+    text: &str,
+    enlisted: &std::collections::HashSet<String>,
+) -> u32 {
+    let text = text.trim();
+    if text.is_empty() {
+        return 0;
+    }
+    let speaker = speaker.trim();
+    let speaker = if speaker.is_empty() {
+        "captain"
+    } else {
+        speaker
+    };
+    let msg = TextComponent::text(format!("<{speaker}> {text}")).color_named(NamedColor::Gold);
+    let mut n = 0u32;
+    for player in world.players.load().iter() {
+        if !enlisted.contains(&player.gameprofile.id.to_string()) {
+            continue;
+        }
+        let pos = player.living_entity.entity.pos.load();
+        if (pos.x - x).hypot(pos.z - z) <= CHAT_RANGE {
+            player.send_system_message(&msg);
+            n += 1;
+        }
+    }
+    tracing::info!(
+        town = town_id,
+        speaker,
+        heard = n,
+        kind = "bounty",
+        "kingdoms captain bounty"
+    );
+    n
+}
+
 /// Speak to players within [`CHAT_RANGE`] of `(x, z)` if the cooldown has elapsed.
 pub fn try_shout(
     world: &World,

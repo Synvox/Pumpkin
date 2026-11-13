@@ -96,8 +96,8 @@ const RESPAWN_PER_TICK: usize = 2;
 /// Fill empty citizen slots if the home chunk is loaded.
 ///
 /// Deterministic homes mean a killed guard comes back at the same post.
-/// Skipped while a raid is alarming the town so capture holds are not
-/// restocked mid-fight.
+/// Skipped while hostiles are inside the walls so capture holds are not
+/// restocked mid-fight. A hinterland camp must not block civilian respawn.
 pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
     if director::town_is_fighting(town_id) {
         return;
