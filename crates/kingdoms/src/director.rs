@@ -7087,6 +7087,8 @@ fn tick_supply_lines(world: &Arc<World>, tick: u32) {
             from = from.as_str(),
             to = to.as_str(),
             id,
+            x = f64::from(start.0) + 0.5,
+            z = f64::from(start.1) + 0.5,
             "kingdoms supply cart"
         );
     }
