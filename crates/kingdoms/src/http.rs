@@ -552,6 +552,7 @@ fn battle_json(b: &director::BattleState) -> Value {
         "flag_defenders": b.flag_defenders,
         "morale": b.morale,
         "bounty": b.bounty,
+        "cutoff": b.cutoff,
     })
 }
 
@@ -590,6 +591,7 @@ fn war_json() -> Value {
             "flag_defenders": t.flag_defenders,
             "morale": t.morale,
             "bounty": t.bounty,
+            "cutoff": t.cutoff,
         })).collect::<Vec<_>>(),
         "fronts": front.fronts,
         "heroes": director::all_heroes().iter().map(hero_json).collect::<Vec<_>>(),
@@ -698,6 +700,36 @@ fn director_state() -> Value {
             })
         })
         .collect();
+    let skip = dir.events.len().saturating_sub(64);
+    let events: Vec<Value> = dir
+        .events
+        .iter()
+        .skip(skip)
+        .map(|e| {
+            json!({
+                "tick": e.tick,
+                "kind": e.kind.as_str(),
+                "actor": e.actor,
+                "other": e.other,
+                "x": e.x,
+                "z": e.z,
+                "note": e.note,
+            })
+        })
+        .collect();
+    let supply: Vec<Value> = dir
+        .supply_states()
+        .into_iter()
+        .map(|s| {
+            json!({
+                "from": s.from,
+                "to": s.to,
+                "kingdom": s.kingdom,
+                "x": s.x,
+                "z": s.z,
+            })
+        })
+        .collect();
     json!({
         "tick": tick,
         "towns": towns,
@@ -706,6 +738,8 @@ fn director_state() -> Value {
         "bounties": bounties,
         "squads": squads,
         "morale": morale,
+        "events": events,
+        "supply": supply,
         "troops": { "defenders": defenders, "raiders": raiders },
         "war_clock": !external_director_connected(),
     })
@@ -758,6 +792,10 @@ fn webhook_name(kind: CombatKind) -> Option<&'static str> {
         CombatKind::CapturePaused => Some("capture_paused"),
         CombatKind::FlagChanged => Some("flag_changed"),
         CombatKind::Bounty => Some("bounty"),
+        CombatKind::RaidStop => Some("raid_stopped"),
+        CombatKind::RankUp => Some("rank_up"),
+        CombatKind::SupplyAmbush => Some("supply_ambush"),
+        CombatKind::SupplyArrived => Some("supply_arrived"),
         _ => None,
     }
 }
@@ -873,6 +911,16 @@ mod tests {
         );
         assert_eq!(webhook_name(CombatKind::FlagChanged), Some("flag_changed"));
         assert_eq!(webhook_name(CombatKind::Bounty), Some("bounty"));
+        assert_eq!(webhook_name(CombatKind::RaidStop), Some("raid_stopped"));
+        assert_eq!(webhook_name(CombatKind::RankUp), Some("rank_up"));
+        assert_eq!(
+            webhook_name(CombatKind::SupplyAmbush),
+            Some("supply_ambush")
+        );
+        assert_eq!(
+            webhook_name(CombatKind::SupplyArrived),
+            Some("supply_arrived")
+        );
         assert!(webhook_name(CombatKind::Kill).is_none());
     }
 
@@ -1015,6 +1063,10 @@ mod tests {
         assert!(state_json["enlisted"].is_array());
         assert!(state_json.get("bounties").is_some());
         assert!(state_json["bounties"].is_array());
+        assert!(state_json.get("events").is_some());
+        assert!(state_json["events"].is_array());
+        assert!(state_json.get("supply").is_some());
+        assert!(state_json["supply"].is_array());
 
         let raid = post_raid(
             State(state),

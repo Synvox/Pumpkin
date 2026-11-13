@@ -140,7 +140,7 @@ pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
         return;
     }
     let kingdom = scene.kingdom();
-    let budget = director::recruit_budget(&kingdom);
+    let budget = director::recruit_budget_for_town(town_id);
     if budget == 0 {
         return;
     }
