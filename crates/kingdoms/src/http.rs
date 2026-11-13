@@ -550,6 +550,8 @@ fn battle_json(b: &director::BattleState) -> Value {
         "flag_paused": b.flag_paused,
         "flag_attackers": b.flag_attackers,
         "flag_defenders": b.flag_defenders,
+        "morale": b.morale,
+        "bounty": b.bounty,
     })
 }
 
@@ -586,6 +588,8 @@ fn war_json() -> Value {
             "flag_paused": t.flag_paused,
             "flag_attackers": t.flag_attackers,
             "flag_defenders": t.flag_defenders,
+            "morale": t.morale,
+            "bounty": t.bounty,
         })).collect::<Vec<_>>(),
         "fronts": front.fronts,
         "heroes": director::all_heroes().iter().map(hero_json).collect::<Vec<_>>(),
@@ -600,13 +604,22 @@ fn director_state() -> Value {
     for world in dir.attached_worlds() {
         for p in world.players.load().iter() {
             let pos = p.living_entity.entity.pos.load();
-            let kingdom = dir
-                .player_kingdom(&p.gameprofile.id.to_string())
-                .map(|k| k.as_str().to_owned());
+            let uuid = p.gameprofile.id.to_string();
+            let kingdom = dir.player_kingdom(&uuid).map(|k| k.as_str().to_owned());
+            let stats = dir.player_stats_for(&uuid);
+            let enlist = stats.rank().enlist();
             players.push(json!({
                 "name": p.gameprofile.name,
-                "uuid": p.gameprofile.id.to_string(),
+                "uuid": uuid,
                 "kingdom": kingdom,
+                "rank": enlist.as_str(),
+                "kit": enlist.kit_name(),
+                "renown": stats.renown(),
+                "kills": stats.kills,
+                "captures": stats.captures,
+                "defenses": stats.defenses,
+                "bounties": stats.bounties,
+                "rally_cap": enlist.rally_cap(),
                 "x": pos.x,
                 "y": pos.y,
                 "z": pos.z,
@@ -636,6 +649,38 @@ fn director_state() -> Value {
                 "y": s.y,
                 "z": s.z,
                 "target": s.target,
+                "cap": s.cap,
+            })
+        })
+        .collect();
+    let enlisted: Vec<Value> = dir
+        .enlisted_states()
+        .into_iter()
+        .map(|e| {
+            json!({
+                "uuid": e.uuid,
+                "kingdom": e.kingdom,
+                "rank": e.rank,
+                "kit": e.kit,
+                "renown": e.renown,
+                "kills": e.kills,
+                "captures": e.captures,
+                "defenses": e.defenses,
+                "bounties": e.bounties,
+                "rally_cap": e.rally_cap,
+            })
+        })
+        .collect();
+    let bounties: Vec<Value> = dir
+        .all_battles()
+        .into_iter()
+        .filter_map(|b| {
+            b.bounty.map(|kind| {
+                json!({
+                    "town": b.town_id,
+                    "kind": kind,
+                    "morale": b.morale,
+                })
             })
         })
         .collect();
@@ -657,6 +702,8 @@ fn director_state() -> Value {
         "tick": tick,
         "towns": towns,
         "players": players,
+        "enlisted": enlisted,
+        "bounties": bounties,
         "squads": squads,
         "morale": morale,
         "troops": { "defenders": defenders, "raiders": raiders },
@@ -710,6 +757,7 @@ fn webhook_name(kind: CombatKind) -> Option<&'static str> {
         CombatKind::CaptureProgress => Some("capture_progress"),
         CombatKind::CapturePaused => Some("capture_paused"),
         CombatKind::FlagChanged => Some("flag_changed"),
+        CombatKind::Bounty => Some("bounty"),
         _ => None,
     }
 }
@@ -824,6 +872,7 @@ mod tests {
             Some("capture_paused")
         );
         assert_eq!(webhook_name(CombatKind::FlagChanged), Some("flag_changed"));
+        assert_eq!(webhook_name(CombatKind::Bounty), Some("bounty"));
         assert!(webhook_name(CombatKind::Kill).is_none());
     }
 
@@ -962,6 +1011,10 @@ mod tests {
         assert!(state_json["squads"].is_array());
         assert!(state_json.get("morale").is_some());
         assert!(state_json["morale"].is_array());
+        assert!(state_json.get("enlisted").is_some());
+        assert!(state_json["enlisted"].is_array());
+        assert!(state_json.get("bounties").is_some());
+        assert!(state_json["bounties"].is_array());
 
         let raid = post_raid(
             State(state),

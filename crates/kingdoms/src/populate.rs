@@ -16,10 +16,17 @@ use pumpkin_util::math::vector3::Vector3;
 use tracing::debug;
 
 use crate::director;
+use crate::faction::{TAG_RAIDER, has_tag, is_kingdoms_tagged, is_pillager_type};
 use crate::info::TownInfo;
 use crate::roles::{PopulationSpec, citizen_slots};
 use crate::scene::{TownInfoScene, TownScene};
 use crate::town::towns_touching_chunk;
+
+fn occupies_citizen_slot(entity: &pumpkin_core::entity::Entity) -> bool {
+    is_kingdoms_tagged(entity)
+        && !has_tag(entity, TAG_RAIDER)
+        && !is_pillager_type(entity.entity_type)
+}
 
 pub struct PopulateCitizens;
 
@@ -96,8 +103,8 @@ const RESPAWN_PER_TICK: usize = 2;
 /// Fill empty citizen slots if the home chunk is loaded.
 ///
 /// Deterministic homes mean a killed guard comes back at the same post.
-/// Skipped while a raid is alarming the town so capture holds are not
-/// restocked mid-fight.
+/// Skipped while hostiles are inside the walls so capture holds are not
+/// restocked mid-fight. A hinterland camp must not block civilian respawn.
 pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
     if director::town_is_fighting(town_id) {
         return;
@@ -123,9 +130,11 @@ pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
         ),
     );
     let existing = world.get_entities_at_box(&aabb);
+    // Leftover raiders used to fill the bed count and block civilians, so the
+    // bell never rang after a siege even once the alarm itself was clear.
     let occupied = existing
         .iter()
-        .filter(|e| crate::faction::is_kingdoms_tagged(e.get_entity()))
+        .filter(|e| occupies_citizen_slot(e.get_entity()))
         .count();
     if occupied >= slots.len() {
         return;
@@ -143,10 +152,11 @@ pub fn respawn_missing(world: &Arc<World>, town_id: &str) {
             continue;
         }
         let already = existing.iter().any(|e| {
-            let p = e.get_entity().pos.load();
+            let base = e.get_entity();
+            let p = base.pos.load();
             (p.x.floor() as i32 - slot.home.x).abs() <= 2
                 && (p.z.floor() as i32 - slot.home.z).abs() <= 2
-                && crate::faction::is_kingdoms_tagged(e.get_entity())
+                && occupies_citizen_slot(base)
         });
         if already {
             continue;

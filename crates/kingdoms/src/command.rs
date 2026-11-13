@@ -146,10 +146,22 @@ impl CommandExecutor for KingdomJoinExecutor {
             return Ok(0);
         };
         let name = StringArgumentType::get(context, "kingdom")?;
-        let id = director::join_kingdom(&player, name);
+        let raw = name.trim().to_ascii_lowercase();
+        if raw != "alder" && raw != "raven" {
+            context.source.send_feedback(
+                TextComponent::text("join alder or raven").color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        }
+        let (id, rank) = director::join_kingdom(&player, &raw);
         context.source.send_feedback(
-            TextComponent::text(format!("Joined kingdom {}", id.as_str()))
-                .color_named(NamedColor::Green),
+            TextComponent::text(format!(
+                "Joined kingdom {} as {}",
+                id.as_str(),
+                rank.enlist().as_str()
+            ))
+            .color_named(NamedColor::Green),
             false,
         );
         Ok(1)

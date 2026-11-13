@@ -36,6 +36,7 @@ use pumpkin_data::dimension::Dimension;
 use tracing::info;
 
 pub mod abstract_combat;
+pub mod bounty;
 pub mod buildings;
 pub mod castle;
 pub mod cells;

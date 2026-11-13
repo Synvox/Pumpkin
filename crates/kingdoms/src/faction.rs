@@ -33,6 +33,7 @@ pub const TAG_JOB_LADDER: &str = "kingdoms:job:ladder";
 pub const TAG_JOB_CROSSBOW: &str = "kingdoms:job:crossbow";
 pub const TAG_ROUTED: &str = "kingdoms:routed";
 pub const TAG_TEMP: &str = "kingdoms:temp";
+pub const TAG_SUPPLY: &str = "kingdoms:supply";
 
 /// Stable kingdom identity. Towns in even/odd cells share two starting kingdoms
 /// so a later director can pit them against each other; pillagers stay outside.
