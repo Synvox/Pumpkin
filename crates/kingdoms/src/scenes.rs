@@ -393,7 +393,19 @@ fn place_wayside_pois(
     place_castle_ruin(occ, grid, search, town, keep_out, rng, scenes);
     place_bandit_hideout(occ, grid, search, town, keep_out, rng, scenes);
     place_coaching_inn_scene(occ, grid, search, town, keep_out, lots, seed, rng, scenes);
-    place_pilgrim_chapel(occ, grid, search, town, keep_out, lots, seed, rng, scenes);
+    // Own salt so the chapel search does not shuffle later mill/harbour sites.
+    let mut chapel_rng = TownRng::salted(seed, 35, 1);
+    place_pilgrim_chapel(
+        occ,
+        grid,
+        search,
+        town,
+        keep_out,
+        lots,
+        seed,
+        &mut chapel_rng,
+        scenes,
+    );
     place_toll_bridge(occ, grid, search, town, keep_out, lots, seed, rng, scenes);
     place_charcoal_camp(occ, grid, search, town, keep_out, lots, seed, rng, scenes);
     place_walled_market(occ, grid, search, town, keep_out, lots, seed, rng, scenes);
@@ -907,6 +919,13 @@ fn place_pilgrim_chapel(
         );
         if graves.contains(lych.max_x, lych.max_z) {
             occ.fill(lych, CellKind::Lychgate, true);
+        }
+        for gz in graves.min_z..=graves.max_z {
+            for gx in graves.min_x..=graves.max_x {
+                if graves.on_edge(gx, gz) && occ.kind(gx, gz) == CellKind::Grave {
+                    occ.set(gx, gz, CellKind::FieldWall, true);
+                }
+            }
         }
     }
     let path_z = nave.max_z + 1;
@@ -1543,9 +1562,12 @@ fn find_quarry_site(
                     continue;
                 }
                 let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
-                let relief = (hi - lo).clamp(0, 20);
+                let relief = hi - lo;
+                if relief < 1 {
+                    continue;
+                }
                 let mean = grid.mean(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
-                let score = relief * 8 + mean / 4 + rng.gen_range(0, 6);
+                let score = relief.clamp(0, 20) * 8 + mean / 4 + rng.gen_range(0, 6);
                 if score > best_score {
                     best_score = score;
                     best = Some(rect);
@@ -2259,8 +2281,8 @@ pub fn paint_harbour_town(
         max_x = max_x.max(x);
         max_z = max_z.max(z);
     }
-    paint_inner_sea_quay(occ, grid, lots, town);
-    paint_quay_and_cranes(occ, grid, lots, search, &docks);
+    paint_inner_sea_quay(occ, grid, lots, town, scenes);
+    paint_quay_and_cranes(occ, grid, lots, search, &docks, scenes);
     paint_breakwater(occ, grid, search, &docks);
     for (i, &(x, z)) in docks.iter().enumerate() {
         if i % 4 != 0 {
@@ -2975,7 +2997,12 @@ fn harbour_focus_rect(occ: &Occupancy, docks: Rect) -> Rect {
     if rect.depth() > 64 {
         rect = Rect::new(rect.min_x, sz - 32, rect.max_x, sz + 31);
     }
-    rect
+    Rect::new(
+        rect.min_x.max(occ.bounds.min_x),
+        rect.min_z.max(occ.bounds.min_z),
+        rect.max_x.min(occ.bounds.max_x),
+        rect.max_z.min(occ.bounds.max_z),
+    )
 }
 
 fn blob_in(occ: &Occupancy, bounds: Rect, kind: CellKind) -> Option<Rect> {
@@ -3164,6 +3191,16 @@ fn quay_claimable(kind: CellKind) -> bool {
     )
 }
 
+fn watchtower_keep(scenes: &[Scene], x: i32, z: i32) -> bool {
+    scenes
+        .iter()
+        .any(|scene| scene.kind == SceneKind::Watchtower && scene.rect.inflate(1).contains(x, z))
+}
+
+fn quay_claimable_at(occ: &Occupancy, scenes: &[Scene], x: i32, z: i32) -> bool {
+    !watchtower_keep(scenes, x, z) && quay_claimable(occ.kind(x, z))
+}
+
 fn claim_quay_cell(occ: &mut Occupancy, lots: &mut Vec<Lot>, x: i32, z: i32) {
     if occ.kind(x, z) == CellKind::Building {
         evict_lots_from(occ, lots, Rect::new(x, z, x, z));
@@ -3214,7 +3251,13 @@ fn seaward_dir(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> Option<Dir
 
 /// Quay on the inner face of a coastal sea wall so the fish market sits
 /// inside the curtain, not out on the mole.
-fn paint_inner_sea_quay(occ: &mut Occupancy, grid: &HeightGrid, lots: &mut Vec<Lot>, town: Rect) {
+fn paint_inner_sea_quay(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    town: Rect,
+    scenes: &[Scene],
+) {
     let pad = town.inflate(2);
     let mut marked = Vec::new();
     for z in pad.min_z..=pad.max_z {
@@ -3222,7 +3265,7 @@ fn paint_inner_sea_quay(occ: &mut Occupancy, grid: &HeightGrid, lots: &mut Vec<L
             if !occ.bounds.contains(x, z) || !grid.is_dry(x, z) {
                 continue;
             }
-            if !quay_claimable(occ.kind(x, z)) {
+            if !quay_claimable_at(occ, scenes, x, z) {
                 continue;
             }
             let Some(out) = seaward_dir(occ, grid, x, z) else {
@@ -3240,7 +3283,7 @@ fn paint_inner_sea_quay(occ: &mut Occupancy, grid: &HeightGrid, lots: &mut Vec<L
             if !occ.bounds.contains(ix, iz) || !grid.is_dry(ix, iz) {
                 continue;
             }
-            if quay_claimable(occ.kind(ix, iz)) || occ.kind(ix, iz) == CellKind::Quay {
+            if quay_claimable_at(occ, scenes, ix, iz) || occ.kind(ix, iz) == CellKind::Quay {
                 claim_quay_cell(occ, lots, ix, iz);
             }
         }
@@ -3509,6 +3552,7 @@ fn paint_quay_and_cranes(
     lots: &mut Vec<Lot>,
     search: Rect,
     docks: &[(i32, i32)],
+    scenes: &[Scene],
 ) {
     let mut quay = Vec::new();
     for &(x, z) in docks {
@@ -3519,7 +3563,7 @@ fn paint_quay_and_cranes(
                 if !search.contains(nx, nz) {
                     continue;
                 }
-                if grid.is_dry(nx, nz) && quay_claimable(occ.kind(nx, nz)) {
+                if grid.is_dry(nx, nz) && quay_claimable_at(occ, scenes, nx, nz) {
                     claim_quay_cell(occ, lots, nx, nz);
                     quay.push((nx, nz));
                     for thick in 1..=2 {
@@ -3528,7 +3572,7 @@ fn paint_quay_and_cranes(
                             let sz = nz + side.dz() * thick;
                             if search.contains(sx, sz)
                                 && grid.is_dry(sx, sz)
-                                && quay_claimable(occ.kind(sx, sz))
+                                && quay_claimable_at(occ, scenes, sx, sz)
                             {
                                 claim_quay_cell(occ, lots, sx, sz);
                                 quay.push((sx, sz));
@@ -3560,6 +3604,7 @@ fn paint_quay_and_cranes(
                 let pz = z + dz;
                 if search.contains(px, pz)
                     && grid.is_dry(px, pz)
+                    && !watchtower_keep(scenes, px, pz)
                     && harbour_may_overwrite(occ.kind(px, pz))
                 {
                     occ.set(px, pz, CellKind::Crane, true);
@@ -3569,7 +3614,10 @@ fn paint_quay_and_cranes(
         for boom in 1..=4 {
             let bx = x + out.dx() * boom;
             let bz = z + out.dz() * boom;
-            if search.contains(bx, bz) && harbour_may_overwrite(occ.kind(bx, bz)) {
+            if search.contains(bx, bz)
+                && !watchtower_keep(scenes, bx, bz)
+                && harbour_may_overwrite(occ.kind(bx, bz))
+            {
                 occ.set(bx, bz, CellKind::Crane, true);
             }
         }
@@ -3608,6 +3656,7 @@ fn paint_quay_and_cranes(
                     let pz = cz + dz;
                     if search.contains(px, pz)
                         && grid.is_dry(px, pz)
+                        && !watchtower_keep(scenes, px, pz)
                         && (harbour_may_overwrite(occ.kind(px, pz))
                             || occ.kind(px, pz) == CellKind::Quay)
                     {
@@ -3619,6 +3668,7 @@ fn paint_quay_and_cranes(
                 let bx = cx + out.dx() * boom;
                 let bz = cz + out.dz() * boom;
                 if search.contains(bx, bz)
+                    && !watchtower_keep(scenes, bx, bz)
                     && (harbour_may_overwrite(occ.kind(bx, bz))
                         || occ.kind(bx, bz) == CellKind::Quay)
                 {
@@ -3645,6 +3695,7 @@ fn paint_quay_and_cranes(
                     let pz = z + dz;
                     if search.contains(px, pz)
                         && grid.is_dry(px, pz)
+                        && !watchtower_keep(scenes, px, pz)
                         && (harbour_may_overwrite(occ.kind(px, pz))
                             || occ.kind(px, pz) == CellKind::Quay)
                     {
@@ -3659,12 +3710,13 @@ fn paint_quay_and_cranes(
     if cranes == 0
         && let Some(&(x, z)) = quay.first()
     {
-        if harbour_may_overwrite(occ.kind(x, z)) {
+        if !watchtower_keep(scenes, x, z) && harbour_may_overwrite(occ.kind(x, z)) {
             occ.set(x, z, CellKind::Crane, true);
         }
         for dz in -1..=1 {
             for dx in -1..=1 {
                 if search.contains(x + dx, z + dz)
+                    && !watchtower_keep(scenes, x + dx, z + dz)
                     && harbour_may_overwrite(occ.kind(x + dx, z + dz))
                 {
                     occ.set(x + dx, z + dz, CellKind::Crane, true);
@@ -7334,8 +7386,9 @@ fn place_watchtower(
     // is painted and used to steal the quay, cog and mill-sail pads.
     // Inland peak search must not run when a headland already matched,
     // because it consumes hinterland RNG.
-    let Some(rect) = find_headland_site(occ, grid, search, town, keep_out, 7, 7)
-        .or_else(|| find_peak_site(occ, grid, search, town, keep_out, 7, 7, 0, rng))
+    let headland = find_headland_site(occ, grid, search, town, keep_out, 7, 7);
+    let Some(rect) =
+        headland.or_else(|| find_peak_site(occ, grid, search, town, keep_out, 7, 7, 0, rng))
     else {
         return;
     };
@@ -7348,13 +7401,51 @@ fn place_watchtower(
         rect,
         Dir::South,
     )
-    .is_some()
+    .is_none()
     {
-        scenes.push(Scene {
-            kind: SceneKind::Watchtower,
-            rect,
-        });
+        return;
     }
+    let mut scene = rect;
+    // Inland only: eaves (battered base / machicolations) and a 5×4 hut.
+    // Skip both on headlands so the 7×7 tower does not steal the quay.
+    if headland.is_none() {
+        paint_eaves(occ, rect);
+        let pads = [
+            Rect::new(rect.min_x, rect.max_z + 2, rect.min_x + 4, rect.max_z + 5),
+            Rect::new(rect.min_x, rect.min_z - 5, rect.min_x + 4, rect.min_z - 2),
+            Rect::new(rect.max_x + 2, rect.min_z, rect.max_x + 5, rect.min_z + 4),
+            Rect::new(rect.min_x - 5, rect.min_z, rect.min_x - 2, rect.min_z + 4),
+        ];
+        for pad in pads {
+            if mill_sail_keepout(lots, pad) {
+                continue;
+            }
+            if try_lot(
+                occ,
+                grid,
+                lots,
+                seed,
+                BuildingKind::Cottage,
+                pad,
+                Dir::South,
+            )
+            .is_some()
+            {
+                paint_eaves(occ, pad);
+                scene = Rect::new(
+                    scene.min_x.min(pad.min_x),
+                    scene.min_z.min(pad.min_z),
+                    scene.max_x.max(pad.max_x),
+                    scene.max_z.max(pad.max_z),
+                );
+                break;
+            }
+        }
+    }
+    scenes.push(Scene {
+        kind: SceneKind::Watchtower,
+        rect: scene,
+    });
 }
 
 fn place_ruin(
@@ -9273,58 +9364,58 @@ fn place_tourney(
     let (cx, cz) = yard.center();
     let (kx, kz) = castle.center();
     let along_x = yard.width() >= yard.depth();
+    let north_closer = (yard.min_z - kz).abs() <= (yard.max_z - kz).abs();
+    let west_closer = (yard.min_x - kx).abs() <= (yard.max_x - kx).abs();
+    // Lists long enough for a 30-block tilt, five wide: fence, sand, tilt, sand, fence.
+    let inset = if along_x {
+        ((yard.width() - 32) / 2).clamp(4, 10)
+    } else {
+        ((yard.depth() - 32) / 2).clamp(4, 10)
+    };
     if along_x {
         occ.fill(
-            Rect::new(yard.min_x + 6, cz - 1, yard.max_x - 6, cz + 1),
+            Rect::new(yard.min_x + inset, cz - 2, yard.max_x - inset, cz + 2),
             CellKind::TourneyList,
             true,
         );
-        occ.fill(
+        let stand = if north_closer {
             Rect::new(
-                yard.min_x + 7,
+                yard.min_x + inset + 2,
                 yard.min_z + 6,
-                yard.max_x - 7,
-                yard.min_z + 8,
-            ),
-            CellKind::TourneyStand,
-            true,
-        );
-        occ.fill(
+                yard.max_x - inset - 2,
+                yard.min_z + 9,
+            )
+        } else {
             Rect::new(
-                yard.min_x + 7,
-                yard.max_z - 8,
-                yard.max_x - 7,
+                yard.min_x + inset + 2,
+                yard.max_z - 9,
+                yard.max_x - inset - 2,
                 yard.max_z - 6,
-            ),
-            CellKind::TourneyStand,
-            true,
-        );
+            )
+        };
+        occ.fill(stand, CellKind::TourneyStand, true);
     } else {
         occ.fill(
-            Rect::new(cx - 1, yard.min_z + 6, cx + 1, yard.max_z - 6),
+            Rect::new(cx - 2, yard.min_z + inset, cx + 2, yard.max_z - inset),
             CellKind::TourneyList,
             true,
         );
-        occ.fill(
+        let stand = if west_closer {
             Rect::new(
                 yard.min_x + 6,
-                yard.min_z + 7,
-                yard.min_x + 8,
-                yard.max_z - 7,
-            ),
-            CellKind::TourneyStand,
-            true,
-        );
-        occ.fill(
+                yard.min_z + inset + 2,
+                yard.min_x + 9,
+                yard.max_z - inset - 2,
+            )
+        } else {
             Rect::new(
-                yard.max_x - 8,
-                yard.min_z + 7,
+                yard.max_x - 9,
+                yard.min_z + inset + 2,
                 yard.max_x - 6,
-                yard.max_z - 7,
-            ),
-            CellKind::TourneyStand,
-            true,
-        );
+                yard.max_z - inset - 2,
+            )
+        };
+        occ.fill(stand, CellKind::TourneyStand, true);
     }
     let tents = [
         Rect::new(yard.min_x, yard.min_z, yard.min_x + 4, yard.min_z + 4),
@@ -9335,8 +9426,6 @@ fn place_tourney(
     for pad in tents {
         occ.fill(pad, CellKind::Tent, true);
     }
-    let north_closer = (yard.min_z - kz).abs() <= (yard.max_z - kz).abs();
-    let west_closer = (yard.min_x - kx).abs() <= (yard.max_x - kx).abs();
     let royal = if along_x {
         if north_closer {
             Rect::new(cx - 3, yard.min_z, cx + 3, yard.min_z + 4)
@@ -9349,30 +9438,6 @@ fn place_tourney(
         Rect::new(yard.max_x - 4, cz - 3, yard.max_x, cz + 3)
     };
     occ.fill(royal, CellKind::TourneyStand, true);
-    // Extra pavilions sit on the far stand, already non-reclaimable. New
-    // Tent on tourney green used to clip the manor yard that place later.
-    let extra = if along_x {
-        if north_closer {
-            Rect::new(cx - 2, yard.max_z - 8, cx + 2, yard.max_z - 6)
-        } else {
-            Rect::new(cx - 2, yard.min_z + 6, cx + 2, yard.min_z + 8)
-        }
-    } else if west_closer {
-        Rect::new(yard.max_x - 8, cz - 2, yard.max_x - 6, cz + 2)
-    } else {
-        Rect::new(yard.min_x + 6, cz - 2, yard.min_x + 8, cz + 2)
-    };
-    if !extra.intersects(royal) && yard.contains(extra.max_x, extra.max_z) {
-        occ.fill(extra, CellKind::Tent, true);
-    }
-    let sixth = if along_x {
-        Rect::new(yard.min_x + 8, extra.min_z, yard.min_x + 12, extra.max_z)
-    } else {
-        Rect::new(extra.min_x, yard.min_z + 8, extra.max_x, yard.min_z + 12)
-    };
-    if !sixth.intersects(royal) && yard.contains(sixth.max_x, sixth.max_z) {
-        occ.fill(sixth, CellKind::Tent, true);
-    }
     // Armoury takes the corner pavilion furthest from the royal box.
     if let Some(pad) = tents.iter().copied().find(|pad| !pad.intersects(royal)) {
         occ.fill(pad, CellKind::WarTent, true);
@@ -14625,10 +14690,28 @@ mod tests {
                 }
             }
         }
-        assert!(lists >= 20, "jousting lists {lists}");
+        assert!(lists >= 120, "jousting lists {lists}");
         assert!(stands >= 20, "stands and royal box {stands}");
-        assert!(tents >= 20, "pavilions {tents}");
+        assert!(tents >= 60, "pavilions {tents}");
         assert!(armoury >= 8, "armoury tent {armoury}");
+        let list_span = {
+            let mut min_x = i32::MAX;
+            let mut max_x = i32::MIN;
+            let mut min_z = i32::MAX;
+            let mut max_z = i32::MIN;
+            for z in tourney.rect.min_z..=tourney.rect.max_z {
+                for x in tourney.rect.min_x..=tourney.rect.max_x {
+                    if plan.occ.kind(x, z) == CellKind::TourneyList {
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        min_z = min_z.min(z);
+                        max_z = max_z.max(z);
+                    }
+                }
+            }
+            (max_x - min_x + 1).max(max_z - min_z + 1)
+        };
+        assert!(list_span >= 30, "tilt length {list_span}");
 
         let quarry = plan
             .scenes
@@ -14648,6 +14731,13 @@ mod tests {
                 }
             }
         }
+        let (qlo, qhi) = plan.heights.range(
+            quarry.rect.min_x,
+            quarry.rect.min_z,
+            quarry.rect.max_x,
+            quarry.rect.max_z,
+        );
+        assert!(qhi > qlo, "quarry on a slope {qlo}/{qhi}");
         assert!(cranes >= 8, "quarry cranes {cranes}");
         assert!(stone >= 8, "cut stone {stone}");
         assert!(pit >= 24, "stepped quarry pit {pit}");
@@ -14689,6 +14779,15 @@ mod tests {
             }
         }
         assert!(graves >= 6, "chapel graves {graves}");
+        let mut yard_wall = 0;
+        for z in chapel.rect.min_z..=chapel.rect.max_z {
+            for x in chapel.rect.min_x..=chapel.rect.max_x {
+                if plan.occ.kind(x, z) == CellKind::FieldWall {
+                    yard_wall += 1;
+                }
+            }
+        }
+        assert!(yard_wall >= 8, "chapel graveyard wall {yard_wall}");
 
         let inn = plan
             .scenes
@@ -14710,10 +14809,17 @@ mod tests {
                 .expect("inland watchtower lot");
             assert_eq!(lot.rect.width(), 7, "inland tower width");
             assert_eq!(lot.rect.depth(), 7, "inland tower depth");
-            assert_eq!(
+            assert!(
+                tower.rect.width() <= 13 && tower.rect.depth() <= 13,
+                "inland tower plus hut, not a wide yard {}x{}",
                 tower.rect.width(),
-                7,
-                "inland tower scene is the lot, not a wide yard"
+                tower.rect.depth()
+            );
+            assert!(
+                plan.lots.iter().any(|hut| {
+                    hut.kind == BuildingKind::Cottage && tower.rect.intersects(hut.rect)
+                }),
+                "keeper's hut"
             );
         }
 
@@ -14776,8 +14882,9 @@ mod tests {
         }
         assert!(lecterns >= 1, "chapel lectern {lecterns}");
         assert!(pews >= 4, "chapel pews {pews}");
-        assert!(tilt >= 8, "tilt barrier {tilt}");
+        assert!(tilt >= 30, "tilt barrier {tilt}");
         assert!(hitch >= 4, "inn hitching {hitch}");
+        assert!(hitch <= 24, "inn hitching should be a short rail {hitch}");
         assert!(troughs >= 1, "inn trough {troughs}");
 
         let check = crate::watertight::check_town(&plan, &volume);

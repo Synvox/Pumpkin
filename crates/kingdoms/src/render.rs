@@ -600,14 +600,16 @@ fn write_scene_renders(
             SceneKind::TollBridge => "Toll bridge · stone arch, gatehouse and tollhouse",
             SceneKind::CharcoalCamp => "Charcoal camp · earth clamps, log piles and huts",
             SceneKind::RoadsideInn => {
-                "Coaching inn · courtyard, hitching, stables, hay loft, well and hanging sign"
+                "Coaching inn · open cobble yard, well, cart, hitching rail and trough"
             }
             SceneKind::WalledMarket => "Walled market · guildhall, stalls, palisade, well",
             SceneKind::MillHamlet => "Mill hamlet · wheel, race, granary",
             SceneKind::Beacon => "Hilltop beacon · brazier and watch-fire",
-            SceneKind::Watchtower => "Headland watchtower · stone tower and beacon fire",
+            SceneKind::Watchtower => {
+                "Watchtower · battered base, machicolations, arrow slits and keeper's hut"
+            }
             SceneKind::Tourney => {
-                "Jousting lists · tilt, stands, pavilions and armoury tent beside the castle"
+                "Jousting lists · long tilt, covered stands, royal box and peaked pavilions"
             }
             SceneKind::Monastery => {
                 "Priory · cloister garth, chapter house, scriptorium, herb garden"
@@ -617,7 +619,7 @@ fn write_scene_renders(
                 "Quarry · hillside benches, jib cranes, cut stone, mason's lodge and hut"
             }
             SceneKind::PilgrimChapel => {
-                "Pilgrim chapel · enclosed nave, pews, altar and wayside graves"
+                "Pilgrim chapel · west bell-cote, nave, pews and walled graves"
             }
             SceneKind::SiegeCamp => {
                 "Siege camp · trebuchets outside, tent rows, palisade, ditch and bank"
