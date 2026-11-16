@@ -475,6 +475,8 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
                 | SceneKind::TollBridge
                 | SceneKind::CharcoalCamp
                 | SceneKind::Watchtower
+                | SceneKind::Tourney
+                | SceneKind::PilgrimChapel
         ) {
             continue;
         }

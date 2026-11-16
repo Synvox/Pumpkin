@@ -400,7 +400,8 @@ pub fn furnish_house(
         BuildingKind::Church
         | BuildingKind::StaveChurch
         | BuildingKind::Monastery
-        | BuildingKind::Cathedral => {
+        | BuildingKind::Cathedral
+        | BuildingKind::Chapel => {
             furnish_chapel(sink, rect, x, floor, z, roof_y, palette, true);
         }
         BuildingKind::Watchtower | BuildingKind::Outpost | BuildingKind::BellTower => {}

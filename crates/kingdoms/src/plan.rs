@@ -38,7 +38,7 @@ const HINTERLAND_PAD: i32 = 120;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 27;
+pub const PLAN_CACHE_VERSION: u32 = 28;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -2079,6 +2079,7 @@ fn paint_poi_roads(
         SceneKind::HuntingLodge,
         SceneKind::Manor,
         SceneKind::RidgeMill,
+        SceneKind::PilgrimChapel,
     ];
     for scene in scenes.iter().filter(|scene| kinds.contains(&scene.kind)) {
         let Some(start) = poi_road_anchor(occ, grid, scene) else {
@@ -2106,6 +2107,9 @@ fn paint_poi_roads(
                         CellKind::Building
                             | CellKind::Palisade
                             | CellKind::PalisadeGate
+                            | CellKind::TownWall
+                            | CellKind::TownTower
+                            | CellKind::TownGate
                             | CellKind::Ruin
                             | CellKind::Ship
                             | CellKind::Harbor
@@ -2423,21 +2427,33 @@ fn stamp_country_road_cell(
     };
     if occ.bounds.contains(x, z) {
         let cell = occ.kind(x, z);
-        if !cell.is_castle() && cell != CellKind::Well {
-            occ.set(
-                x,
-                z,
-                kind,
-                matches!(
-                    cell,
-                    CellKind::Empty
-                        | CellKind::Farm
-                        | CellKind::FarmEdge
-                        | CellKind::Plaza
-                        | CellKind::Green
-                ),
-            );
+        if cell.is_castle()
+            || cell == CellKind::Well
+            || matches!(
+                cell,
+                CellKind::TownWall
+                    | CellKind::TownTower
+                    | CellKind::TownGate
+                    | CellKind::Palisade
+                    | CellKind::PalisadeGate
+                    | CellKind::Building
+            )
+        {
+            return;
         }
+        occ.set(
+            x,
+            z,
+            kind,
+            matches!(
+                cell,
+                CellKind::Empty
+                    | CellKind::Farm
+                    | CellKind::FarmEdge
+                    | CellKind::Plaza
+                    | CellKind::Green
+            ),
+        );
     } else {
         overlay.entry((x, z)).or_insert(kind);
     }
@@ -3859,7 +3875,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 27);
+        assert_eq!(PLAN_CACHE_VERSION, 28);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -3897,8 +3913,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 27;
-    const PLAN_LAYOUT_HASH: u64 = 0x20a7_bd88_2d80_ca3a;
+    const PLAN_LAYOUT_VERSION: u32 = 28;
+    const PLAN_LAYOUT_HASH: u64 = 0xa02b_28d3_ec34_b133;
 
     #[test]
     fn plan_cache_version_tracks_layout() {
