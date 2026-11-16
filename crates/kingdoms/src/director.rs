@@ -5704,7 +5704,9 @@ fn maybe_refill_repair(world: &Arc<World>, town_id: &str, tick: u32, _near: bool
         return;
     }
     let start = cursor % cols.len();
-    let take = REPAIR_SCAN_COLUMNS.saturating_mul(16);
+    // One band of columns per tick. A 64-column inline pass was a 1 s hitch
+    // on debug; the worker still only fills `REPAIR_QUEUE_CAP` jobs.
+    let take = REPAIR_SCAN_COLUMNS;
     let slice: Vec<_> = cols
         .iter()
         .cycle()
