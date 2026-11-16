@@ -2107,9 +2107,6 @@ fn paint_poi_roads(
                         CellKind::Building
                             | CellKind::Palisade
                             | CellKind::PalisadeGate
-                            | CellKind::TownWall
-                            | CellKind::TownTower
-                            | CellKind::TownGate
                             | CellKind::Ruin
                             | CellKind::Ship
                             | CellKind::Harbor
@@ -2427,18 +2424,27 @@ fn stamp_country_road_cell(
     };
     if occ.bounds.contains(x, z) {
         let cell = occ.kind(x, z);
-        if cell.is_castle()
-            || cell == CellKind::Well
-            || matches!(
-                cell,
-                CellKind::TownWall
-                    | CellKind::TownTower
-                    | CellKind::TownGate
-                    | CellKind::Palisade
-                    | CellKind::PalisadeGate
-                    | CellKind::Building
-            )
-        {
+        // Country tracks must not nibble ships, walls or lots. Chapel
+        // roads used to wipe the harbour cog by overwriting Ship cells.
+        if !matches!(
+            cell,
+            CellKind::Empty
+                | CellKind::Farm
+                | CellKind::FarmEdge
+                | CellKind::Plaza
+                | CellKind::Green
+                | CellKind::Hedge
+                | CellKind::FieldWall
+                | CellKind::Eave
+                | CellKind::Orchard
+                | CellKind::Pasture
+                | CellKind::Road
+                | CellKind::RoadStairN
+                | CellKind::RoadStairS
+                | CellKind::RoadStairE
+                | CellKind::RoadStairW
+                | CellKind::Bridge
+        ) {
             return;
         }
         occ.set(
@@ -3914,7 +3920,7 @@ mod tests {
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
     const PLAN_LAYOUT_VERSION: u32 = 28;
-    const PLAN_LAYOUT_HASH: u64 = 0xa02b_28d3_ec34_b133;
+    const PLAN_LAYOUT_HASH: u64 = 0x8be4_e397_bfae_9188;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

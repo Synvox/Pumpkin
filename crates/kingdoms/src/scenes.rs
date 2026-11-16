@@ -7330,13 +7330,11 @@ fn place_watchtower(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
-    // Inland stays a 7×7 lot. A wide yard here used to occupy manor, inn
-    // and mill-sail sites that place later. The larger footprint is only
-    // for a coastal headland with real water on the ring. Peak search
-    // consumes hinterland RNG, so it runs only when no headland matched.
-    let Some(rect) = find_headland_site(occ, grid, search, town, keep_out, 11, 11, 40)
-        .or_else(|| find_headland_site(occ, grid, search, town, keep_out, 9, 9, 24))
-        .or_else(|| find_headland_site(occ, grid, search, town, keep_out, 7, 7, 8))
+    // Always a 7×7 lot. A wide coastal yard here sits before the harbour
+    // is painted and used to steal the quay, cog and mill-sail pads.
+    // Inland peak search must not run when a headland already matched,
+    // because it consumes hinterland RNG.
+    let Some(rect) = find_headland_site(occ, grid, search, town, keep_out, 7, 7)
         .or_else(|| find_peak_site(occ, grid, search, town, keep_out, 7, 7, 0, rng))
     else {
         return;
@@ -10361,7 +10359,6 @@ fn find_headland_site(
     keep_out: Rect,
     w: i32,
     d: i32,
-    min_wet: i32,
 ) -> Option<Rect> {
     let mut best = None;
     let mut best_score = i32::MIN;
@@ -10390,7 +10387,7 @@ fn find_headland_site(
                     }
                 }
             }
-            if wet < min_wet {
+            if wet < 8 {
                 continue;
             }
             let h = grid.mean(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
