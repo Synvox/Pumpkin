@@ -4893,7 +4893,7 @@ fn place_manor(
             if !yard.on_edge(x, z) || motte.contains(x, z) {
                 continue;
             }
-            occ.set(x, z, CellKind::TownWall, true);
+            occ.set(x, z, CellKind::Palisade, true);
         }
     }
     paint_bailey_gate(occ, yard, gate_dir, motte);
@@ -4995,7 +4995,7 @@ fn paint_bailey_gate(occ: &mut Occupancy, yard: Rect, dir: Dir, motte: Rect) {
         if motte.contains(x, z) {
             continue;
         }
-        occ.set(x, z, CellKind::TownGate, true);
+        occ.set(x, z, CellKind::PalisadeGate, true);
     }
 }
 
@@ -11411,8 +11411,12 @@ mod tests {
             for z in manor.rect.min_z..=manor.rect.max_z {
                 for x in manor.rect.min_x..=manor.rect.max_x {
                     match oak.occ.kind(x, z) {
-                        CellKind::TownWall | CellKind::TownTower => wall += 1,
-                        CellKind::TownGate => gate += 1,
+                        CellKind::TownWall
+                        | CellKind::TownTower
+                        | CellKind::Palisade
+                        | CellKind::FortressWall
+                        | CellKind::FortressTower => wall += 1,
+                        CellKind::TownGate | CellKind::PalisadeGate => gate += 1,
                         _ => {}
                     }
                 }

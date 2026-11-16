@@ -6483,6 +6483,15 @@ fn place_inn_yard(
         }
         return;
     }
+    let against_house = Dir::ALL.iter().any(|dir| {
+        matches!(
+            plan.occ.kind(x + dir.dx(), z + dir.dz()),
+            CellKind::Building | CellKind::Eave
+        )
+    });
+    if against_house {
+        return;
+    }
     let near_well = Dir::ALL
         .iter()
         .any(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) == CellKind::Well);

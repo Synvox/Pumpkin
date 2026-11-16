@@ -623,7 +623,7 @@ fn write_scene_renders(
                 "Siege camp · trebuchets outside, tent rows, palisade, ditch and bank"
             }
             SceneKind::Riverside => "Riverside village · stone bridge, ford and fishing weirs",
-            SceneKind::Manor => "Motte-and-bailey · raised keep, stone curtain, hall and stables",
+            SceneKind::Manor => "Motte-and-bailey · raised keep, palisade bailey, hall and stables",
             SceneKind::HuntingLodge => {
                 "Hunting lodge · deer park, kennels and stables in the forest"
             }
