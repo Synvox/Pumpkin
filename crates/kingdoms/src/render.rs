@@ -369,7 +369,8 @@ fn write_scene_renders(
             | SceneKind::HuntingLodge
             | SceneKind::Shipyard
             | SceneKind::Festival
-            | SceneKind::RidgeMill => 6,
+            | SceneKind::RidgeMill
+            | SceneKind::PilgrimChapel => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -571,6 +572,7 @@ fn write_scene_renders(
         SceneKind::Shipyard,
         SceneKind::Festival,
         SceneKind::RidgeMill,
+        SceneKind::PilgrimChapel,
     ] {
         let Some(scene) = plan.scenes.iter().find(|scene| scene.kind == kind) else {
             continue;
@@ -598,18 +600,27 @@ fn write_scene_renders(
             SceneKind::TollBridge => "Toll bridge · stone arch, gatehouse and tollhouse",
             SceneKind::CharcoalCamp => "Charcoal camp · earth clamps, log piles and huts",
             SceneKind::RoadsideInn => {
-                "Coaching inn · courtyard, stables, hay loft, well and hanging sign"
+                "Coaching inn · open cobble yard, well, cart, hitching rail and trough"
             }
             SceneKind::WalledMarket => "Walled market · guildhall, stalls, palisade, well",
             SceneKind::MillHamlet => "Mill hamlet · wheel, race, granary",
             SceneKind::Beacon => "Hilltop beacon · brazier and watch-fire",
-            SceneKind::Watchtower => "Headland watchtower · stone tower and beacon fire",
-            SceneKind::Tourney => "Jousting lists · sand lane, stands, pavilions beside the castle",
+            SceneKind::Watchtower => {
+                "Watchtower · battered base, machicolations, arrow slits and keeper's hut"
+            }
+            SceneKind::Tourney => {
+                "Jousting lists · long tilt, covered stands, royal box and peaked pavilions"
+            }
             SceneKind::Monastery => {
                 "Priory · cloister garth, chapter house, scriptorium, herb garden"
             }
             SceneKind::Vineyard => "Vineyard · terraced hillside rows and press house",
-            SceneKind::Quarry => "Quarry · stepped pit, jib cranes, cut stone, mason's lodge",
+            SceneKind::Quarry => {
+                "Quarry · hillside benches, jib cranes, cut stone, mason's lodge and hut"
+            }
+            SceneKind::PilgrimChapel => {
+                "Pilgrim chapel · west bell-cote, nave, pews and walled graves"
+            }
             SceneKind::SiegeCamp => {
                 "Siege camp · trebuchets outside, tent rows, palisade, ditch and bank"
             }
@@ -632,6 +643,10 @@ fn write_scene_renders(
         save(
             &out_dir.join(format!("{stem}-scene-{name}-close-sw.png")),
             &render_exterior_rot(volume, rect, 2, title, 1),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-scene-{name}-close-ne.png")),
+            &render_exterior_rot(volume, rect, 2, title, 3),
         )?;
         if kind == SceneKind::Shipyard {
             save(
@@ -1280,7 +1295,7 @@ fn tourney_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
         for x in fallback.min_x..=fallback.max_x {
             if matches!(
                 plan.occ.kind(x, z),
-                CellKind::TourneyList | CellKind::TourneyStand | CellKind::Tent
+                CellKind::TourneyList | CellKind::TourneyStand | CellKind::Tent | CellKind::WarTent
             ) {
                 grow(&mut rect, x, z);
             }
@@ -1319,7 +1334,9 @@ fn quarry_focus_rect(plan: &TownPlan, fallback: Rect) -> Rect {
         }
     }
     for lot in &plan.lots {
-        if lot.kind == BuildingKind::Blacksmith && fallback.intersects(lot.rect) {
+        if matches!(lot.kind, BuildingKind::Blacksmith | BuildingKind::Cottage)
+            && fallback.intersects(lot.rect)
+        {
             grow(&mut rect, lot.rect.min_x, lot.rect.min_z);
             grow(&mut rect, lot.rect.max_x, lot.rect.max_z);
         }
