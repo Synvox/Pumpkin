@@ -106,7 +106,7 @@ assert_eq!(damage_state(&info.id), DamageState::Scarred);
 
 These Y values come from the planner height sampler, not from a finished chunk. Live placement still follows the real column surface, so a repaired column can sit 1–3 blocks off the in-world floor. That is enough to rebuild walls and buildings; a later pass can snap to the live surface if needed.
 
-No siege-repair bots live here yet. This is the lookup they will call.
+After a siege ends or a town changes hands, builder villagers walk a rate-limited queue of missing/wrong blocks vs that plan (gates, then keep, then walls, then houses). The queue and town owner are written to `kingdoms-ownership.json` so a restart keeps the work. A second world attach must not overlay a stale snapshot onto a live town.
 
 ## Hooks (upstreamable)
 
@@ -326,6 +326,10 @@ Front-line snapshot. Does not pause the clock.
     "raiders": 40,
     "raid_side": "pillager",
     "repair_until": 0,
+    "repair_queued": 0,
+    "repair_placed": 0,
+    "repair_pct": 100,
+    "repair_started": 0,
     "live": true,
     "flag": { "x": 1268, "z": 665 },
     "flag_status": "capturing",
@@ -338,7 +342,7 @@ Front-line snapshot. Does not pause the clock.
 
 #### `GET /state`
 
-Pauses the clock. Towns use the battle schema (`id`, `kingdom`, `owner`, `alarm`, `raid_active`, `wave`, `waves`, `defenders_alive`, `raiders_alive`, `defenders_killed`, `raiders_killed`, `threatened_gate`, `gate_breached`, `occupy_hold`, `occupy_need`, `ram_hp`, `flag`, `flag_status`, `flag_paused`, `flag_attackers`, `flag_defenders`) plus logged-in players and troop totals.
+Pauses the clock. Towns use the battle schema (`id`, `kingdom`, `owner`, `alarm`, `raid_active`, `wave`, `waves`, `defenders_alive`, `raiders_alive`, `defenders_killed`, `raiders_killed`, `threatened_gate`, `gate_breached`, `occupy_hold`, `occupy_need`, `ram_hp`, `repair_until`, `repair_queued`, `repair_placed`, `repair_pct`, `repair_started`, `flag`, `flag_status`, `flag_paused`, `flag_attackers`, `flag_defenders`) plus logged-in players, troop totals, and a `repair` summary (`queued`, `placed`, `towns`).
 
 ```json
 {
@@ -403,6 +407,9 @@ Pauses the clock. `{ "name": "Herald", "message": "The gate is down" }` → `{ "
 | `town_captured` | occupy or retake hold completes | capture and retake share this name; `note` says who |
 | `war_clock` | the clock starts a front | |
 | `player_joined_a_kingdom` | `/kingdom join` | `{ "event", "player", "kingdom" }` only |
+| `repair_started` | a siege ends or a town flips | `actor` is queued jobs, `other` is `repair_until` |
+| `repair_progress` | builders place blocks (every 40 ticks) | `actor` is placed, `other` is remaining |
+| `repair_finished` | the queue drains or the window closes | `actor` is placed, `other` is restored pct |
 
 Examples (same envelope, HMAC over the raw bytes):
 

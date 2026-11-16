@@ -11,7 +11,7 @@ pub enum VillagerRole {
     Archer,
     /// Flee to the keep or a house, ring the bell, return after.
     Civilian,
-    /// Hook for later repair-by-diff using `plan.planned_block`. Idle for now.
+    /// Walks the post-siege repair queue and places missing plan blocks.
     Builder,
 }
 

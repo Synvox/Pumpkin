@@ -7,7 +7,7 @@
 //! Villagers reclaim the same way. Ownership is a JSON file in the world
 //! folder so it survives restarts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use pumpkin_core::world::World;
@@ -461,6 +461,22 @@ pub fn load_state(path: &Path) -> SavedState {
             .collect(),
         stats: file.stats,
         wars: file.wars,
+    }
+}
+
+/// Disk wars for towns that are not live. A second `attach_world` must not
+/// overlay a stale snapshot onto a town that already has a repair queue.
+#[allow(clippy::implicit_hasher)]
+pub fn merge_pending_wars(
+    live: &HashSet<String>,
+    disk: HashMap<String, SavedTown>,
+    pending: &mut HashMap<String, SavedTown>,
+) {
+    for (id, saved) in disk {
+        if live.contains(&id) {
+            continue;
+        }
+        pending.entry(id).or_insert(saved);
     }
 }
 
@@ -1504,6 +1520,7 @@ mod tests {
                     y: 64,
                     z: 2,
                     state: 3,
+                    band: 0,
                 }],
                 raid: Some(SavedRaid {
                     id: 9,
@@ -1543,6 +1560,7 @@ mod tests {
         assert_eq!(town.repair_placed, 12);
         assert!(town.gate_breached);
         assert_eq!(town.repair_jobs.len(), 1);
+        assert_eq!(town.repair_jobs[0].band, 0);
         let raid = town.raid.as_ref().expect("raid");
         assert_eq!(raid.id, 9);
         assert_eq!(raid.ghosts.len(), 1);
@@ -1550,5 +1568,49 @@ mod tests {
         assert_eq!(back.clock_tick, 1200);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn second_attach_keeps_live_repair_jobs_off_a_stale_snapshot() {
+        let live = HashSet::from(["20261025:0:0".to_owned()]);
+        let mut pending = HashMap::new();
+        pending.insert(
+            "20261025:0:0".to_owned(),
+            SavedTown {
+                repair_jobs: vec![crate::repair::RepairJob {
+                    x: 4,
+                    y: 70,
+                    z: 5,
+                    state: 9,
+                    band: 1,
+                }],
+                repair_placed: 3,
+                ..SavedTown::default()
+            },
+        );
+        let mut disk = HashMap::new();
+        disk.insert(
+            "20261025:0:0".to_owned(),
+            SavedTown {
+                repair_jobs: Vec::new(),
+                repair_placed: 0,
+                ..SavedTown::default()
+            },
+        );
+        disk.insert(
+            "20261025:1:0".to_owned(),
+            SavedTown {
+                owner: "raven".to_owned(),
+                ..SavedTown::default()
+            },
+        );
+        merge_pending_wars(&live, disk, &mut pending);
+        let live_town = pending.get("20261025:0:0").expect("live town kept");
+        assert_eq!(live_town.repair_jobs.len(), 1);
+        assert_eq!(live_town.repair_placed, 3);
+        assert_eq!(
+            pending.get("20261025:1:0").map(|t| t.owner.as_str()),
+            Some("raven")
+        );
     }
 }
