@@ -1180,7 +1180,7 @@ impl Director {
             repair_queued: u32::try_from(war.repair_jobs.len() + war.repair_assigned.len())
                 .unwrap_or(u32::MAX),
             repair_placed: war.repair_placed,
-            repair_pct: repair_pct(war),
+            repair_pct: repair_display_pct(war),
             repair_started: war.repair_started,
         })
     }
@@ -1244,7 +1244,7 @@ impl Director {
                     repair_queued: u32::try_from(war.repair_jobs.len() + war.repair_assigned.len())
                         .unwrap_or(u32::MAX),
                     repair_placed: war.repair_placed,
-                    repair_pct: repair_pct(war),
+                    repair_pct: repair_display_pct(war),
                     repair_started: war.repair_started,
                     live,
                     flag: (war.scene.flag().x, war.scene.flag().z),
@@ -4801,7 +4801,7 @@ fn repair_progress_event(war: &TownWar, tick: u32, remaining: usize) -> CombatEv
             war.info_id,
             war.repair_placed,
             war.repair_placed.saturating_add(remaining as u32),
-            repair_pct(war)
+            repair_display_pct(war)
         ),
     }
 }
@@ -4811,14 +4811,14 @@ fn repair_finished_event(war: &TownWar, tick: u32) -> CombatEvent {
         tick,
         kind: CombatKind::RepairFinished,
         actor: war.repair_placed as i32,
-        other: Some(repair_pct(war) as i32),
+        other: Some(repair_display_pct(war) as i32),
         x: f64::from(war.scene.keep().x),
         z: f64::from(war.scene.keep().z),
         note: format!(
             "{} repair finished placed={} pct={}",
             war.info_id,
             war.repair_placed,
-            repair_pct(war)
+            repair_display_pct(war)
         ),
     }
 }
@@ -4914,6 +4914,35 @@ fn repair_pct(war: &TownWar) -> u32 {
     repair_match_pct(war.repair_pass_planned, holes)
 }
 
+fn repair_remaining(war: &TownWar) -> usize {
+    war.repair_jobs.len() + war.repair_assigned.len()
+}
+
+/// Queue progress, not the last scan pass. Unloaded columns count as
+/// mismatches, so `repair_last_pct` can sit at 0 after a far-town pass
+/// even when the builders already drained the jobs.
+fn repair_display_pct(war: &TownWar) -> u32 {
+    let remaining_u = u32::try_from(repair_remaining(war)).unwrap_or(u32::MAX);
+    let queue_pct = repair_match_pct(war.repair_placed.saturating_add(remaining_u), remaining_u);
+    if war.repair_placed > 0 {
+        repair_pct(war).max(queue_pct)
+    } else {
+        repair_pct(war)
+    }
+}
+
+fn repair_should_finish(war: &TownWar, tick: u32) -> bool {
+    if war.repair_finished || tick <= war.repair_started {
+        return false;
+    }
+    let remaining = repair_remaining(war);
+    let window_closed = war.repair_until > 0 && tick >= war.repair_until;
+    // A restart restores the queue but not `repair_scan_cursor`. Finish
+    // when the restored jobs drain, not only after a post-restart scan.
+    let drained = remaining == 0 && (war.repair_placed > 0 || war.repair_scan_cursor > 0);
+    window_closed || drained
+}
+
 fn log_repair_progress(town_id: &str, tick: u32) {
     let event = {
         let mut dir = lock();
@@ -4924,15 +4953,8 @@ fn log_repair_progress(town_id: &str, tick: u32) {
             return;
         }
         let elapsed = tick.saturating_sub(war.repair_started);
-        let remaining = war.repair_jobs.len() + war.repair_assigned.len();
-        let remaining_u = u32::try_from(remaining).unwrap_or(u32::MAX);
-        let queue_pct =
-            repair_match_pct(war.repair_placed.saturating_add(remaining_u), remaining_u);
-        let pct = if war.repair_placed > 0 {
-            repair_pct(war).max(queue_pct)
-        } else {
-            repair_pct(war)
-        };
+        let remaining = repair_remaining(war);
+        let pct = repair_display_pct(war);
         let per_min = if elapsed == 0 {
             0.0
         } else {
@@ -4961,9 +4983,7 @@ fn log_repair_progress(town_id: &str, tick: u32) {
                 "kingdoms repair 5min"
             );
         }
-        let window_closed = war.repair_until > 0 && tick >= war.repair_until;
-        let drained = remaining == 0 && war.repair_placed > 0 && war.repair_scan_cursor > 0;
-        if !war.repair_finished && (window_closed || drained) && tick > war.repair_started {
+        if repair_should_finish(war, tick) {
             war.repair_finished = true;
             Some(repair_finished_event(war, tick))
         } else if remaining > 0 && tick.saturating_sub(war.last_repair_event) >= 40 {
@@ -5611,6 +5631,13 @@ fn place_queued_repairs(world: &Arc<World>, town_id: &str, tick: u32, near: bool
             break;
         };
         match world.get_block_state_id_if_loaded(&job.pos()) {
+            None if near => {
+                // Player is here; wait for the chunk instead of burning the job.
+                let mut dir = lock();
+                if let Some(war) = dir.towns.get_mut(town_id) {
+                    war.repair_jobs.push_back(job);
+                }
+            }
             None => {
                 note_repair_restored(town_id, job, tick);
             }
@@ -5620,6 +5647,11 @@ fn place_queued_repairs(world: &Arc<World>, town_id: &str, tick: u32, near: bool
             Some(_) => {
                 if repair::place_one(world, job) {
                     note_repair_restored(town_id, job, tick);
+                } else if near {
+                    let mut dir = lock();
+                    if let Some(war) = dir.towns.get_mut(town_id) {
+                        war.repair_jobs.push_back(job);
+                    }
                 }
             }
         }
@@ -11526,6 +11558,60 @@ mod tests {
             engine_stagger("20261025:-1:0"),
             engine_stagger("20261025:0:0")
         );
+    }
+
+    fn dummy_repair_war() -> TownWar {
+        let origin = crate::town::town_in_cell(3, 0, 0);
+        let grid = crate::height::HeightGrid::synthetic_slope(
+            origin.x - 96,
+            origin.z - 96,
+            origin.x + 96,
+            origin.z + 96,
+            8,
+            70,
+            8,
+            4,
+        );
+        let plan = crate::plan::build_plan(3, origin, grid, crate::palette::PaletteKind::Oak);
+        let scene = crate::scene::TownInfoScene::from_info(crate::info::TownInfo::from_plan(&plan));
+        TownWar::from_scene(scene, TownOwner::kingdom(&KingdomId::new("alder")))
+    }
+
+    #[test]
+    fn repair_display_pct_is_100_once_the_queue_is_empty() {
+        let mut war = dummy_repair_war();
+        war.repair_placed = 242;
+        war.repair_last_pct = 0;
+        war.repair_pass_planned = 0;
+        assert_eq!(repair_display_pct(&war), 100);
+        war.repair_jobs.push_back(RepairJob {
+            x: 1,
+            y: 70,
+            z: 1,
+            state: 4,
+            band: 0,
+        });
+        war.repair_placed = 0;
+        assert_eq!(repair_display_pct(&war), 0);
+    }
+
+    #[test]
+    fn drained_repair_finishes_after_a_restart_without_a_new_scan() {
+        let mut war = dummy_repair_war();
+        war.repair_started = 100;
+        war.repair_until = 2000;
+        war.repair_placed = 24;
+        war.repair_scan_cursor = 0;
+        war.repair_finished = false;
+        assert!(repair_should_finish(&war, 200));
+        war.repair_jobs.push_back(RepairJob {
+            x: 1,
+            y: 70,
+            z: 1,
+            state: 4,
+            band: 0,
+        });
+        assert!(!repair_should_finish(&war, 200));
     }
 
     #[test]
