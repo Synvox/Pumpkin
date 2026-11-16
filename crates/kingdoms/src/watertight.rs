@@ -1340,10 +1340,7 @@ fn is_envelope_solid(state: Option<&BlockState>) -> bool {
     let Some(state) = state else {
         return false;
     };
-    if state.is_air() {
-        return false;
-    }
-    true
+    !state.is_air()
 }
 
 fn count_sky_open(columns: &std::collections::HashSet<(i32, i32)>, volume: &VolumeSink) -> usize {

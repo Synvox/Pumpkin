@@ -545,6 +545,11 @@ fn battle_json(b: &director::BattleState) -> Value {
         "occupy_hold": b.occupy_hold,
         "occupy_need": b.occupy_need,
         "ram_hp": b.ram_hp,
+        "repair_until": b.repair_until,
+        "repair_queued": b.repair_queued,
+        "repair_placed": b.repair_placed,
+        "repair_pct": b.repair_pct,
+        "repair_started": b.repair_started,
         "flag": { "x": b.flag.0, "z": b.flag.1 },
         "flag_status": b.flag_status,
         "flag_paused": b.flag_paused,
@@ -583,6 +588,10 @@ fn war_json() -> Value {
             "raiders": t.raiders,
             "raid_side": t.raid_side,
             "repair_until": t.repair_until,
+            "repair_queued": t.repair_queued,
+            "repair_placed": t.repair_placed,
+            "repair_pct": t.repair_pct,
+            "repair_started": t.repair_started,
             "live": t.live,
             "flag": { "x": t.flag.0, "z": t.flag.1 },
             "flag_status": t.flag_status,
@@ -601,7 +610,11 @@ fn war_json() -> Value {
 fn director_state() -> Value {
     let dir = director::lock();
     let tick = dir.tick;
-    let towns: Vec<Value> = dir.all_battles().iter().map(battle_json).collect();
+    let battles = dir.all_battles();
+    let towns: Vec<Value> = battles.iter().map(battle_json).collect();
+    let repair_queued: u32 = battles.iter().map(|b| b.repair_queued).sum();
+    let repair_placed: u32 = battles.iter().map(|b| b.repair_placed).sum();
+    let repairing = battles.iter().filter(|b| b.repair_until > tick).count();
     let mut players = Vec::new();
     for world in dir.attached_worlds() {
         for p in world.players.load().iter() {
@@ -740,6 +753,11 @@ fn director_state() -> Value {
         "morale": morale,
         "events": events,
         "supply": supply,
+        "repair": {
+            "queued": repair_queued,
+            "placed": repair_placed,
+            "towns": repairing,
+        },
         "troops": { "defenders": defenders, "raiders": raiders },
         "war_clock": !external_director_connected(),
     })
@@ -796,6 +814,9 @@ fn webhook_name(kind: CombatKind) -> Option<&'static str> {
         CombatKind::RankUp => Some("rank_up"),
         CombatKind::SupplyAmbush => Some("supply_ambush"),
         CombatKind::SupplyArrived => Some("supply_arrived"),
+        CombatKind::RepairStarted => Some("repair_started"),
+        CombatKind::RepairProgress => Some("repair_progress"),
+        CombatKind::RepairFinished => Some("repair_finished"),
         _ => None,
     }
 }
@@ -921,6 +942,18 @@ mod tests {
             webhook_name(CombatKind::SupplyArrived),
             Some("supply_arrived")
         );
+        assert_eq!(
+            webhook_name(CombatKind::RepairStarted),
+            Some("repair_started")
+        );
+        assert_eq!(
+            webhook_name(CombatKind::RepairProgress),
+            Some("repair_progress")
+        );
+        assert_eq!(
+            webhook_name(CombatKind::RepairFinished),
+            Some("repair_finished")
+        );
         assert!(webhook_name(CombatKind::Kill).is_none());
     }
 
@@ -969,6 +1002,15 @@ mod tests {
         assert!(v.get("clock").is_some());
         assert!(v.get("towns").is_some());
         assert!(v.get("heroes").is_some());
+    }
+
+    #[test]
+    fn director_state_includes_repair_summary() {
+        let v = director_state();
+        assert!(v.get("repair").is_some());
+        assert!(v["repair"].get("queued").is_some());
+        assert!(v["repair"].get("placed").is_some());
+        assert!(v["repair"].get("towns").is_some());
     }
 
     #[test]

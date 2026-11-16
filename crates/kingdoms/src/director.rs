@@ -185,6 +185,8 @@ static REPAIR_SCANS_THIS_TICK: AtomicU32 = AtomicU32::new(0);
 static REPAIR_PLACES_THIS_TICK: AtomicU32 = AtomicU32::new(0);
 static HEAVY_THIS_TICK: AtomicU32 = AtomicU32::new(0);
 static REPAIR_SCAN_BUSY: AtomicBool = AtomicBool::new(false);
+static REPAIR_QUEUED_TOTAL: AtomicU32 = AtomicU32::new(0);
+static REPAIR_PLACED_TOTAL: AtomicU32 = AtomicU32::new(0);
 
 fn post_y_cache() -> &'static Mutex<HashMap<(i32, i32), i32>> {
     static CACHE: OnceLock<Mutex<HashMap<(i32, i32), i32>>> = OnceLock::new();
@@ -244,6 +246,10 @@ pub struct WarTownLine {
     pub raiders: u32,
     pub raid_side: Option<String>,
     pub repair_until: u32,
+    pub repair_queued: u32,
+    pub repair_placed: u32,
+    pub repair_pct: u32,
+    pub repair_started: u32,
     pub live: bool,
     pub flag: (i32, i32),
     pub flag_status: String,
@@ -281,6 +287,11 @@ pub struct BattleState {
     pub morale: i32,
     pub bounty: Option<String>,
     pub cutoff: bool,
+    pub repair_until: u32,
+    pub repair_queued: u32,
+    pub repair_placed: u32,
+    pub repair_pct: u32,
+    pub repair_started: u32,
 }
 
 /// Live supply cart as shown on `GET /state`.
@@ -330,6 +341,9 @@ pub enum CombatKind {
     RankUp,
     SupplyAmbush,
     SupplyArrived,
+    RepairStarted,
+    RepairProgress,
+    RepairFinished,
 }
 
 impl CombatKind {
@@ -360,6 +374,9 @@ impl CombatKind {
             Self::RankUp => "rank_up",
             Self::SupplyAmbush => "supply_ambush",
             Self::SupplyArrived => "supply_arrived",
+            Self::RepairStarted => "repair_started",
+            Self::RepairProgress => "repair_progress",
+            Self::RepairFinished => "repair_finished",
         }
     }
 }
@@ -598,6 +615,8 @@ struct TownWar {
     repair_last_pct: u32,
     repair_builders_ensured: bool,
     tickets_are_repair: bool,
+    last_repair_event: u32,
+    repair_finished: bool,
     building_fields: HashSet<(i32, i32)>,
     repair_restored: HashSet<(i32, i32, i32)>,
     orphan_sweep: bool,
@@ -701,48 +720,50 @@ impl Director {
         ensure_kingdom_teams(world);
         let path = siege::ownership_path(&world.level.level_folder.root_folder);
         let saved = siege::load_state(&path);
-        self.owners = saved.towns;
-        for (uuid, name) in saved.players {
-            self.player_kingdoms.insert(uuid, KingdomId::new(&name));
+        // Live towns already have owner, raid and repair. A second attach
+        // used to overlay a stale disk snapshot and wipe queued jobs.
+        let live: HashSet<String> = self.towns.keys().cloned().collect();
+        for (id, owner) in saved.towns {
+            if live.contains(&id) {
+                continue;
+            }
+            self.owners.entry(id).or_insert(owner);
         }
-        self.scores = saved.scores;
-        self.player_stats = saved.stats;
-        if saved.clock_tick > 0 {
+        for (uuid, name) in saved.players {
+            self.player_kingdoms
+                .entry(uuid)
+                .or_insert_with(|| KingdomId::new(&name));
+        }
+        for (name, score) in saved.scores {
+            self.scores.entry(name).or_insert(score);
+        }
+        for (uuid, stats) in saved.stats {
+            self.player_stats.entry(uuid).or_insert(stats);
+        }
+        if saved.clock_tick > self.tick {
             self.tick = saved.clock_tick;
         }
-        if saved.next_raid_id > 0 {
+        if saved.next_raid_id > self.next_raid_id {
             self.next_raid_id = saved.next_raid_id;
         }
-        self.last_clock_tick = saved.last_clock_tick;
-        crate::damage::restore(&saved.damage);
-        self.saved_wars = saved.wars;
-        self.ownership_path = Some(path);
-        let existing: Vec<String> = self
-            .saved_wars
-            .keys()
-            .filter(|id| self.towns.contains_key(*id))
-            .cloned()
-            .collect();
-        for id in existing {
-            if let Some(saved_town) = self.saved_wars.remove(&id)
-                && let Some(war) = self.towns.get_mut(&id)
-            {
-                apply_saved_town(war, saved_town, self.tick);
-                self.owners.insert(id.clone(), war.owner.clone());
-            }
+        if saved.last_clock_tick > self.last_clock_tick {
+            self.last_clock_tick = saved.last_clock_tick;
         }
+        if live.is_empty() {
+            crate::damage::restore(&saved.damage);
+        }
+        siege::merge_pending_wars(&live, saved.wars, &mut self.saved_wars);
+        self.ownership_path = Some(path);
         tracing::info!(
             tick = self.tick,
             next_raid = self.next_raid_id,
             last_clock = self.last_clock_tick,
             saved_towns = self.saved_wars.len(),
+            live_towns = live.len(),
             scores = ?self.scores,
             "loaded war state"
         );
         for (id, owner) in &self.owners {
-            if let Some(war) = self.towns.get_mut(id) {
-                war.owner = owner.clone();
-            }
             tracing::info!(
                 town = id.as_str(),
                 owner = owner.as_str(),
@@ -1155,6 +1176,12 @@ impl Director {
             morale: war.morale,
             bounty: war.bounty.map(BountyKind::as_str).map(str::to_owned),
             cutoff: war.cutoff,
+            repair_until: war.repair_until,
+            repair_queued: u32::try_from(war.repair_jobs.len() + war.repair_assigned.len())
+                .unwrap_or(u32::MAX),
+            repair_placed: war.repair_placed,
+            repair_pct: repair_display_pct(war),
+            repair_started: war.repair_started,
         })
     }
 
@@ -1214,6 +1241,11 @@ impl Director {
                     raiders,
                     raid_side: war.raid.as_ref().map(|r| r.spec.side.as_str().to_owned()),
                     repair_until: war.repair_until,
+                    repair_queued: u32::try_from(war.repair_jobs.len() + war.repair_assigned.len())
+                        .unwrap_or(u32::MAX),
+                    repair_placed: war.repair_placed,
+                    repair_pct: repair_display_pct(war),
+                    repair_started: war.repair_started,
                     live,
                     flag: (war.scene.flag().x, war.scene.flag().z),
                     flag_status: flag_status_of(war).to_owned(),
@@ -1617,6 +1649,8 @@ impl TownWar {
             repair_last_pct: 0,
             repair_builders_ensured: false,
             tickets_are_repair: false,
+            last_repair_event: 0,
+            repair_finished: false,
             building_fields: HashSet::new(),
             repair_restored: HashSet::new(),
             orphan_sweep: false,
@@ -1689,7 +1723,7 @@ fn snapshot_town(war: &TownWar, world: Option<&World>) -> siege::SavedTown {
         repair_placed: war.repair_placed,
         gate_breached: war.gate_breached,
         alarm: war.alarm,
-        repair_jobs: war.repair_jobs.iter().copied().collect(),
+        repair_jobs: repair::persistable_jobs(&war.repair_jobs, &war.repair_assigned),
         repair_restored: war.repair_restored.iter().copied().collect(),
         raid,
     }
@@ -1781,6 +1815,7 @@ fn apply_saved_town(war: &mut TownWar, saved: siege::SavedTown, now: u32) {
     war.alarm = saved.alarm;
     war.repair_jobs = saved.repair_jobs.into_iter().collect();
     war.repair_restored = saved.repair_restored.into_iter().collect();
+    war.repair_finished = war.repair_jobs.is_empty() && war.repair_placed > 0;
     war.orphan_sweep = true;
     war.restore_flag = true;
     if let Some(raid) = saved.raid {
@@ -2604,10 +2639,23 @@ fn maybe_soak_sample(world: &World, tick: u32, mspt: f64, director_ms: f64, town
         .map(|w| w.wired.len() + w.raid.as_ref().map_or(0, |r| r.living.len()))
         .sum();
     let live_bodies = dir.live_body_count();
+    let repair_queued: usize = dir
+        .towns
+        .values()
+        .map(|w| w.repair_jobs.len() + w.repair_assigned.len())
+        .sum();
+    let repair_placed: u32 = dir.towns.values().map(|w| w.repair_placed).sum();
+    let capital_lost = dir.towns.values().any(|w| {
+        parse_town_id(&w.info_id).is_some_and(|(_, cx, cz)| cx == 0 && cz == 0)
+            && w.owner.as_str() != w.kingdom.as_str()
+    });
     drop(dir);
     let rss_kb = process_rss_kb();
+    let queued_total = REPAIR_QUEUED_TOTAL.load(Ordering::Relaxed);
+    let placed_total = REPAIR_PLACED_TOTAL.load(Ordering::Relaxed);
     let line = format!(
-        "{tick},{mspt:.2},{director_ms:.2},{entities},{tickets},{rss_kb},{raids},{bodies},{live_fronts},{abstract_fronts},{live_bodies},{towns_us}\n"
+        "{tick},{mspt:.2},{director_ms:.2},{entities},{tickets},{rss_kb},{raids},{bodies},{live_fronts},{abstract_fronts},{live_bodies},{towns_us},{repair_queued},{repair_placed},{queued_total},{placed_total},{}\n",
+        u8::from(capital_lost)
     );
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -3130,6 +3178,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 }
                 war.alarm = hostiles_in_town;
                 begin_repair(war, tick, false);
+                pending_events.push(repair_started_event(war, tick));
                 pending_events.push(CombatEvent {
                     tick,
                     kind: CombatKind::Victory,
@@ -3144,8 +3193,14 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 credit_defense = Some((war.scene.keep(), war.kingdom.clone()));
             }
         }
+        let opened_repair = pending_events
+            .iter()
+            .any(|e| e.kind == CombatKind::RepairStarted);
         for event in pending_events {
             dir.push_event(event);
+        }
+        if opened_repair {
+            dir.persist_dirty = true;
         }
     }
     if ring_bell {
@@ -4690,6 +4745,8 @@ fn begin_repair(war: &mut TownWar, tick: u32, lockout: bool) {
         war.repair_logged_5min = false;
         war.repair_restored.clear();
         war.repair_placed = 0;
+        war.repair_finished = false;
+        war.last_repair_event = 0;
     }
     war.repair_scan_cursor = 0;
     war.repair_pass_planned = 0;
@@ -4713,6 +4770,57 @@ fn begin_repair(war: &mut TownWar, tick: u32, lockout: bool) {
         queued = war.repair_jobs.len(),
         "kingdoms repair window opened"
     );
+}
+
+fn repair_started_event(war: &TownWar, tick: u32) -> CombatEvent {
+    let queued = war.repair_jobs.len() + war.repair_assigned.len();
+    CombatEvent {
+        tick,
+        kind: CombatKind::RepairStarted,
+        actor: queued as i32,
+        other: Some(war.repair_until as i32),
+        x: f64::from(war.scene.keep().x),
+        z: f64::from(war.scene.keep().z),
+        note: format!(
+            "{} repair started queued={queued} until={}",
+            war.info_id, war.repair_until
+        ),
+    }
+}
+
+fn repair_progress_event(war: &TownWar, tick: u32, remaining: usize) -> CombatEvent {
+    CombatEvent {
+        tick,
+        kind: CombatKind::RepairProgress,
+        actor: war.repair_placed as i32,
+        other: Some(remaining as i32),
+        x: f64::from(war.scene.keep().x),
+        z: f64::from(war.scene.keep().z),
+        note: format!(
+            "{} repair {}/{} pct={}",
+            war.info_id,
+            war.repair_placed,
+            war.repair_placed.saturating_add(remaining as u32),
+            repair_display_pct(war)
+        ),
+    }
+}
+
+fn repair_finished_event(war: &TownWar, tick: u32) -> CombatEvent {
+    CombatEvent {
+        tick,
+        kind: CombatKind::RepairFinished,
+        actor: war.repair_placed as i32,
+        other: Some(repair_display_pct(war) as i32),
+        x: f64::from(war.scene.keep().x),
+        z: f64::from(war.scene.keep().z),
+        note: format!(
+            "{} repair finished placed={} pct={}",
+            war.info_id,
+            war.repair_placed,
+            repair_display_pct(war)
+        ),
+    }
 }
 
 fn sync_repair_tickets(town_id: &str, tick: u32, _near: bool) {
@@ -4806,48 +4914,87 @@ fn repair_pct(war: &TownWar) -> u32 {
     repair_match_pct(war.repair_pass_planned, holes)
 }
 
-fn log_repair_progress(town_id: &str, tick: u32) {
-    let mut dir = lock();
-    let Some(war) = dir.towns.get_mut(town_id) else {
-        return;
-    };
-    if war.repair_started == 0 || tick < war.repair_started {
-        return;
-    }
-    let elapsed = tick.saturating_sub(war.repair_started);
-    let remaining = war.repair_jobs.len() + war.repair_assigned.len();
-    let remaining_u = u32::try_from(remaining).unwrap_or(u32::MAX);
+fn repair_remaining(war: &TownWar) -> usize {
+    war.repair_jobs.len() + war.repair_assigned.len()
+}
+
+/// Queue progress, not the last scan pass. Unloaded columns count as
+/// mismatches, so `repair_last_pct` can sit at 0 after a far-town pass
+/// even when the builders already drained the jobs.
+fn repair_display_pct(war: &TownWar) -> u32 {
+    let remaining_u = u32::try_from(repair_remaining(war)).unwrap_or(u32::MAX);
     let queue_pct = repair_match_pct(war.repair_placed.saturating_add(remaining_u), remaining_u);
-    let pct = if war.repair_placed > 0 {
+    if war.repair_placed > 0 {
         repair_pct(war).max(queue_pct)
     } else {
         repair_pct(war)
-    };
-    let per_min = if elapsed == 0 {
-        0.0
-    } else {
-        f64::from(war.repair_placed) * 1_200.0 / f64::from(elapsed)
-    };
-    if elapsed > 0 && elapsed.is_multiple_of(400) {
-        tracing::info!(
-            town = town_id,
-            placed = war.repair_placed,
-            remaining,
-            per_min,
-            pct,
-            "kingdoms repair rate"
-        );
     }
-    if !war.repair_logged_5min && (elapsed >= REPAIR_REPORT_TICKS || tick + 1 >= war.repair_until) {
-        war.repair_logged_5min = true;
-        tracing::info!(
-            town = town_id,
-            placed = war.repair_placed,
-            remaining,
-            per_min,
-            pct,
-            "kingdoms repair 5min"
-        );
+}
+
+fn repair_should_finish(war: &TownWar, tick: u32) -> bool {
+    if war.repair_finished || tick <= war.repair_started {
+        return false;
+    }
+    let remaining = repair_remaining(war);
+    let window_closed = war.repair_until > 0 && tick >= war.repair_until;
+    // A restart restores the queue but not `repair_scan_cursor`. Finish
+    // when the restored jobs drain, not only after a post-restart scan.
+    let drained = remaining == 0 && (war.repair_placed > 0 || war.repair_scan_cursor > 0);
+    window_closed || drained
+}
+
+fn log_repair_progress(town_id: &str, tick: u32) {
+    let event = {
+        let mut dir = lock();
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        if war.repair_started == 0 || tick < war.repair_started {
+            return;
+        }
+        let elapsed = tick.saturating_sub(war.repair_started);
+        let remaining = repair_remaining(war);
+        let pct = repair_display_pct(war);
+        let per_min = if elapsed == 0 {
+            0.0
+        } else {
+            f64::from(war.repair_placed) * 1_200.0 / f64::from(elapsed)
+        };
+        if elapsed > 0 && elapsed.is_multiple_of(400) {
+            tracing::info!(
+                town = town_id,
+                placed = war.repair_placed,
+                remaining,
+                per_min,
+                pct,
+                "kingdoms repair rate"
+            );
+        }
+        if !war.repair_logged_5min
+            && (elapsed >= REPAIR_REPORT_TICKS || tick + 1 >= war.repair_until)
+        {
+            war.repair_logged_5min = true;
+            tracing::info!(
+                town = town_id,
+                placed = war.repair_placed,
+                remaining,
+                per_min,
+                pct,
+                "kingdoms repair 5min"
+            );
+        }
+        if repair_should_finish(war, tick) {
+            war.repair_finished = true;
+            Some(repair_finished_event(war, tick))
+        } else if remaining > 0 && tick.saturating_sub(war.last_repair_event) >= 40 {
+            war.last_repair_event = tick;
+            Some(repair_progress_event(war, tick, remaining))
+        } else {
+            None
+        }
+    };
+    if let Some(event) = event {
+        lock().push_event(event);
     }
 }
 
@@ -5352,6 +5499,7 @@ fn apply_finished_repair_scan() {
         return;
     };
     let mut dir = lock();
+    let mut queued = false;
     if let Some(war) = dir.towns.get_mut(&out.town_id) {
         war.repair_scan_cursor = out.next_cursor;
         war.repair_pass_planned = war.repair_pass_planned.saturating_add(out.planned);
@@ -5364,21 +5512,28 @@ fn apply_finished_repair_scan() {
             war.repair_pass_mismatch = 0;
         }
         if !out.jobs.is_empty() {
-            let jobs: Vec<RepairJob> = out
-                .jobs
-                .into_iter()
-                .filter(|job| !war.repair_restored.contains(&(job.x, job.y, job.z)))
-                .collect();
-            if !jobs.is_empty() {
-                war.repair_jobs = jobs.into_iter().collect();
+            let added = repair::merge_jobs(
+                &mut war.repair_jobs,
+                out.jobs,
+                &war.repair_restored,
+                &war.repair_assigned,
+                REPAIR_QUEUE_CAP,
+            );
+            if added > 0 {
+                REPAIR_QUEUED_TOTAL.fetch_add(added as u32, Ordering::Relaxed);
+                queued = true;
                 tracing::info!(
                     town = out.town_id.as_str(),
                     queued = war.repair_jobs.len(),
+                    added,
                     pct = war.repair_last_pct,
                     "kingdoms builders queued repair jobs"
                 );
             }
         }
+    }
+    if queued {
+        dir.persist_dirty = true;
     }
 }
 
@@ -5434,6 +5589,7 @@ fn note_repair_restored(town_id: &str, job: RepairJob, tick: u32) {
         war.repair_placed = war.repair_placed.saturating_add(1);
         war.repair_placed_this_tick = war.repair_placed_this_tick.saturating_add(1);
         war.last_repair_tick = tick;
+        REPAIR_PLACED_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -5475,6 +5631,13 @@ fn place_queued_repairs(world: &Arc<World>, town_id: &str, tick: u32, near: bool
             break;
         };
         match world.get_block_state_id_if_loaded(&job.pos()) {
+            None if near => {
+                // Player is here; wait for the chunk instead of burning the job.
+                let mut dir = lock();
+                if let Some(war) = dir.towns.get_mut(town_id) {
+                    war.repair_jobs.push_back(job);
+                }
+            }
             None => {
                 note_repair_restored(town_id, job, tick);
             }
@@ -5484,6 +5647,11 @@ fn place_queued_repairs(world: &Arc<World>, town_id: &str, tick: u32, near: bool
             Some(_) => {
                 if repair::place_one(world, job) {
                     note_repair_restored(town_id, job, tick);
+                } else if near {
+                    let mut dir = lock();
+                    if let Some(war) = dir.towns.get_mut(town_id) {
+                        war.repair_jobs.push_back(job);
+                    }
                 }
             }
         }
@@ -5536,7 +5704,9 @@ fn maybe_refill_repair(world: &Arc<World>, town_id: &str, tick: u32, _near: bool
         return;
     }
     let start = cursor % cols.len();
-    let take = REPAIR_SCAN_COLUMNS.saturating_mul(16);
+    // One band of columns per tick. A 64-column inline pass was a 1 s hitch
+    // on debug; the worker still only fills `REPAIR_QUEUE_CAP` jobs.
+    let take = REPAIR_SCAN_COLUMNS;
     let slice: Vec<_> = cols
         .iter()
         .cycle()
@@ -6494,6 +6664,7 @@ fn enqueue_punch_repair(town_id: &str, hits: &[engines::PunchHit], tick: u32) {
                     y: hit.y,
                     z: hit.z,
                     state: hit.was,
+                    band: repair::RepairBand::Wall as u8,
                 });
             }
         }
@@ -7565,7 +7736,7 @@ fn collect_squads(world: &World) -> Vec<SquadCommand> {
                 uuid.clone(),
                 SquadCommand {
                     order: SquadOrder::Follow,
-                    kingdom: kingdom.clone(),
+                    kingdom,
                     hold: PostTarget {
                         x: pos.x.floor() as i32,
                         y: pos.y.floor() as i32,
@@ -9021,6 +9192,9 @@ fn apply_capture(
     if let Some(event) = event {
         dir.push_event(event);
     }
+    if captured || retaken {
+        dir.persist_dirty = true;
+    }
     drop(dir);
     if captured {
         enqueue_capture(PendingFlip {
@@ -9181,15 +9355,25 @@ fn tick_town_flag(
         war.pending_despawn.extend(ids);
         clear_town_alarm(war, town_id);
         begin_repair(war, tick, true);
+        let repair = repair_started_event(war, tick);
+        (
+            update.captured,
+            update.retaken,
+            war.kingdom.clone(),
+            war.scene.keep(),
+            occupy_need,
+            event.or(Some(repair)),
+        )
+    } else {
+        (
+            update.captured,
+            update.retaken,
+            war.kingdom.clone(),
+            war.scene.keep(),
+            occupy_need,
+            event,
+        )
     }
-    (
-        update.captured,
-        update.retaken,
-        war.kingdom.clone(),
-        war.scene.keep(),
-        occupy_need,
-        event,
-    )
 }
 
 fn enqueue_capture(flip: PendingFlip) {
@@ -9538,14 +9722,19 @@ fn tick_abstract_raid(world: &Arc<World>, town_id: &str, tick: u32) {
 
 fn finish_abstract_victory(_world: &Arc<World>, town_id: &str, tick: u32) {
     let mut dir = lock();
-    let Some(war) = dir.towns.get_mut(town_id) else {
-        return;
+    let (started, defenders) = {
+        let Some(war) = dir.towns.get_mut(town_id) else {
+            return;
+        };
+        let Some(raid) = war.raid.take() else {
+            return;
+        };
+        clear_town_alarm(war, town_id);
+        begin_repair(war, tick, false);
+        (repair_started_event(war, tick), raid.virt_defenders)
     };
-    let Some(raid) = war.raid.take() else {
-        return;
-    };
-    clear_town_alarm(war, town_id);
-    begin_repair(war, tick, false);
+    dir.persist_dirty = true;
+    dir.push_event(started);
     dir.push_event(CombatEvent {
         tick,
         kind: CombatKind::Victory,
@@ -9553,10 +9742,7 @@ fn finish_abstract_victory(_world: &Arc<World>, town_id: &str, tick: u32) {
         other: None,
         x: 0.0,
         z: 0.0,
-        note: format!(
-            "{town_id} abstract raid defeated raiders=0 defenders={}",
-            raid.virt_defenders
-        ),
+        note: format!("{town_id} abstract raid defeated raiders=0 defenders={defenders}"),
     });
     tracing::info!(town = town_id, "kingdoms abstract raid defeated");
 }
@@ -11089,6 +11275,11 @@ mod tests {
             morale: 50,
             bounty: None,
             cutoff: false,
+            repair_until: 0,
+            repair_queued: 0,
+            repair_placed: 0,
+            repair_pct: 100,
+            repair_started: 0,
         };
         assert_eq!(state.owner, "pillager");
         assert!(state.gate_breached);
@@ -11371,6 +11562,89 @@ mod tests {
         );
     }
 
+    fn dummy_repair_war() -> TownWar {
+        let origin = crate::town::town_in_cell(3, 0, 0);
+        let grid = crate::height::HeightGrid::synthetic_slope(
+            origin.x - 96,
+            origin.z - 96,
+            origin.x + 96,
+            origin.z + 96,
+            8,
+            70,
+            8,
+            4,
+        );
+        let plan = crate::plan::build_plan(3, origin, grid, crate::palette::PaletteKind::Oak);
+        let scene = crate::scene::TownInfoScene::from_info(crate::info::TownInfo::from_plan(&plan));
+        TownWar::from_scene(scene, TownOwner::kingdom(&KingdomId::new("alder")))
+    }
+
+    #[test]
+    fn repair_display_pct_is_100_once_the_queue_is_empty() {
+        let mut war = dummy_repair_war();
+        war.repair_placed = 242;
+        war.repair_last_pct = 0;
+        war.repair_pass_planned = 0;
+        assert_eq!(repair_display_pct(&war), 100);
+        war.repair_jobs.push_back(RepairJob {
+            x: 1,
+            y: 70,
+            z: 1,
+            state: 4,
+            band: 0,
+        });
+        war.repair_placed = 0;
+        assert_eq!(repair_display_pct(&war), 0);
+    }
+
+    #[test]
+    fn drained_repair_finishes_after_a_restart_without_a_new_scan() {
+        let mut war = dummy_repair_war();
+        war.repair_started = 100;
+        war.repair_until = 2000;
+        war.repair_placed = 24;
+        war.repair_scan_cursor = 0;
+        war.repair_finished = false;
+        assert!(repair_should_finish(&war, 200));
+        war.repair_jobs.push_back(RepairJob {
+            x: 1,
+            y: 70,
+            z: 1,
+            state: 4,
+            band: 0,
+        });
+        assert!(!repair_should_finish(&war, 200));
+    }
+
+    #[test]
+    fn persistable_jobs_keep_assigned_work_for_a_restart() {
+        let queued = VecDeque::from([RepairJob {
+            x: 1,
+            y: 70,
+            z: 1,
+            state: 4,
+            band: 0,
+        }]);
+        let assigned = HashMap::from([(
+            9,
+            RepairJob {
+                x: 8,
+                y: 72,
+                z: 8,
+                state: 5,
+                band: 1,
+            },
+        )]);
+        let jobs = repair::persistable_jobs(&queued, &assigned);
+        let saved = siege::SavedTown {
+            repair_jobs: jobs,
+            repair_placed: 3,
+            ..siege::SavedTown::default()
+        };
+        assert_eq!(saved.repair_jobs.len(), 2);
+        assert!(saved.repair_jobs.iter().any(|j| j.x == 8 && j.band == 1));
+    }
+
     #[test]
     fn combat_kind_names_cover_war_events() {
         assert_eq!(CombatKind::Capture.as_str(), "capture");
@@ -11386,5 +11660,8 @@ mod tests {
         assert_eq!(CombatKind::RankUp.as_str(), "rank_up");
         assert_eq!(CombatKind::SupplyAmbush.as_str(), "supply_ambush");
         assert_eq!(CombatKind::SupplyArrived.as_str(), "supply_arrived");
+        assert_eq!(CombatKind::RepairStarted.as_str(), "repair_started");
+        assert_eq!(CombatKind::RepairProgress.as_str(), "repair_progress");
+        assert_eq!(CombatKind::RepairFinished.as_str(), "repair_finished");
     }
 }
