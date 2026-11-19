@@ -94,6 +94,8 @@ pub enum MarchJob {
     Ladder,
     /// Crossbow line that holds a standoff short of the gate.
     Crossbow,
+    /// Plants and detonates breach charges on walls and gates.
+    Sapper,
 }
 
 impl MarchJob {
@@ -104,7 +106,11 @@ impl MarchJob {
         if index < ram_n {
             return Self::Ram;
         }
-        let rest = index - ram_n;
+        let sapper_n = crate::blast::sapper_count(count as u16);
+        if index < ram_n + sapper_n {
+            return Self::Sapper;
+        }
+        let rest = index - ram_n - sapper_n;
         if rest % 3 == 0 {
             Self::Assault
         } else {
@@ -127,6 +133,7 @@ impl MarchJob {
             Self::Ram => Some(crate::faction::TAG_JOB_RAM),
             Self::Ladder => Some(crate::faction::TAG_JOB_LADDER),
             Self::Crossbow => Some(crate::faction::TAG_JOB_CROSSBOW),
+            Self::Sapper => Some(crate::faction::TAG_JOB_SAPPER),
             Self::Assault => None,
         }
     }
@@ -137,6 +144,9 @@ impl MarchJob {
         for tag in tags {
             if tag == crate::faction::TAG_JOB_RAM {
                 return Self::Ram;
+            }
+            if tag == crate::faction::TAG_JOB_SAPPER {
+                return Self::Sapper;
             }
             if tag == crate::faction::TAG_JOB_LADDER {
                 job = Self::Ladder;
@@ -1421,6 +1431,8 @@ mod tests {
         assert_eq!(MarchJob::assign(3, true), MarchJob::Ram);
         assert_eq!(ram_crew_size(12), 2);
         assert_eq!(ram_crew_size(4), 0);
+        assert_eq!(MarchJob::for_wave_index(4, 40), MarchJob::Sapper);
+        assert_eq!(MarchJob::for_wave_index(5, 40), MarchJob::Sapper);
     }
 
     #[test]

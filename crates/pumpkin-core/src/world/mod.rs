@@ -3975,6 +3975,9 @@ impl World {
         }
 
         let block_count = explosion.explode(self);
+        if let Some(hook) = crate::world::explosion::KINGDOMS_AFTER_EXPLOSION.get() {
+            hook(self, position.x, position.y, position.z, power);
+        }
         let particle = if power < 2.0 {
             Particle::Explosion
         } else {

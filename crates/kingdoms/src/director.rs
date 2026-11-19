@@ -13,6 +13,7 @@ use pumpkin_core::entity::Entity;
 use pumpkin_core::entity::EntityBase;
 use pumpkin_core::entity::mob::Mob;
 use pumpkin_core::entity::player::{Player, TitleMode};
+use pumpkin_core::entity::tnt::TNTEntity;
 use pumpkin_core::world::World;
 use pumpkin_core::world::bossbar::{Bossbar, BossbarDivisions};
 use pumpkin_core::world::scoreboard::{CollisionRule, NameTagVisibility, Team};
@@ -24,6 +25,7 @@ use pumpkin_data::entity::EntityType;
 use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::sound::{Sound, SoundCategory};
+use pumpkin_inventory::Inventory;
 use pumpkin_util::Hand;
 use pumpkin_util::math::boundingbox::BoundingBox;
 use pumpkin_util::math::position::BlockPos;
@@ -42,9 +44,9 @@ use crate::chat::{self, ShoutKind};
 use crate::engines;
 use crate::faction::{
     Faction, KingdomId, TAG_ARMED, TAG_BEARER, TAG_CAPTAIN, TAG_CITIZEN, TAG_MILITIA,
-    TAG_NPC_BLACKSMITH, TAG_NPC_PRIEST, TAG_RAIDER, TAG_ROUTED, TAG_SUPPLY, TAG_TEMP,
-    faction_of_entity, has_tag, is_allied, is_hostile, is_kingdoms_tagged, kingdom_color_rgb,
-    kingdom_tag, role_from_tags,
+    TAG_NPC_BLACKSMITH, TAG_NPC_PRIEST, TAG_NPC_QUARTERMASTER, TAG_RAIDER, TAG_ROUTED, TAG_SUPPLY,
+    TAG_TEMP, faction_of_entity, has_tag, is_allied, is_hostile, is_kingdoms_tagged,
+    kingdom_color_rgb, kingdom_tag, role_from_tags,
 };
 use crate::flow::{DIRECT_RANGE, FlowField, is_squad_leader, should_refresh_path};
 use crate::geom::Rect;
@@ -259,6 +261,11 @@ pub struct WarTownLine {
     pub morale: i32,
     pub bounty: Option<String>,
     pub cutoff: bool,
+    pub explosions: u32,
+    pub sappers_planted: u32,
+    pub sappers_detonated: u32,
+    pub blast_destroyed: u32,
+    pub blast_queued: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -292,6 +299,11 @@ pub struct BattleState {
     pub repair_placed: u32,
     pub repair_pct: u32,
     pub repair_started: u32,
+    pub explosions: u32,
+    pub sappers_planted: u32,
+    pub sappers_detonated: u32,
+    pub blast_destroyed: u32,
+    pub blast_queued: u32,
 }
 
 /// Live supply cart as shown on `GET /state`.
@@ -344,6 +356,9 @@ pub enum CombatKind {
     RepairStarted,
     RepairProgress,
     RepairFinished,
+    Explosion,
+    SapperPlanted,
+    SapperDetonated,
 }
 
 impl CombatKind {
@@ -377,6 +392,9 @@ impl CombatKind {
             Self::RepairStarted => "repair_started",
             Self::RepairProgress => "repair_progress",
             Self::RepairFinished => "repair_finished",
+            Self::Explosion => "explosion",
+            Self::SapperPlanted => "sapper_planted",
+            Self::SapperDetonated => "sapper_detonated",
         }
     }
 }
@@ -520,6 +538,7 @@ pub struct Director {
     last_squad_reply: HashMap<String, u32>,
     morale: HashMap<String, crate::morale::KingdomShock>,
     supply: Vec<SupplyRun>,
+    last_tnt_kit: HashMap<String, u32>,
 }
 
 struct SupplyRun {
@@ -628,6 +647,12 @@ struct TownWar {
     last_delivery: u32,
     cutoff: bool,
     inbound_lost: bool,
+    explosions: u32,
+    sappers_planted: u32,
+    sappers_detonated: u32,
+    blast_destroyed: u32,
+    blast_queued: u32,
+    planted_sappers: HashSet<i32>,
 }
 
 #[derive(Clone)]
@@ -710,6 +735,7 @@ impl Director {
             last_squad_reply: HashMap::new(),
             morale: HashMap::new(),
             supply: Vec::new(),
+            last_tnt_kit: HashMap::new(),
         }
     }
 
@@ -1005,6 +1031,12 @@ impl Director {
             war.crossed_curtain = false;
             war.logged_archer = false;
             war.logged_sally = false;
+            war.explosions = 0;
+            war.sappers_planted = 0;
+            war.sappers_detonated = 0;
+            war.blast_destroyed = 0;
+            war.blast_queued = 0;
+            war.planted_sappers.clear();
             war.occupy_hold = 0;
             war.retake_hold = 0;
             war.ram = None;
@@ -1182,6 +1214,11 @@ impl Director {
             repair_placed: war.repair_placed,
             repair_pct: repair_display_pct(war),
             repair_started: war.repair_started,
+            explosions: war.explosions,
+            sappers_planted: war.sappers_planted,
+            sappers_detonated: war.sappers_detonated,
+            blast_destroyed: war.blast_destroyed,
+            blast_queued: war.blast_queued,
         })
     }
 
@@ -1255,6 +1292,11 @@ impl Director {
                     morale: war.morale,
                     bounty: war.bounty.map(BountyKind::as_str).map(str::to_owned),
                     cutoff: war.cutoff,
+                    explosions: war.explosions,
+                    sappers_planted: war.sappers_planted,
+                    sappers_detonated: war.sappers_detonated,
+                    blast_destroyed: war.blast_destroyed,
+                    blast_queued: war.blast_queued,
                 }
             })
             .collect();
@@ -1662,6 +1704,12 @@ impl TownWar {
             last_delivery: 0,
             cutoff: false,
             inbound_lost: false,
+            explosions: 0,
+            sappers_planted: 0,
+            sappers_detonated: 0,
+            blast_destroyed: 0,
+            blast_queued: 0,
+            planted_sappers: HashSet::new(),
         }
     }
 }
@@ -1779,6 +1827,7 @@ fn job_key(job: MarchJob) -> &'static str {
         MarchJob::Ram => "ram",
         MarchJob::Ladder => "ladder",
         MarchJob::Crossbow => "crossbow",
+        MarchJob::Sapper => "sapper",
         MarchJob::Assault => "assault",
     }
 }
@@ -1788,6 +1837,7 @@ fn job_parse(raw: &str) -> MarchJob {
         "ram" => MarchJob::Ram,
         "ladder" => MarchJob::Ladder,
         "crossbow" => MarchJob::Crossbow,
+        "sapper" => MarchJob::Sapper,
         _ => MarchJob::Assault,
     }
 }
@@ -2010,6 +2060,8 @@ pub fn post_for_role(mob: &dyn Mob, town_id: &str, role: VillagerRole) -> Option
             CivilianPost::Home => pick_home(mob, war.scene.civilian_homes(), war.scene.keep()),
         },
         VillagerRole::Builder => war.scene.keep(),
+        VillagerRole::Quartermaster if war.alarm => war.scene.keep(),
+        VillagerRole::Quartermaster => pick_home(mob, war.scene.workstations(), war.scene.keep()),
     };
     let world = mob.get_entity().world.load();
     let mut y = standing_y(&world, post);
@@ -2269,6 +2321,33 @@ fn kit_player(player: &Player, kingdom: &KingdomId, rank: siege::Rank, give_rewa
     );
 }
 
+fn maybe_give_tnt_kit(player: &Player, rank: siege::Rank) {
+    let want = crate::blast::tnt_kit_count(rank);
+    if want == 0 {
+        return;
+    }
+    let uuid = player.gameprofile.id.to_string();
+    let cooldown = crate::blast::tnt_kit_cooldown();
+    {
+        let mut dir = lock();
+        let at_war = dir.towns.values().any(|w| w.alarm || w.raid.is_some());
+        if !at_war {
+            return;
+        }
+        let now = dir.tick;
+        if !crate::blast::kit_ready(dir.last_tnt_kit.get(&uuid).copied(), now, cooldown) {
+            return;
+        }
+        if dir.last_tnt_kit.len() > 512 {
+            dir.last_tnt_kit.clear();
+        }
+        dir.last_tnt_kit.insert(uuid, now)
+    };
+    let mut stack = ItemStack::new(want, &Item::TNT);
+    let _ = player.inventory.insert_stack_anywhere(&mut stack);
+    player.sync_inventory_to_client();
+}
+
 fn maybe_give_banner(player: &Player, kingdom: &KingdomId, stats: Option<&mut siege::PlayerStats>) {
     let Some(stats) = stats else {
         return;
@@ -2432,6 +2511,7 @@ pub fn respawn_kit(player: &Player) {
         (kingdom, rank)
     };
     kit_player(player, &kingdom, rank, true);
+    maybe_give_tnt_kit(player, rank);
 }
 
 /// Re-apply team colour, leather, and keep spawn after a reconnect.
@@ -3381,6 +3461,42 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         y: keep_dest.y,
         z: (keep_dest.z + inner_gate_dest.z) / 2,
     };
+    let planted_sappers = {
+        let dir = lock();
+        dir.towns
+            .get(town_id)
+            .map(|w| w.planted_sappers.clone())
+            .unwrap_or_default()
+    };
+    let sapper_target = snapshots.iter().find_map(|(entity, faction)| {
+        if !matches!(faction, Faction::Pillager) {
+            return None;
+        }
+        if job_of(entity.get_entity()) != MarchJob::Sapper {
+            return None;
+        }
+        if planted_sappers.contains(&entity.get_entity().entity_id) {
+            return None;
+        }
+        let p = entity.get_entity().pos.load();
+        Some(PostTarget {
+            x: p.x.floor() as i32,
+            y: p.y.floor() as i32,
+            z: p.z.floor() as i32,
+        })
+    });
+    let sapper_retreat_dest = {
+        let (x, z) = crate::blast::sapper_retreat(
+            (march_dest.x, march_dest.z),
+            (camp_dest.x, camp_dest.z),
+            crate::blast::SAPPER_RETREAT,
+        );
+        PostTarget {
+            x,
+            y: march_dest.y,
+            z,
+        }
+    };
     let player_xz = world_player_xz(world);
     arm_militia_tick(&snapshots, alarm);
     shout_named_npcs(world, town_id, tick, alarm, inner_gate_dest);
@@ -3472,6 +3588,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         if !amortizing
             && !is_builder
             && job_of(base) != MarchJob::Ram
+            && job_of(base) != MarchJob::Sapper
             && cull.len() < DESPAWNS_PER_TICK
             && !player_near_list(&player_xz, pos.x, pos.z, PLAYER_CULL_RANGE)
         {
@@ -3609,6 +3726,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 (Faction::Kingdom(_), Some(VillagerRole::Guard)) => {
                     peacetime_guard_dest(id, tick, &wall_dests, &gate_dests, keep_dest)
                 }
+                (Faction::Kingdom(_), Some(VillagerRole::Quartermaster)) => {
+                    pick_ready_dest(id, &work_dests, keep_dest)
+                }
                 (Faction::Kingdom(_), _) => keep_dest,
                 (Faction::Neutral, _) => continue,
             };
@@ -3641,7 +3761,12 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         } else {
             let needs_schedule = !alarm
                 && matches!(faction, Faction::Kingdom(_))
-                && matches!(role, Some(VillagerRole::Civilian | VillagerRole::Guard));
+                && matches!(
+                    role,
+                    Some(
+                        VillagerRole::Civilian | VillagerRole::Guard | VillagerRole::Quartermaster
+                    )
+                );
             let (work_d, home_d, patrol_d) = if needs_schedule {
                 (
                     schedule_civilian_ready(id, world_time, &work_dests, &home_dests, keep_dest),
@@ -3720,11 +3845,28 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         } else {
             overlay_siege_role_dest(dest, id, role, alarm, capturing)
         };
+        let dest = if job == MarchJob::Sapper {
+            if planted_sappers.contains(&id) {
+                sapper_retreat_dest
+            } else if !breached {
+                ram_dest
+            } else {
+                march_dest
+            }
+        } else {
+            dest
+        };
+        let dest = if alarm && role == Some(VillagerRole::Guard) && id % 3 == 1 {
+            sapper_target.unwrap_or(dest)
+        } else {
+            dest
+        };
         let dest = if alarm
             && matches!(faction, Faction::Kingdom(_))
             && role != Some(VillagerRole::Guard)
             && role != Some(VillagerRole::Archer)
             && role != Some(VillagerRole::Builder)
+            && role != Some(VillagerRole::Quartermaster)
         {
             keep_dest
         } else {
@@ -3944,6 +4086,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         tick_siege_engines(world, town_id, tick, alarm);
         log_slow_phase(tick, "engines", engines_started);
     }
+    tick_sappers(world, town_id, tick);
     let ghosts = {
         let dir = lock();
         dir.towns
@@ -4428,7 +4571,10 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         };
         let ring = (i / tents.len().max(1)) as u16;
         let pos = spawn_offset(post, ring, y);
-        if job != MarchJob::Ram && should_virtualize(&players, pos.x, pos.z) {
+        if job != MarchJob::Ram
+            && job != MarchJob::Sapper
+            && should_virtualize(&players, pos.x, pos.z)
+        {
             if remaining == 0 {
                 leftover.push(member);
             } else {
@@ -6449,11 +6595,12 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
             f64::from(origin.z),
             PLAYER_SIM_RANGE,
         );
-        let fired = engines::fire_trebuchet(
+        let fired = engines::fire_trebuchet_kind(
             world,
             Vector3::new(f64::from(origin.x) + 0.5, oy, f64::from(origin.z) + 0.5),
             Vector3::new(f64::from(wall.x) + 0.5, ty, f64::from(wall.z) + 0.5),
             visible,
+            crate::blast::barrel_shot_enabled(),
         );
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
@@ -6605,6 +6752,307 @@ fn note_ladders_raised(dir: &mut Director, town_id: &str, tick: u32, wall: Scene
         z: f64::from(wall.z),
         note: format!("{town_id} assault ladders raised"),
     });
+}
+
+/// Install explosion filters so keep/flag stay standing and blasts queue repair.
+pub fn install_blast_hooks() {
+    let _ = pumpkin_core::world::explosion::KINGDOMS_SHOULD_BLOCK_EXPLODE
+        .set(crate::blast::should_block_explode);
+    let _ = pumpkin_core::world::explosion::KINGDOMS_AFTER_EXPLOSION.set(on_after_explosion);
+}
+
+fn on_after_explosion(world: &World, x: f64, y: f64, z: f64, power: f32) {
+    note_explosion(world, x, y, z, power);
+}
+
+/// Arm keep/flag protection for the in-flight explosion at `(x, z)`.
+pub fn arm_explode_at(world: &World, x: f64, z: f64) {
+    if world.dimension.minecraft_name != Dimension::OVERWORLD.minecraft_name {
+        crate::blast::arm_blast_guard(None);
+        return;
+    }
+    let seed = world.level.seed.0;
+    let bx = x.floor() as i32;
+    let bz = z.floor() as i32;
+    let Some(info) = crate::info::town_info_at(seed, bx, bz) else {
+        crate::blast::arm_blast_guard(None);
+        return;
+    };
+    let scene = TownInfoScene::from_info(info);
+    crate::blast::arm_blast_guard(Some(crate::blast::BlastGuard {
+        keep: scene.keep_rect(),
+        flag: (scene.flag().x, scene.flag().z),
+    }));
+}
+
+/// Extra wall punches, builder-repair jobs, and explosion events after a blast.
+pub fn note_explosion(world: &World, x: f64, y: f64, z: f64, power: f32) {
+    crate::blast::arm_blast_guard(None);
+    if world.dimension.minecraft_name != Dimension::OVERWORLD.minecraft_name {
+        return;
+    }
+    let bx = x.floor() as i32;
+    let by = y.floor() as i32;
+    let bz = z.floor() as i32;
+    let seed = world.level.seed.0;
+    let pos = crate::town::town_containing(seed, bx, bz);
+    let town_id = crate::info::town_id(seed, pos.cell_x, pos.cell_z);
+    let Some(plan) = crate::plan::cached_plan(seed, pos.cell_x, pos.cell_z) else {
+        crate::plan::request_plan(seed, pos.cell_x, pos.cell_z);
+        return;
+    };
+    if !plan.bounds.contains(bx, bz) {
+        return;
+    }
+    let (keep, flag, sapper_near) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(&town_id) else {
+            return;
+        };
+        let keep = war.scene.keep_rect();
+        let flag = (war.scene.flag().x, war.scene.flag().z);
+        let sapper = war.sappers_planted > war.sappers_detonated
+            && war
+                .scene
+                .gates()
+                .iter()
+                .any(|g| (f64::from(g.x) - x).hypot(f64::from(g.z) - z) < 12.0);
+        (keep, flag, sapper)
+    };
+    if crate::blast::is_blast_protected(bx, bz, keep, flag) {
+        return;
+    }
+    let radius = crate::blast::blast_radius(power);
+    let mut hits = engines::collect_punch_hits_r(
+        world,
+        bx,
+        bz,
+        keep,
+        by,
+        crate::blast::breach_bonus().max(1),
+        crate::blast::breach_depth(),
+    );
+    hits.retain(|h| {
+        !crate::blast::is_blast_protected(h.x, h.z, keep, flag)
+            && crate::blast::is_breach_column(plan.occ.kind(h.x, h.z))
+    });
+    let destroyed = u32::try_from(hits.len()).unwrap_or(u32::MAX);
+    let tick = {
+        let dir = lock();
+        dir.tick
+    };
+    enqueue_punch_break(&town_id, hits, tick);
+    let mut columns = Vec::new();
+    for (cx, cz) in crate::blast::columns_in_radius(bx, bz, radius) {
+        if crate::blast::is_blast_protected(cx, cz, keep, flag) {
+            continue;
+        }
+        let kind = plan.occ.kind(cx, cz);
+        if kind == crate::cells::CellKind::Empty {
+            continue;
+        }
+        columns.push((cx, cz, crate::blast::band_for_kind(kind)));
+        if columns.len() >= REPAIR_QUEUE_CAP {
+            break;
+        }
+    }
+    let scan = repair::collect_jobs(world, &plan, &columns, REPAIR_QUEUE_CAP);
+    {
+        let mut dir = lock();
+        let mut n = 0u32;
+        let mut detonate = false;
+        if let Some(war) = dir.towns.get_mut(&town_id) {
+            let added = repair::merge_jobs(
+                &mut war.repair_jobs,
+                scan.jobs,
+                &war.repair_restored,
+                &war.repair_assigned,
+                REPAIR_QUEUE_CAP,
+            );
+            if added > 0 {
+                REPAIR_QUEUED_TOTAL.fetch_add(added as u32, Ordering::Relaxed);
+            }
+            war.blast_destroyed = war.blast_destroyed.saturating_add(destroyed);
+            war.blast_queued = war.blast_queued.saturating_add(added as u32);
+            war.explosions = war.explosions.saturating_add(1);
+            n = war.explosions;
+            if sapper_near {
+                war.sappers_detonated = war.sappers_detonated.saturating_add(1);
+                detonate = true;
+            }
+        }
+        let tick = dir.tick;
+        dir.push_event(CombatEvent {
+            tick,
+            kind: CombatKind::Explosion,
+            actor: 0,
+            other: Some(n as i32),
+            x,
+            z,
+            note: format!("{town_id} explosion power={power:.1}"),
+        });
+        if detonate {
+            dir.push_event(CombatEvent {
+                tick,
+                kind: CombatKind::SapperDetonated,
+                actor: 0,
+                other: None,
+                x,
+                z,
+                note: format!("{town_id} sapper charge detonated"),
+            });
+        }
+    }
+}
+
+/// Right-click a quartermaster: 2 emeralds for 4 TNT.
+pub fn try_trade_tnt(player: &Player, target: &dyn EntityBase) -> bool {
+    let entity = target.get_entity();
+    let role = role_from_tags(entity).and_then(|s| VillagerRole::parse(&s));
+    if role != Some(VillagerRole::Quartermaster) && !has_tag(entity, TAG_NPC_QUARTERMASTER) {
+        return false;
+    }
+    let want = crate::blast::TNT_TRADE_EMERALDS;
+    let have = player.inventory.count(&Item::EMERALD);
+    if have < want {
+        player.send_system_message(
+            &TextComponent::text(format!(
+                "the quartermaster wants {want} emeralds for {} TNT",
+                crate::blast::TNT_TRADE_COUNT
+            ))
+            .color_named(NamedColor::Gold),
+        );
+        return true;
+    }
+    let mut left = want;
+    let size = player.inventory.size();
+    for i in 0..size {
+        if left == 0 {
+            break;
+        }
+        let stack = player.inventory.get_stack(i);
+        if stack.item.id != Item::EMERALD.id || stack.item_count == 0 {
+            continue;
+        }
+        let take = left.min(stack.item_count);
+        let rest = stack.item_count - take;
+        if rest == 0 {
+            player.inventory.set_stack(i, ItemStack::EMPTY.clone());
+        } else {
+            let mut next = stack;
+            next.item_count = rest;
+            player.inventory.set_stack(i, next);
+        }
+        left -= take;
+    }
+    let mut tnt = ItemStack::new(crate::blast::TNT_TRADE_COUNT, &Item::TNT);
+    let _ = player.inventory.insert_stack_anywhere(&mut tnt);
+    player.sync_inventory_to_client();
+    player.send_system_message(
+        &TextComponent::text(format!(
+            "traded {want} emeralds for {} TNT",
+            crate::blast::TNT_TRADE_COUNT
+        ))
+        .color_named(NamedColor::Gold),
+    );
+    true
+}
+
+fn tick_sappers(world: &Arc<World>, town_id: &str, tick: u32) {
+    let (gate, planted, sapper_ids, crew_close, want, already) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        let Some(raid) = war.raid.as_ref() else {
+            return;
+        };
+        if !war.alarm {
+            return;
+        }
+        let keep = war.scene.keep();
+        let mut targets: Vec<(i32, i32)> = war.scene.gates().iter().map(|g| (g.x, g.z)).collect();
+        if let Some(t) = war.threatened
+            && (t.x != keep.x || t.z != keep.z)
+        {
+            targets.push((t.x, t.z));
+        }
+        let ids: Vec<(i32, f64, f64, f64)> = war
+            .wired
+            .iter()
+            .filter(|(_, w)| w.job == MarchJob::Sapper && matches!(w.faction, Faction::Pillager))
+            .map(|(id, w)| (*id, w.x, w.y, w.z))
+            .collect();
+        let range = crate::blast::SAPPER_PLANT_RANGE;
+        let mut plant_at = targets.first().copied().unwrap_or((keep.x, keep.z));
+        let mut crew_close = war.gate_breached;
+        for w in war.wired.values() {
+            if !matches!(w.faction, Faction::Pillager) {
+                continue;
+            }
+            for (tx, tz) in &targets {
+                let dist = (w.x - f64::from(*tx)).hypot(w.z - f64::from(*tz));
+                if dist <= range {
+                    crew_close = true;
+                    plant_at = (*tx, *tz);
+                }
+            }
+        }
+        let gate = ScenePost::new(plant_at.0, plant_at.1);
+        let want = crate::blast::sapper_count(raid.spec.raiders) as u32;
+        (
+            gate,
+            war.planted_sappers.clone(),
+            ids,
+            crew_close,
+            want,
+            war.sappers_planted,
+        )
+    };
+    if want == 0 || already >= want {
+        return;
+    }
+    let y = standing_y(world, gate);
+    let mut actor = 0i32;
+    let mut plant_y = y;
+    let mut close = crew_close;
+    for (id, x, sy, z) in &sapper_ids {
+        if planted.contains(id) {
+            continue;
+        }
+        let dist = (*x - f64::from(gate.x)).hypot(*z - f64::from(gate.z));
+        if crate::blast::sapper_phase(dist, false, crate::blast::SAPPER_FUSE)
+            == crate::blast::SapperPhase::Plant
+        {
+            close = true;
+        }
+        actor = *id;
+        plant_y = y.max(sy.floor() as i32);
+        break;
+    }
+    if !close {
+        return;
+    }
+    let pos = BlockPos::new(gate.x, plant_y, gate.z);
+    let tnt = TNTEntity::primed(world, &pos, crate::blast::SAPPER_FUSE);
+    let _ = world.spawn_entity(tnt);
+    let mut dir = lock();
+    if let Some(war) = dir.towns.get_mut(town_id) {
+        if actor != 0 {
+            war.planted_sappers.insert(actor);
+        }
+        war.sappers_planted = war.sappers_planted.saturating_add(1);
+    }
+    dir.push_event(CombatEvent {
+        tick,
+        kind: CombatKind::SapperPlanted,
+        actor,
+        other: None,
+        x: f64::from(gate.x),
+        z: f64::from(gate.z),
+        note: format!("{town_id} sapper planted a charge"),
+    });
+    tracing::info!(town = town_id, sapper = actor, "kingdoms sapper planted");
 }
 
 fn enqueue_punch_break(town_id: &str, hits: Vec<engines::PunchHit>, tick: u32) {
@@ -6790,11 +7238,12 @@ pub fn try_fire_trebuchet(player: &Player) -> Result<String, String> {
     };
     let oy = f64::from(standing_y(&world, origin) + 8);
     let ty = f64::from(standing_y(&world, wall) + WALL_WALK_LIFT);
-    let fired = engines::fire_trebuchet(
+    let fired = engines::fire_trebuchet_kind(
         &world,
         Vector3::new(f64::from(origin.x) + 0.5, oy, f64::from(origin.z) + 0.5),
         Vector3::new(f64::from(wall.x) + 0.5, ty, f64::from(wall.z) + 0.5),
         true,
+        crate::blast::barrel_shot_enabled(),
     );
     let mut dir = lock();
     let tick = dir.tick;
@@ -7795,6 +8244,9 @@ fn assign_named_npcs(snapshots: &[(Arc<dyn EntityBase>, Faction)]) {
     let mut captain = snapshots
         .iter()
         .any(|(e, _)| has_tag(e.get_entity(), TAG_CAPTAIN));
+    let mut quartermaster = snapshots
+        .iter()
+        .any(|(e, _)| has_tag(e.get_entity(), TAG_NPC_QUARTERMASTER));
     for (entity, _) in snapshots {
         let base = entity.get_entity();
         let role = role_from_tags(base).and_then(|s| VillagerRole::parse(&s));
@@ -7807,6 +8259,9 @@ fn assign_named_npcs(snapshots: &[(Arc<dyn EntityBase>, Faction)]) {
         } else if !captain && role == Some(VillagerRole::Guard) {
             let _ = base.add_scoreboard_tag(TAG_CAPTAIN);
             captain = true;
+        } else if !quartermaster && role == Some(VillagerRole::Quartermaster) {
+            let _ = base.add_scoreboard_tag(TAG_NPC_QUARTERMASTER);
+            quartermaster = true;
         }
     }
 }
@@ -8400,6 +8855,12 @@ fn dest_for(
     if role == Some(VillagerRole::Builder) {
         return repair_dest.unwrap_or(keep_dest);
     }
+    if role == Some(VillagerRole::Quartermaster) {
+        if alarm {
+            return keep_dest;
+        }
+        return work_dest;
+    }
     if role == Some(VillagerRole::Civilian) {
         if capturing && alarm {
             return work_dest;
@@ -8869,7 +9330,7 @@ fn spawn_lod_body(world: &Arc<World>, town_id: &str, ghost: &GhostSoldier) -> Op
     match &ghost.faction {
         Faction::Pillager => {
             let ty = match ghost.job {
-                MarchJob::Ram | MarchJob::Assault => &EntityType::VINDICATOR,
+                MarchJob::Ram | MarchJob::Assault | MarchJob::Sapper => &EntityType::VINDICATOR,
                 MarchJob::Crossbow | MarchJob::Ladder => &EntityType::PILLAGER,
             };
             let entity = Entity::new(world.clone(), pos, ty);
@@ -11280,8 +11741,14 @@ mod tests {
             repair_placed: 0,
             repair_pct: 100,
             repair_started: 0,
+            explosions: 2,
+            sappers_planted: 1,
+            sappers_detonated: 1,
+            blast_destroyed: 6,
+            blast_queued: 8,
         };
         assert_eq!(state.owner, "pillager");
+        assert_eq!(state.explosions, 2);
         assert!(state.gate_breached);
         assert_eq!(state.occupy_need, 3);
         assert_eq!(state.flag_status, "capturing");
@@ -11663,5 +12130,74 @@ mod tests {
         assert_eq!(CombatKind::RepairStarted.as_str(), "repair_started");
         assert_eq!(CombatKind::RepairProgress.as_str(), "repair_progress");
         assert_eq!(CombatKind::RepairFinished.as_str(), "repair_finished");
+        assert_eq!(CombatKind::Explosion.as_str(), "explosion");
+        assert_eq!(CombatKind::SapperPlanted.as_str(), "sapper_planted");
+        assert_eq!(CombatKind::SapperDetonated.as_str(), "sapper_detonated");
+    }
+
+    #[test]
+    fn dest_for_sends_quartermaster_to_the_keep_when_alarmed() {
+        let keep = PostTarget { x: 1, y: 64, z: 1 };
+        let work = PostTarget { x: 9, y: 64, z: 9 };
+        let home = PostTarget { x: 3, y: 64, z: 3 };
+        let patrol = PostTarget { x: 5, y: 70, z: 5 };
+        let march = PostTarget { x: 7, y: 64, z: 7 };
+        let dest = dest_for(
+            &Faction::Kingdom(KingdomId::new("alder")),
+            MarchJob::Assault,
+            Some(VillagerRole::Quartermaster),
+            true,
+            false,
+            false,
+            false,
+            None,
+            march,
+            keep,
+            march,
+            patrol,
+            work,
+            home,
+            patrol,
+            6_000,
+        );
+        assert_eq!((dest.x, dest.z), (keep.x, keep.z));
+        let dest = dest_for(
+            &Faction::Kingdom(KingdomId::new("alder")),
+            MarchJob::Assault,
+            Some(VillagerRole::Quartermaster),
+            false,
+            false,
+            false,
+            false,
+            None,
+            march,
+            keep,
+            march,
+            patrol,
+            work,
+            home,
+            patrol,
+            6_000,
+        );
+        assert_eq!((dest.x, dest.z), (work.x, work.z));
+        let dest = dest_for(
+            &Faction::Pillager,
+            MarchJob::Sapper,
+            None,
+            true,
+            false,
+            false,
+            false,
+            None,
+            march,
+            keep,
+            march,
+            patrol,
+            work,
+            home,
+            patrol,
+            6_000,
+        );
+        assert_eq!((dest.x, dest.z), (march.x, march.z));
     }
 }

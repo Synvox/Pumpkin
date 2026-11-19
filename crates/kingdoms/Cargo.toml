@@ -29,6 +29,7 @@ path = "src/bin/mock_director.rs"
 [dependencies]
 pumpkin-core.workspace = true
 pumpkin-data = { workspace = true, features = ["default"] }
+pumpkin-inventory.workspace = true
 pumpkin-protocol.workspace = true
 pumpkin-util.workspace = true
 pumpkin-world.workspace = true

@@ -3269,6 +3269,7 @@ dependencies = [
  "image",
  "pumpkin-core",
  "pumpkin-data",
+ "pumpkin-inventory",
  "pumpkin-protocol",
  "pumpkin-util",
  "pumpkin-world",

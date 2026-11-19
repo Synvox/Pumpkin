@@ -78,6 +78,7 @@ pub struct TrebShot {
     pub vz: f64,
     pub age: u32,
     pub target_y: f64,
+    pub explosive: bool,
 }
 
 /// Covered ladder tower that walks to the wall.
@@ -257,16 +258,32 @@ pub fn fire_trebuchet(
     target: Vector3<f64>,
     visible: bool,
 ) -> TrebShot {
+    fire_trebuchet_kind(world, origin, target, visible, false)
+}
+
+/// Same as [`fire_trebuchet`], optionally an exploding barrel.
+pub fn fire_trebuchet_kind(
+    world: &Arc<World>,
+    origin: Vector3<f64>,
+    target: Vector3<f64>,
+    visible: bool,
+    explosive: bool,
+) -> TrebShot {
     let (vx, vy, vz) = aim_arc(
         (origin.x, origin.y, origin.z),
         (target.x, target.y, target.z),
         f64::from(TREB_FLIGHT),
         TREB_GRAVITY,
     );
+    let shot_block = if explosive {
+        &Block::BARREL
+    } else {
+        &Block::COBBLESTONE
+    };
     let part = if visible {
         let entity = Entity::new(world.clone(), origin, &EntityType::BLOCK_DISPLAY);
         let display = BlockDisplayEntity::new(entity);
-        display.set_block_state(i32::from(Block::COBBLESTONE.default_state.id.as_u16()));
+        display.set_block_state(i32::from(shot_block.default_state.id.as_u16()));
         display.display.set_teleport_duration(1);
         let id = display.get_entity().entity_id;
         if world.spawn_entity(display) { id } else { -1 }
@@ -283,6 +300,7 @@ pub fn fire_trebuchet(
         vz,
         age: 0,
         target_y: target.y,
+        explosive,
     }
 }
 
@@ -310,13 +328,25 @@ pub fn tick_shot(world: &Arc<World>, shot: &mut TrebShot, keep: Rect) -> Option<
     if !shot_done(shot.age, shot.y, shot.target_y, TREB_FLIGHT) {
         return None;
     }
+    if shot.explosive {
+        despawn_shot(world, shot);
+        world.explode(
+            Vector3::new(shot.x, shot.y, shot.z),
+            4.0,
+            pumpkin_core::world::explosion::ExplosionInteraction::Tnt,
+        );
+        tracing::info!(x = shot.x, z = shot.z, "kingdoms barrel trebuchet impact");
+        return Some(Vec::new());
+    }
     let top = shot.target_y.floor() as i32;
-    let hits = collect_punch_hits(
+    let hits = collect_punch_hits_r(
         world,
         shot.x.floor() as i32,
         shot.z.floor() as i32,
         keep,
         top,
+        IMPACT_RADIUS,
+        IMPACT_DEPTH,
     );
     despawn_shot(world, shot);
     tracing::info!(
@@ -340,15 +370,29 @@ fn despawn_shot(world: &World, shot: &TrebShot) {
 /// `top_y` is the aimed wall height; do not noise-sample the column here.
 #[must_use]
 pub fn collect_punch_hits(world: &World, x: i32, z: i32, keep: Rect, top_y: i32) -> Vec<PunchHit> {
+    collect_punch_hits_r(world, x, z, keep, top_y, IMPACT_RADIUS, IMPACT_DEPTH)
+}
+
+/// Same as [`collect_punch_hits`] with an explicit radius and depth.
+#[must_use]
+pub fn collect_punch_hits_r(
+    world: &World,
+    x: i32,
+    z: i32,
+    keep: Rect,
+    top_y: i32,
+    radius: i32,
+    depth: i32,
+) -> Vec<PunchHit> {
     let mut hits = Vec::new();
-    for dz in -IMPACT_RADIUS..=IMPACT_RADIUS {
-        for dx in -IMPACT_RADIUS..=IMPACT_RADIUS {
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
             let cx = x + dx;
             let cz = z + dz;
             if !punch_column_allowed(cx, cz, keep) {
                 continue;
             }
-            for dy in -IMPACT_DEPTH..=0 {
+            for dy in -depth..=0 {
                 let pos = BlockPos::new(cx, top_y + dy, cz);
                 if !world.is_loaded(&pos) {
                     continue;
@@ -641,5 +685,7 @@ mod tests {
         let hp = tick_crewed_trebuchet(TREB_MAX_HP, 2);
         assert!((hp - (TREB_MAX_HP - 2.0 * TREB_DAMAGE_PER_DEFENDER)).abs() < f32::EPSILON);
         assert!(tick_crewed_trebuchet(1.0, 4) <= 0.0);
+        assert_eq!(crate::blast::BARREL_EXTRA_RADIUS, 1);
+        assert_eq!(crate::blast::BARREL_EXTRA_DEPTH, 1);
     }
 }

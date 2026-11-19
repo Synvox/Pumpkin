@@ -558,6 +558,11 @@ fn battle_json(b: &director::BattleState) -> Value {
         "morale": b.morale,
         "bounty": b.bounty,
         "cutoff": b.cutoff,
+        "explosions": b.explosions,
+        "sappers_planted": b.sappers_planted,
+        "sappers_detonated": b.sappers_detonated,
+        "blast_destroyed": b.blast_destroyed,
+        "blast_queued": b.blast_queued,
     })
 }
 
@@ -601,6 +606,11 @@ fn war_json() -> Value {
             "morale": t.morale,
             "bounty": t.bounty,
             "cutoff": t.cutoff,
+            "explosions": t.explosions,
+            "sappers_planted": t.sappers_planted,
+            "sappers_detonated": t.sappers_detonated,
+            "blast_destroyed": t.blast_destroyed,
+            "blast_queued": t.blast_queued,
         })).collect::<Vec<_>>(),
         "fronts": front.fronts,
         "heroes": director::all_heroes().iter().map(hero_json).collect::<Vec<_>>(),
@@ -817,6 +827,9 @@ fn webhook_name(kind: CombatKind) -> Option<&'static str> {
         CombatKind::RepairStarted => Some("repair_started"),
         CombatKind::RepairProgress => Some("repair_progress"),
         CombatKind::RepairFinished => Some("repair_finished"),
+        CombatKind::Explosion => Some("explosion"),
+        CombatKind::SapperPlanted => Some("sapper_planted"),
+        CombatKind::SapperDetonated => Some("sapper_detonated"),
         _ => None,
     }
 }
@@ -953,6 +966,15 @@ mod tests {
         assert_eq!(
             webhook_name(CombatKind::RepairFinished),
             Some("repair_finished")
+        );
+        assert_eq!(webhook_name(CombatKind::Explosion), Some("explosion"));
+        assert_eq!(
+            webhook_name(CombatKind::SapperPlanted),
+            Some("sapper_planted")
+        );
+        assert_eq!(
+            webhook_name(CombatKind::SapperDetonated),
+            Some("sapper_detonated")
         );
         assert!(webhook_name(CombatKind::Kill).is_none());
     }

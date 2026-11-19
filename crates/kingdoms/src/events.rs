@@ -7,6 +7,8 @@ use pumpkin_core::plugin::api::events::Cancellable;
 use pumpkin_core::plugin::api::events::block::block_break::BlockBreakEvent;
 use pumpkin_core::plugin::api::events::entity::entity_damage_by_entity::EntityDamageByEntityEvent;
 use pumpkin_core::plugin::api::events::entity::entity_death::EntityDeathEvent;
+use pumpkin_core::plugin::api::events::entity::entity_explode::EntityExplodeEvent;
+use pumpkin_core::plugin::api::events::player::player_interact_entity_event::PlayerInteractEntityEvent;
 use pumpkin_core::plugin::api::events::player::player_interact_event::{
     InteractAction, PlayerInteractEvent,
 };
@@ -18,7 +20,9 @@ use pumpkin_core::plugin::api::events::world::world_save::WorldSaveEvent;
 use pumpkin_core::plugin::{EventHandler, EventPriority, Payload, PluginFuture, TypedEventHandler};
 use pumpkin_core::server::Server;
 use pumpkin_data::Block;
+use pumpkin_data::dimension::Dimension;
 use pumpkin_data::item::Item;
+use pumpkin_protocol::java::server::play::ActionType;
 
 use crate::director;
 use crate::faction::{is_allied, is_kingdoms_tagged};
@@ -119,6 +123,26 @@ pub fn register(server: &Server) {
         server,
         Arc::new(TypedEventHandler {
             handler: Arc::new(SaveHandler),
+            priority: EventPriority::Normal,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(ExplodeHandler),
+            priority: EventPriority::High,
+            blocking: true,
+            source: Some("kingdoms".to_owned()),
+            _phantom: std::marker::PhantomData,
+        }),
+    );
+    push_handler(
+        server,
+        Arc::new(TypedEventHandler {
+            handler: Arc::new(NpcInteractHandler),
             priority: EventPriority::Normal,
             blocking: true,
             source: Some("kingdoms".to_owned()),
@@ -322,6 +346,48 @@ impl EventHandler<WorldSaveEvent> for SaveHandler {
     ) -> PluginFuture<'a, ()> {
         Box::pin(async move {
             director::flush_persist();
+        })
+    }
+}
+
+struct ExplodeHandler;
+
+impl EventHandler<EntityExplodeEvent> for ExplodeHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        server: &'a Arc<Server>,
+        event: &'a mut EntityExplodeEvent,
+    ) -> PluginFuture<'a, ()> {
+        Box::pin(async move {
+            if event.cancelled {
+                return;
+            }
+            for world in server.worlds.load().iter() {
+                if world.dimension.minecraft_name != Dimension::OVERWORLD.minecraft_name {
+                    continue;
+                }
+                director::arm_explode_at(world, event.position.x, event.position.z);
+                return;
+            }
+        })
+    }
+}
+
+struct NpcInteractHandler;
+
+impl EventHandler<PlayerInteractEntityEvent> for NpcInteractHandler {
+    fn handle_blocking<'a>(
+        &'a self,
+        _server: &'a Arc<Server>,
+        event: &'a mut PlayerInteractEntityEvent,
+    ) -> PluginFuture<'a, ()> {
+        Box::pin(async move {
+            if event.action != ActionType::Interact && event.action != ActionType::InteractAt {
+                return;
+            }
+            if director::try_trade_tnt(&event.player, event.target.as_ref()) {
+                event.set_cancelled(true);
+            }
         })
     }
 }

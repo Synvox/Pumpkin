@@ -6,12 +6,19 @@
 
 use std::sync::Arc;
 
+use pumpkin_core::block::entities::BlockEntity;
+use pumpkin_core::block::entities::chest::ChestBlockEntity;
 use pumpkin_core::plugin::api::events::world::ChunkPopulateEvent;
 use pumpkin_core::plugin::{EventHandler, PluginFuture};
 use pumpkin_core::server::Server;
 use pumpkin_core::world::World;
+use pumpkin_data::Block;
 use pumpkin_data::dimension::Dimension;
+use pumpkin_data::item::Item;
+use pumpkin_data::item_stack::ItemStack;
+use pumpkin_inventory::Inventory;
 use pumpkin_util::math::boundingbox::BoundingBox;
+use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
 use tracing::debug;
 
@@ -85,6 +92,7 @@ fn populate_chunk(world: &Arc<World>, chunk_x: i32, chunk_z: i32) {
                 spawned += 1;
             }
         }
+        fill_armory_chests(world, &plan, chunk_x, chunk_z);
         if spawned > 0 {
             debug!(
                 town = %town_id,
@@ -93,6 +101,46 @@ fn populate_chunk(world: &Arc<World>, chunk_x: i32, chunk_z: i32) {
                 spawned,
                 "populated town citizens"
             );
+        }
+    }
+}
+
+fn fill_armory_chests(world: &World, plan: &crate::plan::TownPlan, chunk_x: i32, chunk_z: i32) {
+    let want = crate::blast::CHEST_TNT_COUNT;
+    for rect in crate::blast::armory_rects(plan) {
+        for (x, z) in crate::blast::chest_scan_columns(rect, chunk_x, chunk_z) {
+            let ground = world.sample_surface_height(x, z).unwrap_or(world.sea_level);
+            for y in ground.saturating_sub(1)..=ground.saturating_add(6) {
+                let pos = BlockPos::new(x, y, z);
+                if !world.is_loaded(&pos) {
+                    continue;
+                }
+                let (block, _) = world.get_block_and_state(&pos);
+                if block.id != Block::CHEST.id {
+                    continue;
+                }
+                let inv = world.get_block_entity(&pos).map_or_else(
+                    || {
+                        let chest = Arc::new(ChestBlockEntity::new(pos));
+                        world.add_block_entity(chest.clone());
+                        BlockEntity::get_inventory(chest)
+                    },
+                    BlockEntity::get_inventory,
+                );
+                let Some(inv) = inv else {
+                    continue;
+                };
+                if Inventory::count(inv.as_ref(), &Item::TNT) > 0 {
+                    break;
+                }
+                for slot in 0..Inventory::size(inv.as_ref()) {
+                    if Inventory::get_stack(inv.as_ref(), slot).is_empty() {
+                        Inventory::set_stack(inv.as_ref(), slot, ItemStack::new(want, &Item::TNT));
+                        break;
+                    }
+                }
+                break;
+            }
         }
     }
 }
