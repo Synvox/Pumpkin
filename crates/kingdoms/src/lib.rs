@@ -36,6 +36,7 @@ use pumpkin_data::dimension::Dimension;
 use tracing::info;
 
 pub mod abstract_combat;
+pub mod blast;
 pub mod bounty;
 pub mod buildings;
 pub mod castle;
@@ -122,6 +123,7 @@ pub fn install(server: &Server) {
     register_world_init_handler(server);
     events::register(server);
     crate::http::spawn_if_enabled();
+    director::install_blast_hooks();
     info!("Kingdoms plugin installed (towns, villagers, raids)");
 }
 

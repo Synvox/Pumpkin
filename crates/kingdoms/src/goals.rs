@@ -744,6 +744,19 @@ pub fn bind_citizen(
                 }),
             );
         }
+        VillagerRole::Quartermaster => {
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::EMERALD);
+            mob.get_mob_entity().add_goal(
+                1,
+                FleeToKeepGoal::new(move |m| crate::director::keep_if_alarmed(m, &town_flee)),
+            );
+            mob.get_mob_entity().add_goal(
+                4,
+                MoveToPostGoal::new(0.5, move |m| {
+                    crate::director::post_for_role(m, &town, VillagerRole::Quartermaster)
+                }),
+            );
+        }
     }
 }
 
@@ -796,6 +809,10 @@ pub fn bind_raider(
     match job {
         MarchJob::Ram => {
             equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_PICKAXE);
+        }
+        MarchJob::Sapper => {
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::FLINT_AND_STEEL);
+            equip(mob, EquipmentSlot::OFF_HAND, &Item::TNT);
         }
         MarchJob::Assault => {
             equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_AXE);

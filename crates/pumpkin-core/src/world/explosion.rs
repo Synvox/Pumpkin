@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use pumpkin_data::{
     Block, BlockState, BlockStateId,
@@ -18,6 +18,12 @@ use crate::{
 };
 
 use super::{BlockFlags, World};
+
+/// Kingdoms: return false to skip destroying this block. Unset means vanilla.
+pub static KINGDOMS_SHOULD_BLOCK_EXPLODE: OnceLock<fn(i32, i32, i32) -> bool> = OnceLock::new();
+/// Kingdoms: after blocks are destroyed. `(world, x, y, z, power)`.
+#[allow(clippy::type_complexity)]
+pub static KINGDOMS_AFTER_EXPLOSION: OnceLock<fn(&World, f64, f64, f64, f32)> = OnceLock::new();
 
 /// Defines the type of explosion interaction with the world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,11 +71,13 @@ pub trait ExplosionDamageCalculator: Send + Sync {
         &self,
         _explosion: &Explosion,
         _world: &World,
-        _pos: &BlockPos,
+        pos: &BlockPos,
         _block: &Block,
         _power: f32,
     ) -> bool {
-        true
+        KINGDOMS_SHOULD_BLOCK_EXPLODE
+            .get()
+            .is_none_or(|filter| filter(pos.0.x, pos.0.y, pos.0.z))
     }
 
     /// Returns whether the entity should take damage from the explosion.
@@ -160,7 +168,7 @@ impl ExplosionDamageCalculator for SimpleExplosionDamageCalculator {
         &self,
         _explosion: &Explosion,
         _world: &World,
-        _pos: &BlockPos,
+        pos: &BlockPos,
         block: &Block,
         _power: f32,
     ) -> bool {
@@ -172,7 +180,9 @@ impl ExplosionDamageCalculator for SimpleExplosionDamageCalculator {
         {
             return false;
         }
-        true
+        KINGDOMS_SHOULD_BLOCK_EXPLODE
+            .get()
+            .is_none_or(|filter| filter(pos.0.x, pos.0.y, pos.0.z))
     }
 
     fn should_damage_entity(&self, _explosion: &Explosion, _entity: &dyn EntityBase) -> bool {

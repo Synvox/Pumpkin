@@ -118,9 +118,9 @@ pub fn compose_wave(count: u16, _wave: u8) -> Vec<WaveMember> {
         let captain = i == 0;
         let job = crate::siege::MarchJob::for_wave_index(i as usize, n);
         let entity_type = match job {
-            crate::siege::MarchJob::Ram | crate::siege::MarchJob::Assault => {
-                &EntityType::VINDICATOR
-            }
+            crate::siege::MarchJob::Ram
+            | crate::siege::MarchJob::Assault
+            | crate::siege::MarchJob::Sapper => &EntityType::VINDICATOR,
             crate::siege::MarchJob::Crossbow | crate::siege::MarchJob::Ladder => {
                 &EntityType::PILLAGER
             }
@@ -188,6 +188,21 @@ mod tests {
             "crossbows {bows} should outnumber shield {shield}"
         );
         assert!(shield > 0);
+        let big = compose_wave(40, 0);
+        let sappers = big
+            .iter()
+            .filter(|m| m.job == crate::siege::MarchJob::Sapper)
+            .count();
+        assert_eq!(sappers, crate::blast::sapper_count(40));
+        assert!(sappers > 0);
+        let small = compose_wave(12, 0);
+        assert_eq!(
+            small
+                .iter()
+                .filter(|m| m.job == crate::siege::MarchJob::Sapper)
+                .count(),
+            0
+        );
     }
 
     #[test]

@@ -109,6 +109,64 @@ pub fn write_renders(
     Ok(())
 }
 
+/// Iso of one wall section: intact, after a blast crater, then restored.
+pub fn write_breach_sequence(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<(i32, i32)> {
+    std::fs::create_dir_all(out_dir)?;
+    let keep = plan.castle.inner;
+    let flag = plan.castle.flag;
+    let wall = (plan.town.min_x..=plan.town.max_x)
+        .flat_map(|x| (plan.town.min_z..=plan.town.max_z).map(move |z| (x, z)))
+        .find(|&(x, z)| {
+            matches!(
+                plan.occ.kind(x, z),
+                CellKind::TownWall | CellKind::CastleWall
+            ) && ((x - keep.min_x).abs() > 8 || (z - keep.min_z).abs() > 8)
+                && ((x - flag.0).abs() > 6 || (z - flag.1).abs() > 6)
+        })
+        .or_else(|| {
+            (plan.town.min_x..=plan.town.max_x)
+                .flat_map(|x| (plan.town.min_z..=plan.town.max_z).map(move |z| (x, z)))
+                .find(|&(x, z)| {
+                    matches!(
+                        plan.occ.kind(x, z),
+                        CellKind::TownWall | CellKind::CastleWall
+                    )
+                })
+        })
+        .ok_or_else(|| std::io::Error::other("no wall column to render"))?;
+    let (wx, wz) = wall;
+    let pad = 10;
+    let before = render_iso(volume, wx - pad, wz - pad, wx + pad, wz + pad, 10, 1);
+    save(&out_dir.join(format!("{stem}-before.png")), &before)?;
+    let mut crater = clone_volume(volume);
+    let air = Block::AIR.default_state;
+    for dz in -3..=3 {
+        for dx in -3..=3 {
+            if dx * dx + dz * dz > 9 {
+                continue;
+            }
+            let x = wx + dx;
+            let z = wz + dz;
+            let Some((top, _)) = crater.top(x, z) else {
+                continue;
+            };
+            for y in (top - 6)..=top {
+                crater.put(x, y, z, air);
+            }
+        }
+    }
+    let after = render_iso(&crater, wx - pad, wz - pad, wx + pad, wz + pad, 10, 1);
+    save(&out_dir.join(format!("{stem}-after.png")), &after)?;
+    let repaired = render_iso(volume, wx - pad, wz - pad, wx + pad, wz + pad, 10, 1);
+    save(&out_dir.join(format!("{stem}-repaired.png")), &repaired)?;
+    Ok(wall)
+}
+
 fn write_flag_renders(
     plan: &TownPlan,
     volume: &VolumeSink,

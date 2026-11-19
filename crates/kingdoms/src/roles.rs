@@ -13,6 +13,8 @@ pub enum VillagerRole {
     Civilian,
     /// Walks the post-siege repair queue and places missing plan blocks.
     Builder,
+    /// Sells TNT for emeralds at the market / barracks.
+    Quartermaster,
 }
 
 impl VillagerRole {
@@ -23,6 +25,7 @@ impl VillagerRole {
             Self::Archer => "archer",
             Self::Civilian => "civilian",
             Self::Builder => "builder",
+            Self::Quartermaster => "quartermaster",
         }
     }
 
@@ -33,6 +36,7 @@ impl VillagerRole {
             "archer" => Some(Self::Archer),
             "civilian" => Some(Self::Civilian),
             "builder" => Some(Self::Builder),
+            "quartermaster" => Some(Self::Quartermaster),
             _ => None,
         }
     }
@@ -61,6 +65,7 @@ pub struct PopulationSpec {
     pub archers: u16,
     pub civilians: u16,
     pub builders: u16,
+    pub quartermasters: u16,
     pub golems: u16,
 }
 
@@ -77,6 +82,7 @@ impl PopulationSpec {
             archers,
             civilians,
             builders: 4,
+            quartermasters: 1,
             golems: 2,
         }
     }
@@ -105,6 +111,7 @@ impl PopulationSpec {
             .saturating_add(self.archers)
             .saturating_add(self.civilians)
             .saturating_add(self.builders)
+            .saturating_add(self.quartermasters)
             .saturating_add(self.golems)
     }
 }
@@ -146,6 +153,15 @@ pub fn citizen_slots(scene: &dyn TownScene, spec: PopulationSpec) -> Vec<Citizen
         &mut index,
         VillagerRole::Builder,
         spec.builders,
+        scene.rally_points(),
+        scene.keep(),
+        false,
+    );
+    push_role(
+        &mut slots,
+        &mut index,
+        VillagerRole::Quartermaster,
+        spec.quartermasters,
         scene.rally_points(),
         scene.keep(),
         false,
@@ -230,6 +246,13 @@ pub fn select_goal(role: VillagerRole, alarm: bool, in_melee_range: bool) -> Goa
             }
         }
         VillagerRole::Builder => GoalKind::BuilderStub,
+        VillagerRole::Quartermaster => {
+            if alarm {
+                GoalKind::FleeKeep
+            } else {
+                GoalKind::ReturnHome
+            }
+        }
     }
 }
 
@@ -273,6 +296,7 @@ mod tests {
         assert!(slots.iter().any(|s| s.role == VillagerRole::Archer));
         assert!(slots.iter().any(|s| s.role == VillagerRole::Civilian));
         assert!(slots.iter().any(|s| s.role == VillagerRole::Builder));
+        assert!(slots.iter().any(|s| s.role == VillagerRole::Quartermaster));
         assert_eq!(
             slots.iter().filter(|s| s.is_golem).count(),
             spec.golems as usize
@@ -303,6 +327,14 @@ mod tests {
             select_goal(VillagerRole::Builder, true, false),
             GoalKind::BuilderStub
         );
+        assert_eq!(
+            select_goal(VillagerRole::Quartermaster, true, false),
+            GoalKind::FleeKeep
+        );
+        assert_eq!(
+            select_goal(VillagerRole::Quartermaster, false, false),
+            GoalKind::ReturnHome
+        );
     }
 
     #[test]
@@ -312,6 +344,7 @@ mod tests {
             archers: 8,
             civilians: 10,
             builders: 1,
+            quartermasters: 1,
             golems: 2,
         };
         let scaled = spec.with_defenders(200);
