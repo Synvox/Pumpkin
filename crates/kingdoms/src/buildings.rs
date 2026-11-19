@@ -110,7 +110,7 @@ impl BuildingKind {
             Self::Church => 8,
             Self::Windmill => 18,
             Self::Monastery => 9,
-            Self::Watchtower => 14,
+            Self::Watchtower => 16,
             Self::Outpost => 12,
             Self::Cathedral => 16,
             Self::BellTower => 18,

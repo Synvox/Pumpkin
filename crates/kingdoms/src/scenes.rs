@@ -1389,11 +1389,12 @@ fn place_quarry(
     }
     let (cx, cz) = yard.center();
     let downhill = quarry_downhill(grid, yard);
+    // Wide stepped pit cut into the slope, leaving a rim for lodge, hut and heaps.
     let pit = match downhill {
-        Dir::South => Rect::new(cx - 8, yard.min_z + 9, cx + 8, cz + 2),
-        Dir::North => Rect::new(cx - 8, cz - 2, cx + 8, yard.max_z - 9),
-        Dir::East => Rect::new(yard.min_x + 9, cz - 7, cx + 2, cz + 7),
-        Dir::West => Rect::new(cx - 2, cz - 7, yard.max_x - 9, cz + 7),
+        Dir::South => Rect::new(cx - 11, yard.min_z + 9, cx + 11, cz + 4),
+        Dir::North => Rect::new(cx - 11, cz - 4, cx + 11, yard.max_z - 9),
+        Dir::East => Rect::new(yard.min_x + 9, cz - 10, cx + 4, cz + 10),
+        Dir::West => Rect::new(cx - 4, cz - 10, yard.max_x - 9, cz + 10),
     };
     occ.fill(pit, CellKind::CampCourt, true);
     let lodge = match downhill.opposite() {
@@ -1412,38 +1413,76 @@ fn place_quarry(
         downhill,
     );
     let (hw, hd) = BuildingKind::Cottage.size();
-    let hut = match downhill.opposite() {
-        Dir::North => Rect::new(
-            (cx + 6).min(yard.max_x - hw),
-            yard.min_z + 1,
-            (cx + 5 + hw).min(yard.max_x - 1),
-            yard.min_z + hd,
-        ),
-        Dir::South => Rect::new(
-            (cx + 6).min(yard.max_x - hw),
-            yard.max_z - hd,
-            (cx + 5 + hw).min(yard.max_x - 1),
-            yard.max_z - 1,
-        ),
-        Dir::West => Rect::new(
-            yard.min_x + 1,
-            (cz + 5).min(yard.max_z - hd),
-            yard.min_x + hw,
-            (cz + 4 + hd).min(yard.max_z - 1),
-        ),
-        Dir::East => Rect::new(
-            yard.max_x - hw,
-            (cz + 5).min(yard.max_z - hd),
-            yard.max_x - 1,
-            (cz + 4 + hd).min(yard.max_z - 1),
-        ),
+    let hut_pads = match downhill.opposite() {
+        Dir::North => [
+            Rect::new(
+                (cx + 6).min(yard.max_x - hw),
+                yard.min_z + 1,
+                (cx + 5 + hw).min(yard.max_x - 1),
+                yard.min_z + hd,
+            ),
+            Rect::new(
+                (cx - 5 - hw).max(yard.min_x + 1),
+                yard.min_z + 1,
+                (cx - 6).max(yard.min_x + hw),
+                yard.min_z + hd,
+            ),
+        ],
+        Dir::South => [
+            Rect::new(
+                (cx + 6).min(yard.max_x - hw),
+                yard.max_z - hd,
+                (cx + 5 + hw).min(yard.max_x - 1),
+                yard.max_z - 1,
+            ),
+            Rect::new(
+                (cx - 5 - hw).max(yard.min_x + 1),
+                yard.max_z - hd,
+                (cx - 6).max(yard.min_x + hw),
+                yard.max_z - 1,
+            ),
+        ],
+        Dir::West => [
+            Rect::new(
+                yard.min_x + 1,
+                (cz + 5).min(yard.max_z - hd),
+                yard.min_x + hw,
+                (cz + 4 + hd).min(yard.max_z - 1),
+            ),
+            Rect::new(
+                yard.min_x + 1,
+                (cz - 4 - hd).max(yard.min_z + 1),
+                yard.min_x + hw,
+                (cz - 5).max(yard.min_z + hd),
+            ),
+        ],
+        Dir::East => [
+            Rect::new(
+                yard.max_x - hw,
+                (cz + 5).min(yard.max_z - hd),
+                yard.max_x - 1,
+                (cz + 4 + hd).min(yard.max_z - 1),
+            ),
+            Rect::new(
+                yard.max_x - hw,
+                (cz - 4 - hd).max(yard.min_z + 1),
+                yard.max_x - 1,
+                (cz - 5).max(yard.min_z + hd),
+            ),
+        ],
     };
-    if yard.contains(hut.min_x, hut.min_z)
-        && yard.contains(hut.max_x, hut.max_z)
-        && !hut.intersects(lodge)
-        && !hut.intersects(pit)
-    {
-        let _ = force_lot(occ, grid, lots, seed, BuildingKind::Cottage, hut, downhill);
+    let mut hut = hut_pads[0];
+    for pad in hut_pads {
+        if !yard.contains(pad.min_x, pad.min_z) || !yard.contains(pad.max_x, pad.max_z) {
+            continue;
+        }
+        if pad.intersects(lodge) || pad.intersects(pit) {
+            continue;
+        }
+        if force_lot(occ, grid, lots, seed, BuildingKind::Cottage, pad, downhill).is_some() {
+            hut = pad;
+            break;
+        }
     }
     let cranes = match downhill {
         Dir::South | Dir::North => [
@@ -1458,6 +1497,29 @@ fn place_quarry(
     for pad in cranes {
         if yard.contains(pad.min_x, pad.min_z) && yard.contains(pad.max_x, pad.max_z) {
             occ.fill(pad, CellKind::Crane, true);
+        }
+        // Jib occupancy over the pit so the boom hangs above the benches.
+        let (mx, mz) = pad.center();
+        let (px, pz) = pit.center();
+        let toward = if (px - mx).abs() >= (pz - mz).abs() {
+            if px >= mx { Dir::East } else { Dir::West }
+        } else if pz >= mz {
+            Dir::South
+        } else {
+            Dir::North
+        };
+        for boom in 1..=7 {
+            let bx = mx + toward.dx() * boom;
+            let bz = mz + toward.dz() * boom;
+            if !yard.contains(bx, bz) {
+                break;
+            }
+            if matches!(
+                occ.kind(bx, bz),
+                CellKind::CampCourt | CellKind::Green | CellKind::Empty | CellKind::Crane
+            ) {
+                occ.set(bx, bz, CellKind::Crane, true);
+            }
         }
     }
     let stacks = match downhill {
@@ -1505,13 +1567,29 @@ fn place_quarry(
     if yard.contains(track.min_x, track.min_z) && yard.contains(track.max_x, track.max_z) {
         occ.fill(track, CellKind::MineRail, true);
     }
-    let spoil = match downhill {
-        Dir::South => Rect::new(yard.min_x + 2, yard.max_z - 2, yard.max_x - 2, yard.max_z),
-        Dir::North => Rect::new(yard.min_x + 2, yard.min_z, yard.max_x - 2, yard.min_z + 2),
-        Dir::East => Rect::new(yard.max_x - 2, yard.min_z + 2, yard.max_x, yard.max_z - 2),
-        Dir::West => Rect::new(yard.min_x, yard.min_z + 2, yard.min_x + 2, yard.max_z - 2),
+    let spoils = match downhill {
+        Dir::South => [
+            Rect::new(yard.min_x + 1, yard.max_z - 6, cx - 3, yard.max_z),
+            Rect::new(cx + 3, yard.max_z - 6, yard.max_x - 1, yard.max_z),
+        ],
+        Dir::North => [
+            Rect::new(yard.min_x + 1, yard.min_z, cx - 3, yard.min_z + 6),
+            Rect::new(cx + 3, yard.min_z, yard.max_x - 1, yard.min_z + 6),
+        ],
+        Dir::East => [
+            Rect::new(yard.max_x - 6, yard.min_z + 1, yard.max_x, cz - 3),
+            Rect::new(yard.max_x - 6, cz + 3, yard.max_x, yard.max_z - 1),
+        ],
+        Dir::West => [
+            Rect::new(yard.min_x, yard.min_z + 1, yard.min_x + 6, cz - 3),
+            Rect::new(yard.min_x, cz + 3, yard.min_x + 6, yard.max_z - 1),
+        ],
     };
-    occ.fill(spoil, CellKind::MineSpoil, true);
+    for spoil in spoils {
+        if yard.contains(spoil.min_x, spoil.min_z) && yard.contains(spoil.max_x, spoil.max_z) {
+            occ.fill(spoil, CellKind::MineSpoil, true);
+        }
+    }
     scenes.push(Scene {
         kind: SceneKind::Quarry,
         rect: yard,
@@ -1536,7 +1614,7 @@ fn find_quarry_site(
 ) -> Option<Rect> {
     let mut best = None;
     let mut best_score = i32::MIN;
-    for &(w, d) in &[(40, 32), (36, 28)] {
+    for &(w, d) in &[(48, 36), (40, 32), (36, 28)] {
         let mut z = search.min_z + 8;
         while z + d < search.max_z {
             let mut x = search.min_x + 8;
@@ -2282,7 +2360,8 @@ pub fn paint_harbour_town(
         max_z = max_z.max(z);
     }
     paint_inner_sea_quay(occ, grid, lots, town, scenes);
-    paint_quay_and_cranes(occ, grid, lots, search, &docks, scenes);
+    paint_shoreline_quay(occ, grid, lots, search, &docks, scenes);
+    paint_harbour_quay(occ, grid, lots, search, &docks, scenes);
     paint_breakwater(occ, grid, search, &docks);
     for (i, &(x, z)) in docks.iter().enumerate() {
         if i % 4 != 0 {
@@ -2343,7 +2422,10 @@ pub fn paint_harbour_town(
     if boats < 3 {
         force_harbour_boat(occ, grid, search, &docks);
     }
+    // Booms after the cog and skiffs so the jib does not steal the berth.
+    paint_harbour_cranes(occ, grid, search, &docks, scenes);
     paint_harbour_buildings(occ, grid, lots, seed, town, min_x, min_z, max_x, max_z);
+    paint_harbour_fishing_huts(occ, grid, lots, seed, min_x, min_z, max_x, max_z);
     paint_lighthouse(occ, search);
     paint_shipyard(occ, grid, lots, seed, search, town, &docks, scenes);
     for z in search.min_z..=search.max_z {
@@ -2356,6 +2438,7 @@ pub fn paint_harbour_town(
                     | CellKind::Crane
                     | CellKind::Dock
                     | CellKind::Breakwater
+                    | CellKind::Lighthouse
                     | CellKind::Slipway
                     | CellKind::Ropewalk
                     | CellKind::Sawpit
@@ -3135,6 +3218,17 @@ fn harbour_may_overwrite(kind: CellKind) -> bool {
     )
 }
 
+fn hull_keep(occ: &Occupancy, x: i32, z: i32) -> bool {
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            if matches!(occ.kind(x + dx, z + dz), CellKind::Ship | CellKind::Boat) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn harbour_out(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> Option<Dir> {
     Dir::ALL
         .iter()
@@ -3197,6 +3291,10 @@ fn watchtower_keep(scenes: &[Scene], x: i32, z: i32) -> bool {
         .any(|scene| scene.kind == SceneKind::Watchtower && scene.rect.inflate(1).contains(x, z))
 }
 
+fn crane_keep(scenes: &[Scene], x: i32, z: i32) -> bool {
+    watchtower_keep(scenes, x, z)
+}
+
 fn quay_claimable_at(occ: &Occupancy, scenes: &[Scene], x: i32, z: i32) -> bool {
     !watchtower_keep(scenes, x, z) && quay_claimable(occ.kind(x, z))
 }
@@ -3247,6 +3345,71 @@ fn seaward_dir(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> Option<Dir
         }
         false
     })
+}
+
+/// Stone quay following the dry shoreline around the harbour, not a
+/// flattened apron. Two cells deep inland from the water's edge.
+fn paint_shoreline_quay(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    search: Rect,
+    docks: &[(i32, i32)],
+    scenes: &[Scene],
+) {
+    if docks.is_empty() {
+        return;
+    }
+    let mut near = Vec::new();
+    for &(dx, dz) in docks {
+        near.push((dx, dz));
+    }
+    let mut marked = Vec::new();
+    for z in search.min_z..=search.max_z {
+        for x in search.min_x..=search.max_x {
+            if !grid.is_dry(x, z) {
+                continue;
+            }
+            if !quay_claimable_at(occ, scenes, x, z) && occ.kind(x, z) != CellKind::Quay {
+                continue;
+            }
+            if !near
+                .iter()
+                .any(|&(dx, dz)| (x - dx).abs().max((z - dz).abs()) <= 22)
+            {
+                continue;
+            }
+            let wet = Dir::ALL.iter().any(|dir| {
+                let nx = x + dir.dx();
+                let nz = z + dir.dz();
+                !grid.is_dry(nx, nz)
+                    || matches!(
+                        occ.kind(nx, nz),
+                        CellKind::Harbor | CellKind::Dock | CellKind::Boat | CellKind::Ship
+                    )
+            });
+            if !wet {
+                continue;
+            }
+            marked.push((x, z));
+        }
+    }
+    for (x, z) in marked {
+        if quay_claimable_at(occ, scenes, x, z) || occ.kind(x, z) == CellKind::Quay {
+            claim_quay_cell(occ, lots, x, z);
+        }
+        if let Some(out) = harbour_out(occ, grid, x, z) {
+            let inland = out.opposite();
+            let ix = x + inland.dx();
+            let iz = z + inland.dz();
+            if search.contains(ix, iz)
+                && grid.is_dry(ix, iz)
+                && (quay_claimable_at(occ, scenes, ix, iz) || occ.kind(ix, iz) == CellKind::Quay)
+            {
+                claim_quay_cell(occ, lots, ix, iz);
+            }
+        }
+    }
 }
 
 /// Quay on the inner face of a coastal sea wall so the fish market sits
@@ -3383,7 +3546,7 @@ fn hull_rect(sx: i32, sz: i32, dir: Dir, len: i32, beam: i32) -> Rect {
     }
 }
 
-fn hull_cells_ok(occ: &Occupancy, grid: &HeightGrid, search: Rect, hull: Rect) -> bool {
+fn hull_cells_ok(occ: &Occupancy, grid: &HeightGrid, search: Rect, hull: Rect, cog: bool) -> bool {
     let (hx, hz) = hull.center();
     if !water_body_ok(grid, search, hx, hz) {
         return false;
@@ -3400,8 +3563,14 @@ fn hull_cells_ok(occ: &Occupancy, grid: &HeightGrid, search: Rect, hull: Rect) -
             if grid.water_depth(x, z) >= 3 {
                 deep += 1;
             }
+            let kind = occ.kind(x, z);
+            // Skiffs must not punch holes in the cog; stacked boats leave
+            // floating hull fragments.
+            if matches!(kind, CellKind::Ship | CellKind::Boat) && (!cog || kind == CellKind::Boat) {
+                return false;
+            }
             if !matches!(
-                occ.kind(x, z),
+                kind,
                 CellKind::Harbor
                     | CellKind::Dock
                     | CellKind::Empty
@@ -3441,7 +3610,7 @@ fn place_hull(
     } else {
         hull_rect(sx, sz, dir, 5, 3)
     };
-    if !hull_cells_ok(occ, grid, search, hull) {
+    if !hull_cells_ok(occ, grid, search, hull, cog) {
         return false;
     }
     if cog {
@@ -3473,7 +3642,7 @@ fn place_harbour_cog(
                 let sz = z + dir.dz() * step + side.dz() * offset;
                 for &(len, beam) in &[(COG_LEN, COG_BEAM), (COG_LEN, 5), (15, 5), (15, 3)] {
                     let hull = hull_rect(sx, sz, dir, len, beam);
-                    if !hull_cells_ok(occ, grid, search, hull) {
+                    if !hull_cells_ok(occ, grid, search, hull, true) {
                         continue;
                     }
                     let mut score = 0;
@@ -3538,7 +3707,7 @@ fn force_harbour_cog(
                 }
             }
         }
-        if wet >= (cells * 3) / 4 && wet >= 30 && hull_cells_ok(occ, grid, search, hull) {
+        if wet >= (cells * 3) / 4 && wet >= 30 && hull_cells_ok(occ, grid, search, hull, true) {
             occ.fill(hull, CellKind::Ship, true);
             return true;
         }
@@ -3546,7 +3715,7 @@ fn force_harbour_cog(
     false
 }
 
-fn paint_quay_and_cranes(
+fn paint_harbour_quay(
     occ: &mut Occupancy,
     grid: &HeightGrid,
     lots: &mut Vec<Lot>,
@@ -3554,7 +3723,6 @@ fn paint_quay_and_cranes(
     docks: &[(i32, i32)],
     scenes: &[Scene],
 ) {
-    let mut quay = Vec::new();
     for &(x, z) in docks {
         for dir in Dir::ALL {
             for step in 1..=8 {
@@ -3565,7 +3733,6 @@ fn paint_quay_and_cranes(
                 }
                 if grid.is_dry(nx, nz) && quay_claimable_at(occ, scenes, nx, nz) {
                     claim_quay_cell(occ, lots, nx, nz);
-                    quay.push((nx, nz));
                     for thick in 1..=2 {
                         for side in Dir::ALL {
                             let sx = nx + side.dx() * thick;
@@ -3575,11 +3742,27 @@ fn paint_quay_and_cranes(
                                 && quay_claimable_at(occ, scenes, sx, sz)
                             {
                                 claim_quay_cell(occ, lots, sx, sz);
-                                quay.push((sx, sz));
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+fn paint_harbour_cranes(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    docks: &[(i32, i32)],
+    scenes: &[Scene],
+) {
+    let mut quay = Vec::new();
+    for z in search.min_z..=search.max_z {
+        for x in search.min_x..=search.max_x {
+            if occ.kind(x, z) == CellKind::Quay && grid.is_dry(x, z) {
+                quay.push((x, z));
             }
         }
     }
@@ -3604,7 +3787,8 @@ fn paint_quay_and_cranes(
                 let pz = z + dz;
                 if search.contains(px, pz)
                     && grid.is_dry(px, pz)
-                    && !watchtower_keep(scenes, px, pz)
+                    && !crane_keep(scenes, px, pz)
+                    && !hull_keep(occ, px, pz)
                     && harbour_may_overwrite(occ.kind(px, pz))
                 {
                     occ.set(px, pz, CellKind::Crane, true);
@@ -3614,12 +3798,14 @@ fn paint_quay_and_cranes(
         for boom in 1..=4 {
             let bx = x + out.dx() * boom;
             let bz = z + out.dz() * boom;
-            if search.contains(bx, bz)
-                && !watchtower_keep(scenes, bx, bz)
-                && harbour_may_overwrite(occ.kind(bx, bz))
+            if !search.contains(bx, bz)
+                || crane_keep(scenes, bx, bz)
+                || hull_keep(occ, bx, bz)
+                || !harbour_may_overwrite(occ.kind(bx, bz))
             {
-                occ.set(bx, bz, CellKind::Crane, true);
+                break;
             }
+            occ.set(bx, bz, CellKind::Crane, true);
         }
         crane_at.push((x, z));
         cranes += 1;
@@ -3656,7 +3842,8 @@ fn paint_quay_and_cranes(
                     let pz = cz + dz;
                     if search.contains(px, pz)
                         && grid.is_dry(px, pz)
-                        && !watchtower_keep(scenes, px, pz)
+                        && !crane_keep(scenes, px, pz)
+                        && !hull_keep(occ, px, pz)
                         && (harbour_may_overwrite(occ.kind(px, pz))
                             || occ.kind(px, pz) == CellKind::Quay)
                     {
@@ -3667,13 +3854,15 @@ fn paint_quay_and_cranes(
             for boom in 1..=4 {
                 let bx = cx + out.dx() * boom;
                 let bz = cz + out.dz() * boom;
-                if search.contains(bx, bz)
-                    && !watchtower_keep(scenes, bx, bz)
-                    && (harbour_may_overwrite(occ.kind(bx, bz))
+                if !search.contains(bx, bz)
+                    || crane_keep(scenes, bx, bz)
+                    || hull_keep(occ, bx, bz)
+                    || !(harbour_may_overwrite(occ.kind(bx, bz))
                         || occ.kind(bx, bz) == CellKind::Quay)
                 {
-                    occ.set(bx, bz, CellKind::Crane, true);
+                    break;
                 }
+                occ.set(bx, bz, CellKind::Crane, true);
             }
             crane_at.push((cx, cz));
             cranes += 1;
@@ -3695,7 +3884,8 @@ fn paint_quay_and_cranes(
                     let pz = z + dz;
                     if search.contains(px, pz)
                         && grid.is_dry(px, pz)
-                        && !watchtower_keep(scenes, px, pz)
+                        && !crane_keep(scenes, px, pz)
+                        && !hull_keep(occ, px, pz)
                         && (harbour_may_overwrite(occ.kind(px, pz))
                             || occ.kind(px, pz) == CellKind::Quay)
                     {
@@ -3710,13 +3900,17 @@ fn paint_quay_and_cranes(
     if cranes == 0
         && let Some(&(x, z)) = quay.first()
     {
-        if !watchtower_keep(scenes, x, z) && harbour_may_overwrite(occ.kind(x, z)) {
+        if !crane_keep(scenes, x, z)
+            && !hull_keep(occ, x, z)
+            && harbour_may_overwrite(occ.kind(x, z))
+        {
             occ.set(x, z, CellKind::Crane, true);
         }
         for dz in -1..=1 {
             for dx in -1..=1 {
                 if search.contains(x + dx, z + dz)
-                    && !watchtower_keep(scenes, x + dx, z + dz)
+                    && !crane_keep(scenes, x + dx, z + dz)
+                    && !hull_keep(occ, x + dx, z + dz)
                     && harbour_may_overwrite(occ.kind(x + dx, z + dz))
                 {
                     occ.set(x + dx, z + dz, CellKind::Crane, true);
@@ -4026,13 +4220,27 @@ fn paint_harbour_buildings(
     max_z: i32,
 ) {
     let mut warehouses = 0;
-    let mut x = min_x - 4;
-    while x <= max_x + 4 && warehouses < 3 {
-        let mut z = min_z - 4;
-        while z <= max_z + 4 && warehouses < 3 {
+    let mut x = min_x - 6;
+    while x <= max_x + 6 && warehouses < 3 {
+        let mut z = min_z - 6;
+        while z <= max_z + 6 && warehouses < 3 {
             let rect = Rect::new(x, z, x + 9, z + 7);
             z += 10;
-            if town.intersects(rect) {
+            let mut pad_quay = false;
+            let mut near_quay = false;
+            for zz in rect.min_z.saturating_sub(5)..=rect.max_z + 5 {
+                for xx in rect.min_x.saturating_sub(5)..=rect.max_x + 5 {
+                    if occ.kind(xx, zz) != CellKind::Quay {
+                        continue;
+                    }
+                    if rect.contains(xx, zz) {
+                        pad_quay = true;
+                    } else {
+                        near_quay = true;
+                    }
+                }
+            }
+            if pad_quay || !near_quay {
                 continue;
             }
             let placed = if warehouses == 0 {
@@ -4082,6 +4290,84 @@ fn paint_harbour_buildings(
             }
         }
         mx += 9;
+    }
+}
+
+fn paint_harbour_fishing_huts(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    min_x: i32,
+    min_z: i32,
+    max_x: i32,
+    max_z: i32,
+) {
+    let (hw, hd) = (7, 6);
+    let mut huts = 0;
+    let mut x = min_x - 6;
+    while x <= max_x + 6 && huts < 3 {
+        let mut z = min_z - 6;
+        while z <= max_z + 6 && huts < 3 {
+            let rect = Rect::new(x, z, x + hw - 1, z + hd - 1);
+            z += 8;
+            let mut pad_quay = false;
+            let mut near_quay = false;
+            let mut on_water = false;
+            for zz in rect.min_z.saturating_sub(4)..=rect.max_z + 4 {
+                for xx in rect.min_x.saturating_sub(4)..=rect.max_x + 4 {
+                    if matches!(
+                        occ.kind(xx, zz),
+                        CellKind::Harbor | CellKind::Boat | CellKind::Ship
+                    ) || !grid.is_dry(xx, zz)
+                    {
+                        on_water = true;
+                    }
+                    if !matches!(
+                        occ.kind(xx, zz),
+                        CellKind::Quay | CellKind::Dock | CellKind::Crane
+                    ) {
+                        continue;
+                    }
+                    if rect.contains(xx, zz) {
+                        pad_quay = true;
+                    } else {
+                        near_quay = true;
+                    }
+                }
+            }
+            if pad_quay || !near_quay || !on_water {
+                continue;
+            }
+            if mill_sail_keepout(lots, rect) {
+                continue;
+            }
+            let placed = if huts == 0 {
+                force_lot(
+                    occ,
+                    grid,
+                    lots,
+                    seed,
+                    BuildingKind::Cottage,
+                    rect,
+                    Dir::South,
+                )
+            } else {
+                try_lot(
+                    occ,
+                    grid,
+                    lots,
+                    seed,
+                    BuildingKind::Cottage,
+                    rect,
+                    Dir::South,
+                )
+            };
+            if placed.is_some() {
+                huts += 1;
+            }
+        }
+        x += 10;
     }
 }
 
@@ -7371,6 +7657,100 @@ fn place_hamlet(
     }
 }
 
+fn keeper_hut_pads(tower: Rect, w: i32, d: i32) -> [Rect; 8] {
+    [
+        Rect::new(
+            tower.min_x,
+            tower.max_z + 2,
+            tower.min_x + w - 1,
+            tower.max_z + 1 + d,
+        ),
+        Rect::new(
+            tower.max_x - w + 1,
+            tower.max_z + 2,
+            tower.max_x,
+            tower.max_z + 1 + d,
+        ),
+        Rect::new(
+            tower.min_x,
+            tower.min_z - 1 - d,
+            tower.min_x + w - 1,
+            tower.min_z - 2,
+        ),
+        Rect::new(
+            tower.max_x - w + 1,
+            tower.min_z - 1 - d,
+            tower.max_x,
+            tower.min_z - 2,
+        ),
+        Rect::new(
+            tower.max_x + 2,
+            tower.min_z,
+            tower.max_x + 1 + w,
+            tower.min_z + d - 1,
+        ),
+        Rect::new(
+            tower.max_x + 2,
+            tower.max_z - d + 1,
+            tower.max_x + 1 + w,
+            tower.max_z,
+        ),
+        Rect::new(
+            tower.min_x - 1 - w,
+            tower.min_z,
+            tower.min_x - 2,
+            tower.min_z + d - 1,
+        ),
+        Rect::new(
+            tower.min_x - 1 - w,
+            tower.max_z - d + 1,
+            tower.min_x - 2,
+            tower.max_z,
+        ),
+    ]
+}
+
+fn place_keeper_hut(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    tower: Rect,
+) -> Option<Rect> {
+    for &(w, d) in &[(6, 5), (5, 4), (8, 7)] {
+        let mut pads: Vec<Rect> = keeper_hut_pads(tower, w, d).into();
+        // Prefer the flatter pad so the hut actually sits on the peak.
+        pads.sort_by_key(|pad| {
+            if !occ.bounds.contains(pad.min_x, pad.min_z)
+                || !occ.bounds.contains(pad.max_x, pad.max_z)
+            {
+                return i32::MAX;
+            }
+            let (lo, hi) = grid.range(pad.min_x, pad.min_z, pad.max_x, pad.max_z);
+            hi - lo
+        });
+        for pad in pads {
+            if mill_sail_keepout(lots, pad) {
+                continue;
+            }
+            if force_lot(
+                occ,
+                grid,
+                lots,
+                seed,
+                BuildingKind::Cottage,
+                pad,
+                Dir::South,
+            )
+            .is_some()
+            {
+                return Some(pad);
+            }
+        }
+    }
+    None
+}
+
 fn place_watchtower(
     occ: &mut Occupancy,
     grid: &HeightGrid,
@@ -7406,45 +7786,61 @@ fn place_watchtower(
         return;
     }
     let mut scene = rect;
-    // Inland only: eaves (battered base / machicolations) and a 5×4 hut.
+    // Inland only: eaves (battered base / hoarding) and a keeper's hut.
     // Skip both on headlands so the 7×7 tower does not steal the quay.
     if headland.is_none() {
         paint_eaves(occ, rect);
-        let pads = [
-            Rect::new(rect.min_x, rect.max_z + 2, rect.min_x + 4, rect.max_z + 5),
-            Rect::new(rect.min_x, rect.min_z - 5, rect.min_x + 4, rect.min_z - 2),
-            Rect::new(rect.max_x + 2, rect.min_z, rect.max_x + 5, rect.min_z + 4),
-            Rect::new(rect.min_x - 5, rect.min_z, rect.min_x - 2, rect.min_z + 4),
-        ];
-        for pad in pads {
-            if mill_sail_keepout(lots, pad) {
-                continue;
-            }
-            if try_lot(
-                occ,
-                grid,
-                lots,
-                seed,
-                BuildingKind::Cottage,
-                pad,
-                Dir::South,
-            )
-            .is_some()
-            {
-                paint_eaves(occ, pad);
-                scene = Rect::new(
-                    scene.min_x.min(pad.min_x),
-                    scene.min_z.min(pad.min_z),
-                    scene.max_x.max(pad.max_x),
-                    scene.max_z.max(pad.max_z),
-                );
-                break;
-            }
+        if let Some(hut) = place_keeper_hut(occ, grid, lots, seed, rect) {
+            paint_eaves(occ, hut);
+            scene = Rect::new(
+                scene.min_x.min(hut.min_x),
+                scene.min_z.min(hut.min_z),
+                scene.max_x.max(hut.max_x),
+                scene.max_z.max(hut.max_z),
+            );
         }
     }
     scenes.push(Scene {
         kind: SceneKind::Watchtower,
         rect: scene,
+    });
+    // Headland towns still need an inland keeper. Salted search so the
+    // hinterland RNG (charcoal, mill, quarry) stays on the old stream.
+    if headland.is_none() {
+        return;
+    }
+    let mut inland_rng = TownRng::salted(seed, 36, 2);
+    let Some(rect) = find_peak_site(occ, grid, search, town, keep_out, 7, 7, 0, &mut inland_rng)
+    else {
+        return;
+    };
+    if try_lot(
+        occ,
+        grid,
+        lots,
+        seed,
+        BuildingKind::Watchtower,
+        rect,
+        Dir::South,
+    )
+    .is_none()
+    {
+        return;
+    }
+    paint_eaves(occ, rect);
+    let mut inland = rect;
+    if let Some(hut) = place_keeper_hut(occ, grid, lots, seed, rect) {
+        paint_eaves(occ, hut);
+        inland = Rect::new(
+            inland.min_x.min(hut.min_x),
+            inland.min_z.min(hut.min_z),
+            inland.max_x.max(hut.max_x),
+            inland.max_z.max(hut.max_z),
+        );
+    }
+    scenes.push(Scene {
+        kind: SceneKind::Watchtower,
+        rect: inland,
     });
 }
 
@@ -13080,7 +13476,17 @@ mod tests {
                 }
             }
         }
-        assert!(ship_cells.len() >= 20, "cog hull {}", ship_cells.len());
+        let hull_min_x = ship_cells.iter().map(|c| c.0).min().unwrap_or(0);
+        let hull_max_x = ship_cells.iter().map(|c| c.0).max().unwrap_or(0);
+        let hull_min_z = ship_cells.iter().map(|c| c.1).min().unwrap_or(0);
+        let hull_max_z = ship_cells.iter().map(|c| c.1).max().unwrap_or(0);
+        assert!(
+            ship_cells.len() >= 20,
+            "cog hull {} {}x{}",
+            ship_cells.len(),
+            hull_max_x - hull_min_x + 1,
+            hull_max_z - hull_min_z + 1
+        );
         let volume = crate::stamp::fill_volume(&plan);
         let sea = plan.heights.sea_level;
         let mut wool = Vec::new();
@@ -13113,8 +13519,11 @@ mod tests {
         let span_y = max_y - min_y + 1;
         assert!(
             span_xz >= 5 && span_y >= 6 && wool.len() >= 30,
-            "square sail {span_xz}×{span_y} n={}",
-            wool.len()
+            "square sail {span_xz}×{span_y} n={} hull={} {}x{}",
+            wool.len(),
+            ship_cells.len(),
+            hull_max_x - hull_min_x + 1,
+            hull_max_z - hull_min_z + 1
         );
         assert!(stern_deck >= 8, "sterncastle deck {stern_deck}");
         assert!(fence_below >= 1, "rudder below waterline {fence_below}");
@@ -14801,27 +15210,30 @@ mod tests {
             "inn tavern"
         );
 
-        if let Some(tower) = plan.scenes.iter().find(|s| s.kind == SceneKind::Watchtower) {
-            let lot = plan
-                .lots
-                .iter()
-                .find(|lot| lot.kind == BuildingKind::Watchtower && tower.rect.intersects(lot.rect))
-                .expect("inland watchtower lot");
-            assert_eq!(lot.rect.width(), 7, "inland tower width");
-            assert_eq!(lot.rect.depth(), 7, "inland tower depth");
-            assert!(
-                tower.rect.width() <= 13 && tower.rect.depth() <= 13,
-                "inland tower plus hut, not a wide yard {}x{}",
-                tower.rect.width(),
-                tower.rect.depth()
-            );
-            assert!(
-                plan.lots.iter().any(|hut| {
-                    hut.kind == BuildingKind::Cottage && tower.rect.intersects(hut.rect)
-                }),
-                "keeper's hut"
-            );
-        }
+        let tower = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::Watchtower)
+            .expect("inland watchtower");
+        let lot = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Watchtower && tower.rect.intersects(lot.rect))
+            .expect("inland watchtower lot");
+        assert_eq!(lot.rect.width(), 7, "inland tower width");
+        assert_eq!(lot.rect.depth(), 7, "inland tower depth");
+        assert!(
+            tower.rect.width() <= 20 && tower.rect.depth() <= 20,
+            "inland tower plus hut, not a wide yard {}x{}",
+            tower.rect.width(),
+            tower.rect.depth()
+        );
+        assert!(
+            plan.lots.iter().any(|hut| {
+                hut.kind == BuildingKind::Cottage && tower.rect.intersects(hut.rect)
+            }),
+            "keeper's hut"
+        );
 
         let volume = crate::stamp::fill_volume(&plan);
         let mut lecterns = 0;
@@ -14945,5 +15357,280 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn round36_quarry_watchtower_harbour() {
+        use pumpkin_data::Block;
+
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            6,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let quarry = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::Quarry)
+            .expect("quarry");
+        let mut cranes = 0;
+        let mut stone = 0;
+        let mut pit = 0;
+        let mut spoil = 0;
+        let mut crane_min_x = i32::MAX;
+        let mut crane_max_x = i32::MIN;
+        let mut crane_min_z = i32::MAX;
+        let mut crane_max_z = i32::MIN;
+        for z in quarry.rect.min_z..=quarry.rect.max_z {
+            for x in quarry.rect.min_x..=quarry.rect.max_x {
+                match plan.occ.kind(x, z) {
+                    CellKind::Crane => {
+                        cranes += 1;
+                        crane_min_x = crane_min_x.min(x);
+                        crane_max_x = crane_max_x.max(x);
+                        crane_min_z = crane_min_z.min(z);
+                        crane_max_z = crane_max_z.max(z);
+                    }
+                    CellKind::CutStone => stone += 1,
+                    CellKind::CampCourt => pit += 1,
+                    CellKind::MineSpoil => spoil += 1,
+                    _ => {}
+                }
+            }
+        }
+        let boom_span = (crane_max_x - crane_min_x + 1).max(crane_max_z - crane_min_z + 1);
+        assert!(cranes >= 16, "quarry crane occupancy {cranes}");
+        assert!(boom_span >= 8, "jib boom span {boom_span}");
+        assert!(stone >= 8, "cut stone {stone}");
+        assert!(pit >= 40, "stepped quarry pit {pit}");
+        assert!(spoil >= 16, "spoil heaps {spoil}");
+        let (qlo, qhi) = plan.heights.range(
+            quarry.rect.min_x,
+            quarry.rect.min_z,
+            quarry.rect.max_x,
+            quarry.rect.max_z,
+        );
+        assert!(qhi > qlo, "quarry on a slope {qlo}/{qhi}");
+        assert!(
+            plan.lots.iter().any(|lot| {
+                lot.kind == BuildingKind::Blacksmith && quarry.rect.intersects(lot.rect)
+            }),
+            "mason's lodge"
+        );
+        assert!(
+            plan.lots.iter().any(|lot| {
+                lot.kind == BuildingKind::Cottage && quarry.rect.intersects(lot.rect)
+            }),
+            "quarrymen's hut"
+        );
+
+        let tower = plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::Watchtower)
+            .expect("inland watchtower");
+        let lot = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Watchtower && tower.rect.intersects(lot.rect))
+            .expect("inland watchtower lot");
+        assert_eq!(lot.rect.width(), 7, "inland tower width");
+        assert_eq!(lot.rect.depth(), 7, "inland tower depth");
+        let hut = plan
+            .lots
+            .iter()
+            .find(|hut| hut.kind == BuildingKind::Cottage && tower.rect.intersects(hut.rect));
+        assert!(hut.is_some(), "keeper's hut must place inland");
+
+        let volume = crate::stamp::fill_volume(&plan);
+        let mut stairs = 0;
+        let mut beds = 0;
+        let mut chests = 0;
+        let mut campfires = 0;
+        let mut logs = 0;
+        let mut fences = 0;
+        let mut ashlars = 0;
+        for z in lot.rect.min_z..=lot.rect.max_z {
+            for x in lot.rect.min_x..=lot.rect.max_x {
+                for y in volume.min_y..volume.min_y + volume.sy {
+                    let Some(state) = volume.get(x, y, z) else {
+                        continue;
+                    };
+                    let id = Block::from_state_id(state.id).id;
+                    if id == Block::OAK_STAIRS.id {
+                        stairs += 1;
+                    }
+                    if id == Block::WHITE_BED.id {
+                        beds += 1;
+                    }
+                    if id == Block::CHEST.id {
+                        chests += 1;
+                    }
+                    if id == Block::CAMPFIRE.id {
+                        campfires += 1;
+                    }
+                }
+            }
+        }
+        for z in quarry.rect.min_z..=quarry.rect.max_z {
+            for x in quarry.rect.min_x..=quarry.rect.max_x {
+                if plan.occ.kind(x, z) != CellKind::Crane {
+                    continue;
+                }
+                for y in volume.min_y..volume.min_y + volume.sy {
+                    let Some(state) = volume.get(x, y, z) else {
+                        continue;
+                    };
+                    let id = Block::from_state_id(state.id).id;
+                    if id == Block::OAK_LOG.id {
+                        logs += 1;
+                    }
+                    if id == Block::OAK_FENCE.id {
+                        fences += 1;
+                    }
+                    if id == Block::STONE_BRICKS.id || id == Block::MOSSY_STONE_BRICKS.id {
+                        ashlars += 1;
+                    }
+                }
+            }
+        }
+        assert!(stairs >= 8, "watchtower spiral stairs {stairs}");
+        assert!(beds >= 1, "watchtower bunk {beds}");
+        assert!(chests >= 1, "watchtower stores {chests}");
+        assert!(campfires >= 1, "watchtower beacon {campfires}");
+        assert!(logs >= 20, "quarry jib timber {logs}");
+        assert!(fences >= 8, "quarry hoist rope {fences}");
+        assert!(ashlars >= 1, "hanging ashlar {ashlars}");
+
+        let check = crate::watertight::check_town(&plan, &volume);
+        let fails: Vec<_> = check
+            .failures()
+            .into_iter()
+            .filter(|b| {
+                b.name.contains("Watchtower")
+                    || b.name.contains("Cottage")
+                    || b.name.contains("Blacksmith")
+            })
+            .map(|b| b.name.clone())
+            .collect();
+        assert!(fails.is_empty(), "enclosed round 36 pieces: {fails:?}");
+        let floating = crate::watertight::check_floating_fragments(&plan, &volume);
+        assert!(
+            floating.is_empty(),
+            "plains floating:\n{}",
+            floating.join("\n")
+        );
+
+        let water = HeightGrid::synthetic_river(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            80,
+            18,
+            8,
+            origin.z + 40,
+        );
+        let harbour_plan = build_plan(3, origin, water, PaletteKind::Oak);
+        let harbour = harbour_plan
+            .scenes
+            .iter()
+            .find(|s| s.kind == SceneKind::Harbour)
+            .expect("harbour town");
+        let mut quay = 0;
+        let mut crane = 0;
+        let mut boat = 0;
+        let mut light = 0;
+        for z in harbour_plan.bounds.min_z..=harbour_plan.bounds.max_z {
+            for x in harbour_plan.bounds.min_x..=harbour_plan.bounds.max_x {
+                match harbour_plan.occ.kind(x, z) {
+                    CellKind::Quay if harbour.rect.inflate(16).contains(x, z) => quay += 1,
+                    CellKind::Crane if harbour.rect.inflate(16).contains(x, z) => crane += 1,
+                    CellKind::Boat | CellKind::Ship if harbour.rect.inflate(24).contains(x, z) => {
+                        boat += 1;
+                    }
+                    CellKind::Lighthouse => light += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(quay >= 16, "shoreline quay {quay}");
+        assert!(crane >= 16, "harbour jib cranes {crane}");
+        assert!(boat >= 8, "moored boats {boat}");
+        assert!(light >= 4, "lighthouse {light}");
+        let near_quay = |lot: &Lot| {
+            lot.rect.inflate(6).min_x <= harbour_plan.bounds.max_x
+                && (lot.rect.min_x.saturating_sub(6)..=lot.rect.max_x + 6).any(|x| {
+                    (lot.rect.min_z.saturating_sub(6)..=lot.rect.max_z + 6).any(|z| {
+                        matches!(
+                            harbour_plan.occ.kind(x, z),
+                            CellKind::Quay | CellKind::Dock | CellKind::Crane
+                        )
+                    })
+                })
+        };
+        let huts = harbour_plan
+            .lots
+            .iter()
+            .filter(|lot| lot.kind == BuildingKind::Cottage && near_quay(lot))
+            .count();
+        let sheds = harbour_plan
+            .lots
+            .iter()
+            .filter(|lot| lot.kind == BuildingKind::Barn)
+            .count();
+        assert!(huts >= 1, "fishing huts / harbourmaster {huts}");
+        assert!(sheds >= 1, "warehouses {sheds}");
+        let harbour_volume = crate::stamp::fill_volume(&harbour_plan);
+        let mut jib = 0;
+        let mut rope = 0;
+        for z in harbour.rect.min_z..=harbour.rect.max_z {
+            for x in harbour.rect.min_x..=harbour.rect.max_x {
+                if harbour_plan.occ.kind(x, z) != CellKind::Crane {
+                    continue;
+                }
+                for y in harbour_volume.min_y..harbour_volume.min_y + harbour_volume.sy {
+                    let Some(state) = harbour_volume.get(x, y, z) else {
+                        continue;
+                    };
+                    let id = Block::from_state_id(state.id).id;
+                    if id == Block::OAK_LOG.id {
+                        jib += 1;
+                    }
+                    if id == Block::OAK_FENCE.id {
+                        rope += 1;
+                    }
+                }
+            }
+        }
+        assert!(jib >= 16, "harbour timber jib {jib}");
+        assert!(rope >= 4, "harbour hoist {rope}");
+        let harbour_float =
+            crate::watertight::check_floating_fragments(&harbour_plan, &harbour_volume);
+        assert!(
+            harbour_float.is_empty(),
+            "harbour floating:\n{}",
+            harbour_float.join("\n")
+        );
+        let harbour_check = crate::watertight::check_town(&harbour_plan, &harbour_volume);
+        assert!(
+            harbour_check.ok()
+                || harbour_check
+                    .failures()
+                    .into_iter()
+                    .all(|b| !b.name.contains("Cottage")
+                        && !b.name.contains("Barn")
+                        && !b.name.contains("Watchtower")),
+            "harbour buildings: {}",
+            harbour_check.summary()
+        );
     }
 }
