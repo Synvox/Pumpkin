@@ -404,7 +404,8 @@ pub fn furnish_house(
         | BuildingKind::Chapel => {
             furnish_chapel(sink, rect, x, floor, z, roof_y, palette, true);
         }
-        BuildingKind::Watchtower | BuildingKind::Outpost | BuildingKind::BellTower => {}
+        BuildingKind::Outpost | BuildingKind::BellTower => {}
+        BuildingKind::Watchtower => furnish_watchtower(sink, rect, x, floor, z, roof_y, palette),
         BuildingKind::Blacksmith => furnish_smith(sink, rect, x, floor, z, roof_y),
         BuildingKind::Barn => furnish_barn(sink, rect, x, floor, z, roof_y),
         BuildingKind::Tavern => furnish_tavern(sink, rect, x, floor, z, roof_y, stories, palette),
@@ -425,6 +426,58 @@ pub fn furnish_house(
         }
         _ => furnish_dwelling(sink, rect, x, floor, z, roof_y, stories, palette),
     }
+}
+
+/// Guardroom, bunks and stores on each storey of a hinterland watchtower.
+pub fn furnish_watchtower(
+    sink: &mut impl BlockSink,
+    rect: Rect,
+    x: i32,
+    floor: i32,
+    z: i32,
+    roof_y: i32,
+    palette: &Palette,
+) {
+    if rect.on_edge(x, z) {
+        return;
+    }
+    let (cx, cz) = rect.center();
+    let stair = x <= rect.min_x + 2 && z <= rect.min_z + 2;
+    if stair {
+        return;
+    }
+    for s in 0..4 {
+        let y0 = floor + s * 4;
+        if y0 + 1 >= roof_y {
+            break;
+        }
+        if x == cx && z == cz {
+            continue;
+        }
+        if s == 0 && x == cx + 1 && z == cz {
+            sink.put(x, y0 + 1, z, Block::FURNACE.default_state);
+        } else if s == 0 && x == cx - 1 && z == cz {
+            sink.put(x, y0 + 1, z, Block::CRAFTING_TABLE.default_state);
+        } else if s == 0 && x == cx && z == cz + 1 {
+            sink.put(x, y0 + 1, z, Block::CHEST.default_state);
+        } else if s == 1 && x == cx + 1 && z == cz {
+            sink.put(x, y0 + 1, z, Block::WHITE_BED.default_state);
+        } else if s == 1 && x == cx - 1 && z == cz {
+            sink.put(x, y0 + 1, z, Block::BARREL.default_state);
+        } else if s == 2 && x == cx + 1 && z == cz {
+            sink.put(x, y0 + 1, z, Block::CHEST.default_state);
+        } else if s == 2 && x == cx - 1 && z == cz {
+            sink.put(x, y0 + 1, z, Block::BOOKSHELF.default_state);
+        } else if s == 3 && x == cx && z == cz + 1 {
+            sink.put(x, y0 + 1, z, Block::CAULDRON.default_state);
+        } else if (x + z + s) % 5 == 0 {
+            sink.put(x, y0 + 1, z, Block::BARREL.default_state);
+        }
+        if (x + z + s) % 4 == 1 {
+            sink.put(x, y0 + 2, z, Block::LANTERN.default_state);
+        }
+    }
+    let _ = palette;
 }
 
 fn furnish_dwelling(

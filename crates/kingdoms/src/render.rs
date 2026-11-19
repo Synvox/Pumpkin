@@ -561,6 +561,7 @@ fn write_scene_renders(
         SceneKind::MillHamlet,
         SceneKind::Beacon,
         SceneKind::Watchtower,
+        SceneKind::Harbour,
         SceneKind::Tourney,
         SceneKind::Monastery,
         SceneKind::Vineyard,
@@ -574,7 +575,20 @@ fn write_scene_renders(
         SceneKind::RidgeMill,
         SceneKind::PilgrimChapel,
     ] {
-        let Some(scene) = plan.scenes.iter().find(|scene| scene.kind == kind) else {
+        let scene = if kind == SceneKind::Watchtower {
+            plan.scenes
+                .iter()
+                .find(|scene| {
+                    scene.kind == kind
+                        && plan.lots.iter().any(|lot| {
+                            lot.kind == BuildingKind::Cottage && scene.rect.intersects(lot.rect)
+                        })
+                })
+                .or_else(|| plan.scenes.iter().find(|scene| scene.kind == kind))
+        } else {
+            plan.scenes.iter().find(|scene| scene.kind == kind)
+        };
+        let Some(scene) = scene else {
             continue;
         };
         let rect = if kind == SceneKind::Quarry {
@@ -587,6 +601,10 @@ fn write_scene_renders(
             mill_focus_rect(plan, scene.rect)
         } else if kind == SceneKind::TollBridge {
             toll_focus_rect(plan, scene.rect)
+        } else if kind == SceneKind::Harbour {
+            harbour_scene_rect(plan, scene.rect)
+        } else if kind == SceneKind::Watchtower {
+            scene.rect.inflate(8)
         } else {
             scene.rect.inflate(2)
         };
@@ -606,7 +624,10 @@ fn write_scene_renders(
             SceneKind::MillHamlet => "Mill hamlet · wheel, race, granary",
             SceneKind::Beacon => "Hilltop beacon · brazier and watch-fire",
             SceneKind::Watchtower => {
-                "Watchtower · battered base, machicolations, arrow slits and keeper's hut"
+                "Watchtower · battered base, timber hoarding, roof, beacon and keeper's hut"
+            }
+            SceneKind::Harbour => {
+                "Harbour town · shoreline quay, timber jib cranes, warehouses, fishing huts, boats and lighthouse"
             }
             SceneKind::Tourney => {
                 "Jousting lists · long tilt, covered stands, royal box and peaked pavilions"
@@ -616,7 +637,7 @@ fn write_scene_renders(
             }
             SceneKind::Vineyard => "Vineyard · terraced hillside rows and press house",
             SceneKind::Quarry => {
-                "Quarry · hillside benches, jib cranes, cut stone, mason's lodge and hut"
+                "Quarry · stepped benches, spoil heaps, timber jib crane, lodge and hut"
             }
             SceneKind::PilgrimChapel => {
                 "Pilgrim chapel · west bell-cote, nave, pews and walled graves"
@@ -656,6 +677,37 @@ fn write_scene_renders(
             save(
                 &out_dir.join(format!("{stem}-scene-{name}-close-nw.png")),
                 &render_exterior_rot(volume, rect, 2, title, 3),
+            )?;
+        }
+        if matches!(
+            kind,
+            SceneKind::Quarry | SceneKind::Watchtower | SceneKind::Harbour
+        ) {
+            save(
+                &out_dir.join(format!("{stem}-scene-{name}-topdown.png")),
+                &render_topdown_rect(plan, volume, rect.inflate(4)),
+            )?;
+        }
+        if kind == SceneKind::Watchtower
+            && let Some(hut) = plan
+                .lots
+                .iter()
+                .find(|lot| lot.kind == BuildingKind::Cottage && scene.rect.intersects(lot.rect))
+        {
+            let hut_rect = hut.rect.inflate(6);
+            save(
+                &out_dir.join(format!("{stem}-scene-keeper-hut-close.png")),
+                &render_exterior_rot(
+                    volume,
+                    hut_rect,
+                    2,
+                    "Watchtower · keeper's hut at the inland peak",
+                    0,
+                ),
+            )?;
+            save(
+                &out_dir.join(format!("{stem}-scene-keeper-hut-topdown.png")),
+                &render_topdown_rect(plan, volume, hut_rect.inflate(2)),
             )?;
         }
     }
@@ -2023,6 +2075,40 @@ pub fn render_topdown(plan: &TownPlan, volume: &VolumeSink) -> RgbImage {
     let mut scaled = ImageBuffer::new(w * scale, h * scale);
     for y in 0..h {
         for x in 0..w {
+            let p = *raw.get_pixel(x, y);
+            for sy in 0..scale {
+                for sx in 0..scale {
+                    scaled.put_pixel(x * scale + sx, y * scale + sy, p);
+                }
+            }
+        }
+    }
+    scaled
+}
+
+fn render_topdown_rect(plan: &TownPlan, volume: &VolumeSink, rect: Rect) -> RgbImage {
+    let w = rect.width() as u32;
+    let h = rect.depth() as u32;
+    let scale = 6u32;
+    let mut raw: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(w.max(1), h.max(1));
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            let px = (x - rect.min_x) as u32;
+            let pz = (z - rect.min_z) as u32;
+            let Some((y, state)) = volume.top(x, z) else {
+                raw.put_pixel(px, pz, Rgb([20, 20, 30]));
+                continue;
+            };
+            let n = volume.top(x, z - 1).map_or(y, |(ny, _)| ny);
+            let wgt = volume.top(x - 1, z).map_or(y, |(ny, _)| ny);
+            let slope = (n - y) as f32 * 0.12 + (wgt - y) as f32 * 0.08;
+            let height_term = ((y - plan.heights.sea_level) as f32) * 0.008;
+            raw.put_pixel(px, pz, shade(block_rgb(state), 0.92 + slope + height_term));
+        }
+    }
+    let mut scaled = ImageBuffer::new(w.max(1) * scale, h.max(1) * scale);
+    for y in 0..h.max(1) {
+        for x in 0..w.max(1) {
             let p = *raw.get_pixel(x, y);
             for sy in 0..scale {
                 for sx in 0..scale {
