@@ -524,7 +524,7 @@ impl Goal for ThrottledMeleeGoal {
         {
             self.cooldown = 20;
             if let Some(golem) = mob.as_iron_golem() {
-                golem.trigger_attack_animation();
+                golem.attack_animation_tick.store(10, Ordering::Relaxed);
             }
             mob.get_mob_entity().living_entity.swing_hand();
             let damaged = mob

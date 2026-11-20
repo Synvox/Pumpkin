@@ -3,11 +3,10 @@ use crate::entity::player::Player;
 use crate::item::{ItemBehaviour, ItemMetadata};
 use crate::server::Server;
 use pumpkin_data::BlockDirection;
-use pumpkin_data::block_properties::CampfireLikeProperties;
 use pumpkin_data::data_component_impl::BlockTransformerImpl;
+use pumpkin_data::game_event::GameEvent;
 use pumpkin_data::item_stack::ItemStack;
-use pumpkin_data::sound::{Sound, SoundCategory};
-use pumpkin_data::world::WorldEvent;
+use pumpkin_data::sound::SoundCategory;
 use pumpkin_data::{Block, tag};
 use pumpkin_util::GameMode;
 use pumpkin_util::math::position::BlockPos;
@@ -56,29 +55,9 @@ impl ItemBehaviour for ShovelItem {
             }
 
             world.set_block_state(&location, result.new_state_id, BlockFlags::NOTIFY_ALL);
+            world.emit_game_event(GameEvent::BlockChange.name(), location.to_f64());
             damage = result.entry.item_damage_per_use;
             changed = true;
-        } else if block == &Block::CAMPFIRE || block == &Block::SOUL_CAMPFIRE {
-            let mut campfire_props =
-                CampfireLikeProperties::from_state_id(world.get_block_state(&location).id);
-            if campfire_props.lit {
-                world.sync_world_event(WorldEvent::SoundExtinguishFire, location, 0);
-
-                campfire_props.lit = false;
-                world.set_block_state(
-                    &location,
-                    campfire_props.to_state_id(block),
-                    BlockFlags::NOTIFY_ALL,
-                );
-                world.play_sound_fine(
-                    Sound::BlockFireExtinguish,
-                    SoundCategory::Ambient,
-                    &location.to_f64(),
-                    0.5,
-                    2.0,
-                );
-                changed = true;
-            }
         }
 
         if changed && player.gamemode.load() != GameMode::Creative {

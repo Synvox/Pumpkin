@@ -25,7 +25,7 @@ use pumpkin_data::attributes::Attributes;
 use pumpkin_data::data_component::DataComponent;
 use pumpkin_data::data_component_impl::combat::{Modifier, Operation};
 use pumpkin_data::data_component_impl::{
-    AttributeModifiersImpl, CustomNameImpl, EnchantmentsImpl, LoreImpl,
+    AttributeModifiersImpl, CustomNameImpl, EnchantmentsImpl, LoreImpl, MAX_ENCHANTMENT_LEVEL,
 };
 use pumpkin_nbt::tag::NbtTag;
 use pumpkin_protocol::codec::data_component::{deserialize, serialize};
@@ -75,7 +75,38 @@ pub const fn to_wit_item_operation(op: Operation) -> WitModifierOperation {
     }
 }
 
-impl ItemStackInterfaceHost for PluginHostState {}
+impl ItemStackInterfaceHost for PluginHostState {
+    fn is_item_in_tag(&mut self, item_name: String, tag: String) -> wasmtime::Result<bool> {
+        use pumpkin_data::tag::Taggable;
+        let key = item_name.strip_prefix("minecraft:").unwrap_or(&item_name);
+        let Some(item) = pumpkin_data::item::Item::from_registry_key(key) else {
+            return Ok(false);
+        };
+        Ok(item.is_tagged_with(&tag).unwrap_or(false))
+    }
+
+    fn get_items_in_tag(&mut self, tag: String) -> wasmtime::Result<Vec<String>> {
+        use pumpkin_data::tag::Taggable;
+        Ok(pumpkin_data::item::Item::get_tag_values(&tag)
+            .map(|vals| vals.iter().map(|s| (*s).to_string()).collect())
+            .unwrap_or_default())
+    }
+
+    fn get_item_tags(&mut self, item_name: String) -> wasmtime::Result<Vec<String>> {
+        let key = item_name.strip_prefix("minecraft:").unwrap_or(&item_name);
+        let Some(item) = pumpkin_data::item::Item::from_registry_key(key) else {
+            return Ok(Vec::new());
+        };
+        let item_id = item.id;
+        Ok(
+            pumpkin_data::tag::get_latest_map(pumpkin_data::tag::RegistryKey::Item)
+                .entries()
+                .filter(|(_, tag)| tag.1.contains(&item_id))
+                .map(|(name, _)| (*name).to_string())
+                .collect(),
+        )
+    }
+}
 
 impl HostItemStack for PluginHostState {
     fn new(
@@ -134,19 +165,238 @@ impl HostItemStackWithStore<PluginHostState> for HasSelf<PluginHostState> {
     ) -> wasmtime::Result<u8> {
         let stack = accessor.get_res(&res)?;
         let stack = stack.lock().await;
-        // Search in components for MaxStackSize
-        if let Some((_, data)) = stack
-            .item
-            .components
-            .iter()
-            .find(|(id, _)| *id == DataComponent::MaxStackSize)
-            && let Some(max_size) = data
-                .as_any()
-                .downcast_ref::<pumpkin_data::data_component_impl::MaxStackSizeImpl>()
-        {
-            return Ok(max_size.size);
+        Ok(stack.get_max_stack_size())
+    }
+
+    async fn clone(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+    ) -> wasmtime::Result<Resource<ItemStackHandle>> {
+        let cloned = accessor.get_res(&res)?.lock().await.clone();
+        accessor.add_res(Arc::new(Mutex::new(cloned)))
+    }
+
+    async fn with_count(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        count: u8,
+    ) -> wasmtime::Result<Resource<ItemStackHandle>> {
+        let cloned = accessor.get_res(&res)?.lock().await.copy_with_count(count);
+        accessor.add_res(Arc::new(Mutex::new(cloned)))
+    }
+
+    async fn is_similar(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        other: Resource<ItemStackHandle>,
+    ) -> wasmtime::Result<bool> {
+        let other_stack = accessor.take_res(other)?.lock().await.clone();
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack.are_items_and_components_equal(&other_stack))
+    }
+
+    async fn get_damage(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+    ) -> wasmtime::Result<i32> {
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack.get_damage())
+    }
+
+    async fn set_damage(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        damage: i32,
+    ) -> wasmtime::Result<()> {
+        let stack = accessor.get_res(&res)?;
+        let mut stack = stack.lock().await;
+        stack.set_damage(damage);
+        Ok(())
+    }
+
+    async fn damage_item(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        amount: i32,
+    ) -> wasmtime::Result<bool> {
+        let stack = accessor.get_res(&res)?;
+        let mut stack = stack.lock().await;
+        Ok(stack.damage_item(amount) == pumpkin_data::item_stack::DamageResult::Broken)
+    }
+
+    async fn get_max_damage(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+    ) -> wasmtime::Result<i32> {
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack.get_max_damage().unwrap_or(0))
+    }
+
+    async fn is_damageable(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+    ) -> wasmtime::Result<bool> {
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack.is_damageable())
+    }
+
+    async fn is_unbreakable(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+    ) -> wasmtime::Result<bool> {
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack.is_unbreakable())
+    }
+
+    async fn set_unbreakable(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        unbreakable: bool,
+    ) -> wasmtime::Result<()> {
+        let stack = accessor.get_res(&res)?;
+        let mut stack = stack.lock().await;
+        if unbreakable {
+            stack.set_data_component(pumpkin_data::data_component_impl::UnbreakableImpl);
+        } else {
+            stack.remove_data_component(pumpkin_data::data_component::DataComponent::Unbreakable);
         }
-        Ok(64) // Default
+        Ok(())
+    }
+
+    async fn has_tag(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        tag: String,
+    ) -> wasmtime::Result<bool> {
+        use pumpkin_data::tag::Taggable;
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack.item.is_tagged_with(&tag).unwrap_or(false))
+    }
+
+    async fn get_tags(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+    ) -> wasmtime::Result<Vec<String>> {
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        let item_id = stack.item.id;
+        Ok(
+            pumpkin_data::tag::get_latest_map(pumpkin_data::tag::RegistryKey::Item)
+                .entries()
+                .filter(|(_, tag)| tag.1.contains(&item_id))
+                .map(|(name, _)| (*name).to_string())
+                .collect(),
+        )
+    }
+
+    async fn is_correct_for_drops(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        block_name: String,
+    ) -> wasmtime::Result<bool> {
+        let Some(block) = pumpkin_data::Block::from_name(&block_name) else {
+            return Ok(false);
+        };
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack.is_correct_for_drops(block))
+    }
+
+    async fn get_mining_speed(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        block_name: String,
+    ) -> wasmtime::Result<f32> {
+        let Some(block) = pumpkin_data::Block::from_name(&block_name) else {
+            return Ok(1.0);
+        };
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack.get_speed(block))
+    }
+
+    async fn get_repair_cost(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+    ) -> wasmtime::Result<i32> {
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack.get_repair_cost())
+    }
+
+    async fn set_repair_cost(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        cost: i32,
+    ) -> wasmtime::Result<()> {
+        let stack = accessor.get_res(&res)?;
+        let mut stack = stack.lock().await;
+        stack.set_repair_cost(cost);
+        Ok(())
+    }
+
+    async fn get_item_model(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+    ) -> wasmtime::Result<Option<String>> {
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack
+            .get_data_component::<pumpkin_data::data_component_impl::ItemModelImpl>()
+            .map(|m| m.id.to_string()))
+    }
+
+    async fn set_item_model(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        model: Option<String>,
+    ) -> wasmtime::Result<()> {
+        let stack = accessor.get_res(&res)?;
+        let mut stack = stack.lock().await;
+        if let Some(model) = model {
+            stack.set_data_component(pumpkin_data::data_component_impl::ItemModelImpl {
+                id: model.into(),
+            });
+        } else {
+            stack.remove_data_component(pumpkin_data::data_component::DataComponent::ItemModel);
+        }
+        Ok(())
+    }
+
+    async fn get_enchantment_glint_override(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+    ) -> wasmtime::Result<Option<bool>> {
+        let stack = accessor.get_res(&res)?;
+        let stack = stack.lock().await;
+        Ok(stack
+            .get_data_component::<pumpkin_data::data_component_impl::EnchantmentGlintOverrideImpl>()
+            .map(|g| g.glint))
+    }
+
+    async fn set_enchantment_glint_override(
+        accessor: &Accessor<PluginHostState, Self>,
+        res: Resource<ItemStackHandle>,
+        glint: Option<bool>,
+    ) -> wasmtime::Result<()> {
+        let stack = accessor.get_res(&res)?;
+        let mut stack = stack.lock().await;
+        if let Some(glint) = glint {
+            stack.set_data_component(
+                pumpkin_data::data_component_impl::EnchantmentGlintOverrideImpl { glint },
+            );
+        } else {
+            stack.remove_data_component(
+                pumpkin_data::data_component::DataComponent::EnchantmentGlintOverride,
+            );
+        }
+        Ok(())
     }
 
     async fn get_enchantments(
@@ -196,7 +446,9 @@ impl HostItemStackWithStore<PluginHostState> for HasSelf<PluginHostState> {
         };
 
         current_encs.retain(|(e, _)| e.id != enc.id);
-        current_encs.push((enc, level as i32));
+        if level > 0 {
+            current_encs.push((enc, level.min(MAX_ENCHANTMENT_LEVEL as u32) as i32));
+        }
 
         if let Some((_, data)) = stack
             .patch
@@ -290,11 +542,15 @@ impl HostItemStackWithStore<PluginHostState> for HasSelf<PluginHostState> {
         let stack = accessor.get_res(&res)?;
         let mut stack = stack.lock().await;
 
-        stack.set_custom_data(
-            "pumpkin:enchantments",
-            &enchantment_id,
-            NbtTag::Int(level as i32),
-        );
+        if level == 0 {
+            stack.remove_custom_data("pumpkin:enchantments", &enchantment_id);
+        } else {
+            stack.set_custom_data(
+                "pumpkin:enchantments",
+                &enchantment_id,
+                NbtTag::Int(level as i32),
+            );
+        }
 
         if let Some(vanilla) = super::enchantment::find_vanilla_enchantment(&enchantment_id) {
             let mut current_encs = if let Some((_, Some(data))) = stack
@@ -311,7 +567,9 @@ impl HostItemStackWithStore<PluginHostState> for HasSelf<PluginHostState> {
             };
 
             current_encs.retain(|(e, _)| e.id != vanilla.id);
-            current_encs.push((vanilla, level as i32));
+            if level > 0 {
+                current_encs.push((vanilla, level.min(MAX_ENCHANTMENT_LEVEL as u32) as i32));
+            }
 
             if let Some((_, data)) = stack
                 .patch
@@ -448,7 +706,7 @@ impl HostItemStackWithStore<PluginHostState> for HasSelf<PluginHostState> {
         let attr = super::living_entity::from_wit_attribute(modifier.attribute);
         let slot = super::enchantment::to_data_slot(modifier.slot);
         let op = from_wit_item_operation(modifier.modifier.operation);
-        let leaked_id: &'static str = Box::leak(modifier.modifier.id.into_boxed_str());
+        let mod_id = modifier.modifier.id;
 
         let mut current_mods = stack
             .get_data_component::<AttributeModifiersImpl>()
@@ -456,13 +714,14 @@ impl HostItemStackWithStore<PluginHostState> for HasSelf<PluginHostState> {
                 comp.attribute_modifiers.clone().into_owned()
             });
 
-        current_mods.retain(|m| !(m.r#type == attr && m.id == leaked_id && m.slot == slot));
+        current_mods.retain(|m| !(m.r#type == attr && m.id.as_ref() == mod_id && m.slot == slot));
         current_mods.push(Modifier {
             r#type: attr,
-            id: leaked_id,
+            id: Cow::Owned(mod_id),
             amount: modifier.modifier.amount,
             operation: op,
             slot,
+            display: pumpkin_data::data_component_impl::ModifierDisplay::Default,
         });
 
         stack.set_data_component(AttributeModifiersImpl {

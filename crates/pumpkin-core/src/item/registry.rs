@@ -1,5 +1,6 @@
 use crate::block::registry::BlockActionResult;
 use crate::entity::EntityBase;
+use crate::entity::mob::equipment::equip_on_target;
 use crate::entity::player::Player;
 use crate::server::Server;
 use pumpkin_data::Block;
@@ -55,12 +56,32 @@ impl ItemRegistry {
             return;
         }
 
-        let pumpkin_item = self.get_pumpkin_item(item.id);
-        if let Some(pumpkin_item) = pumpkin_item {
+        if let Some(pumpkin_item) = self.get_pumpkin_item(item.id) {
             pumpkin_item.normal_use_with_hand(item, player, yaw, pitch, hand);
+        } else if stack
+            .get_data_component::<pumpkin_data::data_component_impl::KineticWeaponImpl>()
+            .is_some()
+        {
+            crate::item::items::spear::SpearItem
+                .normal_use_with_hand(item, player, yaw, pitch, hand);
+        } else if stack
+            .get_data_component::<pumpkin_data::data_component_impl::InstrumentImpl>()
+            .is_some()
+        {
+            crate::item::items::goat_horn::GoatHornItem
+                .normal_use_with_hand(item, player, yaw, pitch, hand);
+        } else if stack
+            .get_data_component::<pumpkin_data::data_component_impl::RecipesImpl>()
+            .is_some()
+        {
+            crate::item::items::knowledge_book::KnowledgeBookItem
+                .normal_use_with_hand(item, player, yaw, pitch, hand);
         }
 
-        if let Some(cooldown) = cooldown {
+        if let Some(cooldown) = cooldown
+            && self.get_use_duration(item.id).is_none()
+            && stack.get_max_use_time() == 0
+        {
             player.start_cooldown(cooldown_group, (cooldown.seconds * 20.0) as i32);
         }
     }
@@ -74,12 +95,27 @@ impl ItemRegistry {
     pub fn on_spear_jab(&self, stack: &ItemStack, player: &Player) {
         if let Some(behaviour) = self.get_pumpkin_item(stack.item.id) {
             behaviour.on_spear_jab(stack, player);
+        } else if stack
+            .get_data_component::<pumpkin_data::data_component_impl::PiercingWeaponImpl>()
+            .is_some()
+        {
+            crate::item::items::spear::SpearItem.on_spear_jab(stack, player);
         }
     }
 
-    pub fn on_use_tick(&self, stack: &ItemStack, player: &Player, remaining_use_ticks: i32) {
+    pub fn on_use_tick(
+        &self,
+        stack: &ItemStack,
+        user: &dyn crate::entity::EntityBase,
+        remaining_use_ticks: i32,
+    ) {
         if let Some(behaviour) = self.get_pumpkin_item(stack.item.id) {
-            behaviour.on_use_tick(stack, player, remaining_use_ticks);
+            behaviour.on_use_tick(stack, user, remaining_use_ticks);
+        } else if stack
+            .get_data_component::<pumpkin_data::data_component_impl::KineticWeaponImpl>()
+            .is_some()
+        {
+            crate::item::items::spear::SpearItem.on_use_tick(stack, user, remaining_use_ticks);
         }
     }
 
@@ -114,11 +150,30 @@ impl ItemRegistry {
         }
 
         let pumpkin_item = self.get_pumpkin_item(stack.item.id);
-        let result = pumpkin_item.map_or(BlockActionResult::Pass, |pumpkin_item| {
+        let result = if let Some(pumpkin_item) = pumpkin_item {
             pumpkin_item.use_on_block(stack, player, location, face, cursor_pos, block, server)
-        });
+        } else if let Some(bt) = stack
+            .get_data_component::<pumpkin_data::data_component_impl::BlockTransformerImpl>()
+            .map(|b| b.transformer.clone())
+        {
+            match bt.strip_prefix("minecraft:").unwrap_or(&bt) {
+                "axe" => crate::item::items::axe::AxeItem
+                    .use_on_block(stack, player, location, face, cursor_pos, block, server),
+                "hoe" => crate::item::items::hoe::HoeItem
+                    .use_on_block(stack, player, location, face, cursor_pos, block, server),
+                "shovel" => crate::item::items::shovel::ShovelItem
+                    .use_on_block(stack, player, location, face, cursor_pos, block, server),
+                _ => BlockActionResult::Pass,
+            }
+        } else {
+            BlockActionResult::Pass
+        };
 
-        if let Some(cooldown) = cooldown {
+        if matches!(
+            result,
+            BlockActionResult::Success | BlockActionResult::SuccessServer
+        ) && let Some(cooldown) = cooldown
+        {
             player.start_cooldown(cooldown_group, (cooldown.seconds * 20.0) as i32);
         }
 
@@ -131,23 +186,15 @@ impl ItemRegistry {
         player: &Player,
         entity: Arc<dyn EntityBase>,
     ) {
-        let cooldown = stack.get_use_cooldown().cloned();
-        let cooldown_group = cooldown
-            .as_ref()
-            .and_then(|c| c.cooldown_group.clone())
-            .unwrap_or_else(|| stack.item.registry_key.to_string());
-
-        if player.is_on_cooldown(&cooldown_group) {
+        if let Some(mob) = entity.get_mob()
+            && equip_on_target(mob, player, stack)
+        {
             return;
         }
 
         let pumpkin_item = self.get_pumpkin_item(stack.item.id);
         if let Some(pumpkin_item) = pumpkin_item {
             pumpkin_item.use_on_entity(stack, player, entity);
-        }
-
-        if let Some(cooldown) = cooldown {
-            player.start_cooldown(cooldown_group, (cooldown.seconds * 20.0) as i32);
         }
     }
 

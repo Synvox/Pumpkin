@@ -1,6 +1,7 @@
 use crate::block::{GetStateForNeighborUpdateArgs, blocks::plant::PlantBlockBase};
 use pumpkin_data::BlockStateId;
 use pumpkin_data::{
+    damage::DamageType,
     effect::StatusEffect,
     entity::EntityType,
     tag::{self, Taggable},
@@ -12,29 +13,36 @@ use crate::block::{BlockBehaviour, CanPlaceAtArgs, OnEntityCollisionArgs};
 #[pumpkin_block("minecraft:wither_rose")]
 pub struct WitherRoseBlock;
 
+impl WitherRoseBlock {
+    #[must_use]
+    pub const fn bee_interaction_effect() -> pumpkin_data::potion::Effect {
+        pumpkin_data::potion::Effect {
+            effect_type: &StatusEffect::WITHER,
+            duration: 40,
+            amplifier: 0,
+            ambient: false,
+            show_particles: true,
+            show_icon: true,
+            blend: true,
+        }
+    }
+}
+
 impl BlockBehaviour for WitherRoseBlock {
     fn on_entity_collision(&self, args: OnEntityCollisionArgs<'_>) {
         if let Some(living_entity) = args.entity.get_living_entity() {
             if args.world.level_info.load().difficulty == Difficulty::Peaceful {
                 return;
             }
-            let entity_type = args.entity.get_entity().entity_type;
-            if entity_type == &EntityType::ENDER_DRAGON
-                || entity_type == &EntityType::WITHER
-                || entity_type == &EntityType::WITHER_SKELETON
+            if !living_entity
+                .entity
+                .is_invulnerable_to(&DamageType::WITHER, None)
+                && living_entity.entity.entity_type != &EntityType::WITHER
+                && living_entity.entity.entity_type != &EntityType::WITHER_SKELETON
+                && args.entity.damage(args.entity, 1.0, DamageType::WITHER)
             {
-                return;
+                living_entity.add_effect(Self::bee_interaction_effect());
             }
-            let effect = pumpkin_data::potion::Effect {
-                effect_type: &StatusEffect::WITHER,
-                duration: 40,
-                amplifier: 0,
-                ambient: false,
-                show_particles: true,
-                show_icon: true,
-                blend: true,
-            };
-            living_entity.add_effect(effect);
         }
     }
     fn can_place_at(&self, args: CanPlaceAtArgs<'_>) -> bool {

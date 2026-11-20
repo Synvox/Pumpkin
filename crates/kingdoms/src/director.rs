@@ -14,6 +14,7 @@ use pumpkin_core::entity::EntityBase;
 use pumpkin_core::entity::mob::Mob;
 use pumpkin_core::entity::player::{Player, TitleMode};
 use pumpkin_core::entity::tnt::TNTEntity;
+use pumpkin_core::plugin::api::events::entity::entity_target::TargetReason;
 use pumpkin_core::world::World;
 use pumpkin_core::world::bossbar::{Bossbar, BossbarDivisions};
 use pumpkin_core::world::scoreboard::{CollisionRule, NameTagVisibility, Team};
@@ -3711,9 +3712,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             if let Some(h) = hostile.filter(|h| h.within(pos.x, pos.z, SET_TARGET_RANGE))
                 && let Some(target) = world.get_entity_by_id(h.entity_id)
             {
-                mob.set_mob_target(Some(target));
+                mob.set_mob_target(Some(target), TargetReason::Unknown);
             } else {
-                mob.set_mob_target(None);
+                mob.set_mob_target(None, TargetReason::ForgotTarget);
             }
             let dest = match (faction, role) {
                 (Faction::Pillager, _) => march_dest,
@@ -7034,7 +7035,7 @@ fn tick_sappers(world: &Arc<World>, town_id: &str, tick: u32) {
         return;
     }
     let pos = BlockPos::new(gate.x, plant_y, gate.z);
-    let tnt = TNTEntity::primed(world, &pos, crate::blast::SAPPER_FUSE);
+    let tnt = TNTEntity::primed(world, &pos, crate::blast::SAPPER_FUSE, None);
     let _ = world.spawn_entity(tnt);
     let mut dir = lock();
     if let Some(war) = dir.towns.get_mut(town_id) {

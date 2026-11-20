@@ -53,12 +53,13 @@ impl FallingBlock {
 
     #[must_use]
     pub fn touches_liquid(world: &dyn BlockAccessor, pos: &BlockPos) -> bool {
+        let current = world.get_block_state(pos);
         for dir in BlockDirection::all() {
-            if dir == BlockDirection::Down {
+            if dir == BlockDirection::Down && !Self::can_solidify(current) {
                 continue;
             }
             let neighbor = world.get_block_state(&pos.offset(dir.to_offset()));
-            if Self::can_solidify(neighbor) {
+            if Self::can_solidify(neighbor) && !neighbor.is_side_solid(dir.opposite()) {
                 return true;
             }
         }
@@ -68,6 +69,15 @@ impl FallingBlock {
     #[must_use]
     pub fn should_solidify(world: &dyn BlockAccessor, pos: &BlockPos) -> bool {
         Self::can_solidify(world.get_block_state(pos)) || Self::touches_liquid(world, pos)
+    }
+
+    /// Vanilla `ConcretePowderBlock.concrete`: the block a powder hardens into.
+    #[must_use]
+    pub fn concrete_of(block: &Block) -> Option<&'static Block> {
+        if !block.has_tag(&tag::Block::MINECRAFT_CONCRETE_POWDERS) {
+            return None;
+        }
+        Block::from_name(block.name.strip_suffix("_powder")?)
     }
 }
 
@@ -104,10 +114,8 @@ impl BlockBehaviour for FallingBlock {
     fn on_place(&self, args: OnPlaceArgs<'_>) -> BlockStateId {
         // Vanilla getPlacementState uses shouldSolidify (own position OR neighbors),
         // so powder placed directly into water hardens even without a water neighbor.
-        if args.block.has_tag(&tag::Block::MINECRAFT_CONCRETE_POWDERS)
+        if let Some(concrete) = Self::concrete_of(args.block)
             && Self::should_solidify(args.world, args.position)
-            && let Some(name) = args.block.name.strip_suffix("_powder")
-            && let Some(concrete) = Block::from_name(name)
         {
             return concrete.default_state.id;
         }
@@ -122,10 +130,8 @@ impl BlockBehaviour for FallingBlock {
         &self,
         args: GetStateForNeighborUpdateArgs<'_>,
     ) -> BlockStateId {
-        if args.block.has_tag(&tag::Block::MINECRAFT_CONCRETE_POWDERS)
+        if let Some(concrete) = Self::concrete_of(args.block)
             && Self::touches_liquid(args.world, args.position)
-            && let Some(name) = args.block.name.strip_suffix("_powder")
-            && let Some(concrete) = Block::from_name(name)
         {
             return concrete.default_state.id;
         }
