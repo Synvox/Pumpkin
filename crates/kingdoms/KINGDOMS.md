@@ -63,7 +63,7 @@ Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `F
 
 Each castle keeps a flag plinth in the inner bailey (never the gatehouse): a 3×3 stone pedestal, oak-fence mast, owner banner, and a ring of stone pressure plates. A town flips when attackers (players of the attacking kingdom, or the raid's bot standard-bearer) stand on that plate with **no defenders within 4 blocks** for 200 ticks (~10 s, `KINGDOMS_HOLD_TICKS`). The hold needs `max(3, 5% of the surviving raid)` on the plate. A defender on the plate or within 4 blocks **pauses** the clock; an empty plate **decays** progress. Hiding in a wall or cellar does nothing. Defenders reclaim the same way. Nearby players see a boss-bar (`Flag 3/3 hold 80/200`); captains shout on start/pause/flip. `/raid stop` and battle end (`Victory` / capture / retake) despawn leftover raid soldiers, extra defenders tagged `kingdoms:temp`, and ram display entities so a later fight does not stack bodies. The plate, mast, and banner are indestructible to players, trebuchet punches, and repair.
 
-A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). It either breaches the iron-bar gate or is destroyed. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks) or their captain dies; a living captain rallies routed soldiers within 16 blocks.
+A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). The director picks a ladder, ram, or sapper stroke from the town's defences: ladder crews plant at low curtain points (defenders can shove them off; climbers fight on the wall walk), a ram crew hammers a closed gate until its HP hits zero (murder-holes chip the frame; a sally opens a few bars), and sappers still plant breach charges on 40+ raids. Broken leaves enqueue the builder plan-diff. Capture is still a hold on the keep flag plate. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks) or their captain dies; a living captain rallies routed soldiers within 16 blocks.
 
 When no HTTP director has talked to the API in the last 30 s, a war clock starts the next raid on a timer (`KINGDOMS_WAR_CLOCK`, default on; `KINGDOMS_WAR_CLOCK_TICKS`, default 2400 ≈ 2 min). After a flip it waits out the 400-tick hold lockout **plus** a 400-tick repair window so builders can work for the new owner. It can run several concurrent fronts (`KINGDOMS_WAR_CLOCK_FRONTS`, default 1) and alternates pillager raids with alder↔raven border marches. Size/extras: `KINGDOMS_WAR_CLOCK_SIZE` (default 24) and `KINGDOMS_WAR_CLOCK_DEFENDERS`. An authenticated HTTP call that is not observational (`GET /war`, `GET|POST /lines`, `GET|POST /heroes`) marks the external director as connected and pauses the clock.
 
@@ -134,6 +134,7 @@ crates/kingdoms/
   src/interior.rs      furniture (same-column, deterministic)
   src/watertight.rs    flood-fill envelope check
   src/render.rs        top-down + isometric + cutaway PNG
+  src/tactics.rs       siege approach pick, ladders, ram hits, gate state
   src/bin/pregen.rs    offline proof + renders + watertight report
   src/bin/raid_bot.rs  headless Java client that stands in a town so it ticks
 ```
@@ -342,7 +343,7 @@ Front-line snapshot. Does not pause the clock.
 
 #### `GET /state`
 
-Pauses the clock. Towns use the battle schema (`id`, `kingdom`, `owner`, `alarm`, `raid_active`, `wave`, `waves`, `defenders_alive`, `raiders_alive`, `defenders_killed`, `raiders_killed`, `threatened_gate`, `gate_breached`, `occupy_hold`, `occupy_need`, `ram_hp`, `repair_until`, `repair_queued`, `repair_placed`, `repair_pct`, `repair_started`, `flag`, `flag_status`, `flag_paused`, `flag_attackers`, `flag_defenders`) plus logged-in players, troop totals, and a `repair` summary (`queued`, `placed`, `towns`).
+Pauses the clock. Towns use the battle schema (`id`, `kingdom`, `owner`, `alarm`, `raid_active`, `wave`, `waves`, `defenders_alive`, `raiders_alive`, `defenders_killed`, `raiders_killed`, `threatened_gate`, `gate_breached`, `gate_state`, `gate_hp`, `approach`, `occupy_hold`, `occupy_need`, `ram_hp`, `ram_hits`, `ladders_placed`, `ladders_toppled`, `gate_breaks`, `gate_repairs`, `repair_until`, `repair_queued`, `repair_placed`, `repair_pct`, `repair_started`, `flag`, `flag_status`, `flag_paused`, `flag_attackers`, `flag_defenders`) plus logged-in players, troop totals, events (`ladder_placed`, `ladder_toppled`, `ram_hit`, `gate_broken`, `gate_repaired`), and a `repair` summary (`queued`, `placed`, `towns`).
 
 ```json
 {
@@ -398,6 +399,11 @@ Pauses the clock. `{ "name": "Herald", "message": "The gate is down" }` → `{ "
 | `portcullis_dropped` | gates close on alarm | `other` is gate count |
 | `trebuchet_fired` | director or player looses a shot | |
 | `ladders_raised` | assault ladders placed on the wall | `actor` is blocks placed |
+| `ladder_placed` | a crew plants a ladder at a low curtain point | `actor` is blocks placed |
+| `ladder_toppled` | defenders shove a ladder off the wall | `actor` is defenders on the walk |
+| `ram_hit` | the ram crew strikes a closed gate | `other` is remaining gate HP |
+| `gate_broken` | gate HP hits zero; leaves feed builder repair | |
+| `gate_repaired` | builders restore a broken gate from the plan | |
 | `ram_destroyed` | defenders wreck the ram | |
 | `rout` | a side breaks | |
 | `capture_started` | attackers on the plate begin the hold | `actor` is on-plate count |
@@ -419,6 +425,11 @@ Examples (same envelope, HMAC over the raw bytes):
 { "event": "portcullis_dropped", "tick": 1601, "actor": 0, "other": 2, "x": 1504.0, "z": 597.0, "note": "20261025:0:0 portcullis dropped" }
 { "event": "trebuchet_fired", "tick": 1680, "actor": 0, "other": null, "x": 1551.0, "z": 485.0, "note": "20261025:0:0 trebuchet loosed" }
 { "event": "ladders_raised", "tick": 1720, "actor": 6, "other": null, "x": 1498.0, "z": 590.0, "note": "20261025:0:0 assault ladders raised" }
+{ "event": "ladder_placed", "tick": 1722, "actor": 2, "other": null, "x": 1498.0, "z": 590.0, "note": "20261025:0:0 ladder placed" }
+{ "event": "ladder_toppled", "tick": 1760, "actor": 3, "other": 2, "x": 1498.0, "z": 590.0, "note": "20261025:0:0 ladder toppled" }
+{ "event": "ram_hit", "tick": 1880, "actor": 4, "other": 20, "x": 1504.0, "z": 597.0, "note": "20261025:0:0 ram hit the gate hp=20" }
+{ "event": "gate_broken", "tick": 1940, "actor": 4, "other": 6, "x": 1504.0, "z": 597.0, "note": "20261025:0:0 gate broken" }
+{ "event": "gate_repaired", "tick": 2800, "actor": 1504, "other": 597, "x": 1268.0, "z": 665.0, "note": "20261025:0:0 gate repaired" }
 { "event": "gate_breached", "tick": 1900, "actor": 12, "other": 8, "x": 1504.0, "z": 597.0, "note": "20261025:0:0 ram breached 8 bars" }
 { "event": "ram_destroyed", "tick": 1880, "actor": 12, "other": null, "x": 1490.0, "z": 590.0, "note": "20261025:0:0 ram wrecked" }
 { "event": "rout", "tick": 2000, "actor": 40, "other": 8, "x": 1504.0, "z": 597.0, "note": "20261025:0:0 pillagers rout" }

@@ -111,12 +111,22 @@ pub struct WaveMember {
 /// Mix of crossbow pillagers, shield-wall vindicators, and a small ram crew.
 /// Captain is the first member of each wave.
 #[must_use]
-pub fn compose_wave(count: u16, _wave: u8) -> Vec<WaveMember> {
+pub fn compose_wave(count: u16, wave: u8) -> Vec<WaveMember> {
+    compose_wave_for(count, wave, crate::tactics::SiegeApproach::Ram)
+}
+
+/// Same mix, with the director's chosen siege stroke.
+#[must_use]
+pub fn compose_wave_for(
+    count: u16,
+    _wave: u8,
+    approach: crate::tactics::SiegeApproach,
+) -> Vec<WaveMember> {
     let mut members = Vec::with_capacity(count as usize);
     let n = count as usize;
     for i in 0..count {
         let captain = i == 0;
-        let job = crate::siege::MarchJob::for_wave_index(i as usize, n);
+        let job = crate::tactics::job_for_wave(i as usize, n, approach);
         let entity_type = match job {
             crate::siege::MarchJob::Ram
             | crate::siege::MarchJob::Assault
@@ -200,6 +210,19 @@ mod tests {
             small
                 .iter()
                 .filter(|m| m.job == crate::siege::MarchJob::Sapper)
+                .count(),
+            0
+        );
+        let ladders = compose_wave_for(12, 0, crate::tactics::SiegeApproach::Ladder);
+        assert!(
+            ladders
+                .iter()
+                .any(|m| m.job == crate::siege::MarchJob::Ladder)
+        );
+        assert_eq!(
+            ladders
+                .iter()
+                .filter(|m| m.job == crate::siege::MarchJob::Ram)
                 .count(),
             0
         );
