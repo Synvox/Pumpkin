@@ -17,13 +17,17 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use pumpkin_data::Block;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_kingdoms::chunk_fill::fill_volume_from_chunks_in;
 use pumpkin_kingdoms::height::register_world_gen;
 use pumpkin_kingdoms::marker;
-use pumpkin_kingdoms::plan::{plan_for, plan_from_cache};
-use pumpkin_kingdoms::render::{overview_bounds, write_planner_renders, write_renders};
-use pumpkin_kingdoms::stamp::{MARKER_FLOOR, fill_volume};
+use pumpkin_kingdoms::plan::{TownPlan, plan_for, plan_from_cache};
+use pumpkin_kingdoms::render::{
+    overview_bounds, write_planner_renders, write_renders, write_round37b_renders,
+};
+use pumpkin_kingdoms::scenes::SceneKind;
+use pumpkin_kingdoms::stamp::{MARKER_FLOOR, VolumeSink, fill_volume};
 use pumpkin_kingdoms::town::{CELL_SIZE, nearest_town, town_in_cell};
 use pumpkin_kingdoms::watertight::{check_floating_fragments, check_town};
 use pumpkin_util::world_seed::Seed;
@@ -167,6 +171,17 @@ fn render_one(
         return false;
     }
     let floating = check_floating_fragments(&plan_a, &vol_a);
+    for kind in [SceneKind::PillagerStronghold, SceneKind::RuinedCastle] {
+        let tag = format!("{kind:?} crop");
+        let hits: Vec<_> = floating.iter().filter(|line| line.contains(&tag)).collect();
+        if hits.is_empty() {
+            println!("  {tag}: no floating fragments");
+        } else {
+            for line in hits {
+                eprintln!("  {line}");
+            }
+        }
+    }
     if floating.is_empty() {
         println!("  no floating fragments");
     } else {
@@ -189,6 +204,13 @@ fn render_one(
         return false;
     }
     println!("  wrote planner PNGs");
+    if seed == 20_261_025 && cell_x == 0 && cell_z == 0 {
+        report_castle_sw_andesite(&plan_a, &vol_a);
+        if let Err(error) = write_round37b_renders(&plan_a, &vol_a, out_dir, "round37c") {
+            eprintln!("round37c render failed: {error}");
+            return false;
+        }
+    }
 
     if planner_only {
         println!("  (--planner-only, skipped real chunks)");
@@ -207,6 +229,39 @@ fn render_one(
     );
     let _ = nearest_town(seed, 0, 0);
     true
+}
+
+fn report_castle_sw_andesite(plan: &TownPlan, volume: &VolumeSink) {
+    let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::RuinedCastle)
+    else {
+        return;
+    };
+    let x = scene.rect.min_x;
+    let z = scene.rect.max_z;
+    let surface = plan.heights.height(x, z);
+    let andesite = Block::ANDESITE.default_state.id;
+    let mut top = None;
+    let mut bottom = None;
+    for y in volume.min_y..volume.min_y + volume.sy {
+        let Some(state) = volume.get(x, y, z) else {
+            continue;
+        };
+        if state.id != andesite {
+            continue;
+        }
+        bottom = Some(bottom.map_or(y, |b: i32| b.min(y)));
+        top = Some(top.map_or(y, |t: i32| t.max(y)));
+    }
+    match (bottom, top) {
+        (Some(bottom), Some(top)) => println!(
+            "  castle SW ({x},{z}) terrain_surface={surface} andesite {bottom}..={top} (top < surface: {})",
+            top < surface
+        ),
+        _ => println!("  castle SW ({x},{z}) terrain_surface={surface} no andesite"),
+    }
 }
 
 fn find_variant_seeds() -> Vec<(u64, i32, i32, String)> {
