@@ -388,6 +388,8 @@ fn write_scene_renders(
         let pad = match scene.kind {
             SceneKind::Harbour | SceneKind::Riverside => 4,
             SceneKind::PillagerCamp
+            | SceneKind::PillagerStronghold
+            | SceneKind::RuinedCastle
             | SceneKind::Farmstead
             | SceneKind::Hamlet
             | SceneKind::Cathedral
@@ -632,6 +634,8 @@ fn write_scene_renders(
         SceneKind::Festival,
         SceneKind::RidgeMill,
         SceneKind::PilgrimChapel,
+        SceneKind::PillagerStronghold,
+        SceneKind::RuinedCastle,
     ] {
         let scene = if kind == SceneKind::Watchtower {
             plan.scenes
@@ -713,6 +717,12 @@ fn write_scene_renders(
             }
             SceneKind::Festival => "Festival square · maypole, market cross and pillory",
             SceneKind::RidgeMill => "Ridge mill · oak-stock sails fixed to the hub",
+            SceneKind::PillagerStronghold => {
+                "Pillager stronghold · war tower, cages, forge, ballista yard"
+            }
+            SceneKind::RuinedCastle => {
+                "Ruined castle · broken curtain, toppled tower, overgrown court"
+            }
             _ => kind.label(),
         };
         save(
@@ -1300,6 +1310,111 @@ fn write_cutaways(
                 ),
             )?;
         }
+    }
+
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::PillagerStronghold)
+    {
+        if let Some(lot) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Watchtower && scene.rect.intersects(lot.rect))
+        {
+            let floor = lot_floor(plan, lot);
+            save(
+                &out_dir.join(format!("{stem}-stronghold-tower-cutaway.png")),
+                &render_room(
+                    volume,
+                    lot.rect,
+                    floor,
+                    floor + 19,
+                    "Stronghold · war tower interior",
+                ),
+            )?;
+        }
+        if let Some(lot) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Blacksmith && scene.rect.intersects(lot.rect))
+        {
+            let floor = lot_floor(plan, lot);
+            save(
+                &out_dir.join(format!("{stem}-stronghold-forge-cutaway.png")),
+                &render_room(
+                    volume,
+                    lot.rect,
+                    floor,
+                    floor + 5,
+                    "Stronghold · forge and armoury",
+                ),
+            )?;
+        }
+        let mut cage: Option<Rect> = None;
+        for z in scene.rect.min_z..=scene.rect.max_z {
+            for x in scene.rect.min_x..=scene.rect.max_x {
+                if plan.occ.kind(x, z) != CellKind::Cage {
+                    continue;
+                }
+                cage = Some(cage.map_or_else(
+                    || Rect::new(x, z, x, z),
+                    |rect| {
+                        Rect::new(
+                            rect.min_x.min(x),
+                            rect.min_z.min(z),
+                            rect.max_x.max(x),
+                            rect.max_z.max(z),
+                        )
+                    },
+                ));
+            }
+        }
+        if let Some(cage) = cage {
+            let floor = ridge_floor(plan, cage);
+            save(
+                &out_dir.join(format!("{stem}-stronghold-dungeon-cutaway.png")),
+                &render_room(
+                    volume,
+                    cage,
+                    floor,
+                    floor + 5,
+                    "Stronghold · cage pen with captives",
+                ),
+            )?;
+        }
+    }
+
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::RuinedCastle)
+        && let Some(lot) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Outpost && scene.rect.intersects(lot.rect))
+    {
+        let floor = ridge_floor(plan, lot.rect);
+        save(
+            &out_dir.join(format!("{stem}-ruined-keep-cutaway.png")),
+            &render_room(
+                volume,
+                lot.rect,
+                floor,
+                floor + 8,
+                "Ruined castle · half-intact keep",
+            ),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-ruined-crypt-cutaway.png")),
+            &render_room(
+                volume,
+                lot.rect,
+                floor - 5,
+                floor - 1,
+                "Ruined castle · furnished crypt",
+            ),
+        )?;
     }
     Ok(())
 }
