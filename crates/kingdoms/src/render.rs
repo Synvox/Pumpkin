@@ -167,6 +167,58 @@ pub fn write_breach_sequence(
     Ok(wall)
 }
 
+/// Iso of one gatehouse: intact, after a ram break, then restored from the plan.
+pub fn write_gate_sequence(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<(i32, i32)> {
+    std::fs::create_dir_all(out_dir)?;
+    let keep = plan.castle.inner;
+    let flag = plan.castle.flag;
+    let gate = plan
+        .gates
+        .iter()
+        .find(|g| {
+            ((g.x - keep.min_x).abs() > 8 || (g.z - keep.min_z).abs() > 8)
+                && ((g.x - flag.0).abs() > 6 || (g.z - flag.1).abs() > 6)
+        })
+        .or_else(|| plan.gates.first())
+        .ok_or_else(|| std::io::Error::other("no gate to render"))?;
+    let (gx, gz) = (gate.x, gate.z);
+    let pad = 12;
+    let before = render_iso(volume, gx - pad, gz - pad, gx + pad, gz + pad, 10, 1);
+    save(&out_dir.join(format!("{stem}-before.png")), &before)?;
+    let mut broken = clone_volume(volume);
+    let air = Block::AIR.default_state;
+    let fx = gate.facing.dx();
+    let fz = gate.facing.dz();
+    let wx = i32::from(fx == 0);
+    let wz = i32::from(fz == 0);
+    let gate_top = broken.top(gx, gz).map_or(80, |(y, _)| y);
+    // Ram smash: strip the crown (visible in iso) and open a standing-height
+    // tunnel through the leaves and flanking towers.
+    for d in -4..=4 {
+        for w in -5..=5 {
+            let x = gx + fx * d + wx * w;
+            let z = gz + fz * d + wz * w;
+            let Some((top, _)) = broken.top(x, z) else {
+                continue;
+            };
+            let floor = gate_top.saturating_sub(12).max(top.saturating_sub(14));
+            for y in floor..=top {
+                broken.put(x, y, z, air);
+            }
+        }
+    }
+    let after = render_iso(&broken, gx - pad, gz - pad, gx + pad, gz + pad, 10, 1);
+    save(&out_dir.join(format!("{stem}-after.png")), &after)?;
+    let repaired = render_iso(volume, gx - pad, gz - pad, gx + pad, gz + pad, 10, 1);
+    save(&out_dir.join(format!("{stem}-repaired.png")), &repaired)?;
+    Ok((gx, gz))
+}
+
 fn write_flag_renders(
     plan: &TownPlan,
     volume: &VolumeSink,

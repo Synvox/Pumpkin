@@ -474,6 +474,54 @@ pub fn place_assault_ladders(
     placed
 }
 
+/// Knock up to `budget` ladder blocks off the outer face. Returns how many went.
+pub fn topple_assault_ladders(
+    world: &Arc<World>,
+    wall: ScenePost,
+    camp: ScenePost,
+    floor_y: i32,
+    budget: u32,
+) -> u32 {
+    if budget == 0 {
+        return 0;
+    }
+    let mut fx = (camp.x - wall.x).signum();
+    let mut fz = (camp.z - wall.z).signum();
+    if fx == 0 && fz == 0 {
+        fz = 1;
+    } else if fx.abs() >= fz.abs() {
+        fz = 0;
+    } else {
+        fx = 0;
+    }
+    let lx = wall.x + fx;
+    let lz = wall.z + fz;
+    let mut cleared = 0u32;
+    for dy in (1..=LADDER_HEIGHT).rev() {
+        if cleared >= budget {
+            break;
+        }
+        let pos = BlockPos::new(lx, floor_y + dy, lz);
+        if !world.is_loaded(&pos) {
+            continue;
+        }
+        let (block, _) = world.get_block_and_state(&pos);
+        if block.id != Block::LADDER.id {
+            continue;
+        }
+        world.set_block_state(
+            &pos,
+            Block::AIR.default_state.id,
+            crate::siege::SIEGE_PLACE_FLAGS,
+        );
+        cleared += 1;
+    }
+    if cleared > 0 {
+        tracing::info!(x = lx, z = lz, cleared, "kingdoms assault ladders toppled");
+    }
+    cleared
+}
+
 fn ladder_facing(fx: i32, fz: i32) -> pumpkin_data::BlockStateId {
     let facing = match (fx.signum(), fz.signum()) {
         (1, _) => HorizontalFacing::East,

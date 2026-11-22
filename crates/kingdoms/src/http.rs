@@ -527,8 +527,32 @@ async fn post_chat(State(state): State<AppState>, headers: HeaderMap, body: Byte
     json_ok(json!({ "ok": true }))
 }
 
+fn insert_siege_tactics(
+    value: &mut Value,
+    approach: &str,
+    gate_state: &str,
+    gate_hp: u32,
+    ladders_placed: u32,
+    ladders_toppled: u32,
+    ram_hits: u32,
+    gate_breaks: u32,
+    gate_repairs: u32,
+) {
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    map.insert("approach".into(), json!(approach));
+    map.insert("gate_state".into(), json!(gate_state));
+    map.insert("gate_hp".into(), json!(gate_hp));
+    map.insert("ladders_placed".into(), json!(ladders_placed));
+    map.insert("ladders_toppled".into(), json!(ladders_toppled));
+    map.insert("ram_hits".into(), json!(ram_hits));
+    map.insert("gate_breaks".into(), json!(gate_breaks));
+    map.insert("gate_repairs".into(), json!(gate_repairs));
+}
+
 fn battle_json(b: &director::BattleState) -> Value {
-    json!({
+    let mut value = json!({
         "id": b.town_id,
         "kingdom": b.kingdom,
         "owner": b.owner,
@@ -563,7 +587,19 @@ fn battle_json(b: &director::BattleState) -> Value {
         "sappers_detonated": b.sappers_detonated,
         "blast_destroyed": b.blast_destroyed,
         "blast_queued": b.blast_queued,
-    })
+    });
+    insert_siege_tactics(
+        &mut value,
+        &b.approach,
+        &b.gate_state,
+        b.gate_hp,
+        b.ladders_placed,
+        b.ladders_toppled,
+        b.ram_hits,
+        b.gate_breaks,
+        b.gate_repairs,
+    );
+    value
 }
 
 fn war_json() -> Value {
@@ -578,40 +614,54 @@ fn war_json() -> Value {
             "last_tick": front.last_clock_tick,
         },
         "next_raid_id": front.next_raid_id,
-        "towns": front.towns.iter().map(|t| json!({
-            "id": t.id,
-            "kingdom": t.kingdom,
-            "owner": t.owner,
-            "alarm": t.alarm,
-            "raid_active": t.raid_active,
-            "gate_breached": t.gate_breached,
-            "keep": { "x": t.keep.0, "z": t.keep.1 },
-            "gate": t.gate.map(|(x, z)| json!({ "x": x, "z": z })),
-            "occupy_hold": t.occupy_hold,
-            "occupy_need": t.occupy_need,
-            "defenders": t.defenders,
-            "raiders": t.raiders,
-            "raid_side": t.raid_side,
-            "repair_until": t.repair_until,
-            "repair_queued": t.repair_queued,
-            "repair_placed": t.repair_placed,
-            "repair_pct": t.repair_pct,
-            "repair_started": t.repair_started,
-            "live": t.live,
-            "flag": { "x": t.flag.0, "z": t.flag.1 },
-            "flag_status": t.flag_status,
-            "flag_paused": t.flag_paused,
-            "flag_attackers": t.flag_attackers,
-            "flag_defenders": t.flag_defenders,
-            "morale": t.morale,
-            "bounty": t.bounty,
-            "cutoff": t.cutoff,
-            "explosions": t.explosions,
-            "sappers_planted": t.sappers_planted,
-            "sappers_detonated": t.sappers_detonated,
-            "blast_destroyed": t.blast_destroyed,
-            "blast_queued": t.blast_queued,
-        })).collect::<Vec<_>>(),
+        "towns": front.towns.iter().map(|t| {
+            let mut town = json!({
+                "id": t.id,
+                "kingdom": t.kingdom,
+                "owner": t.owner,
+                "alarm": t.alarm,
+                "raid_active": t.raid_active,
+                "gate_breached": t.gate_breached,
+                "keep": { "x": t.keep.0, "z": t.keep.1 },
+                "gate": t.gate.map(|(x, z)| json!({ "x": x, "z": z })),
+                "occupy_hold": t.occupy_hold,
+                "occupy_need": t.occupy_need,
+                "defenders": t.defenders,
+                "raiders": t.raiders,
+                "raid_side": t.raid_side,
+                "repair_until": t.repair_until,
+                "repair_queued": t.repair_queued,
+                "repair_placed": t.repair_placed,
+                "repair_pct": t.repair_pct,
+                "repair_started": t.repair_started,
+                "live": t.live,
+                "flag": { "x": t.flag.0, "z": t.flag.1 },
+                "flag_status": t.flag_status,
+                "flag_paused": t.flag_paused,
+                "flag_attackers": t.flag_attackers,
+                "flag_defenders": t.flag_defenders,
+                "morale": t.morale,
+                "bounty": t.bounty,
+                "cutoff": t.cutoff,
+                "explosions": t.explosions,
+                "sappers_planted": t.sappers_planted,
+                "sappers_detonated": t.sappers_detonated,
+                "blast_destroyed": t.blast_destroyed,
+                "blast_queued": t.blast_queued,
+            });
+            insert_siege_tactics(
+                &mut town,
+                &t.approach,
+                &t.gate_state,
+                t.gate_hp,
+                t.ladders_placed,
+                t.ladders_toppled,
+                t.ram_hits,
+                t.gate_breaks,
+                t.gate_repairs,
+            );
+            town
+        }).collect::<Vec<_>>(),
         "fronts": front.fronts,
         "heroes": director::all_heroes().iter().map(hero_json).collect::<Vec<_>>(),
     })
@@ -830,6 +880,11 @@ fn webhook_name(kind: CombatKind) -> Option<&'static str> {
         CombatKind::Explosion => Some("explosion"),
         CombatKind::SapperPlanted => Some("sapper_planted"),
         CombatKind::SapperDetonated => Some("sapper_detonated"),
+        CombatKind::LadderPlaced => Some("ladder_placed"),
+        CombatKind::LadderToppled => Some("ladder_toppled"),
+        CombatKind::RamHit => Some("ram_hit"),
+        CombatKind::GateBroken => Some("gate_broken"),
+        CombatKind::GateRepaired => Some("gate_repaired"),
         _ => None,
     }
 }
@@ -975,6 +1030,20 @@ mod tests {
         assert_eq!(
             webhook_name(CombatKind::SapperDetonated),
             Some("sapper_detonated")
+        );
+        assert_eq!(
+            webhook_name(CombatKind::LadderPlaced),
+            Some("ladder_placed")
+        );
+        assert_eq!(
+            webhook_name(CombatKind::LadderToppled),
+            Some("ladder_toppled")
+        );
+        assert_eq!(webhook_name(CombatKind::RamHit), Some("ram_hit"));
+        assert_eq!(webhook_name(CombatKind::GateBroken), Some("gate_broken"));
+        assert_eq!(
+            webhook_name(CombatKind::GateRepaired),
+            Some("gate_repaired")
         );
         assert!(webhook_name(CombatKind::Kill).is_none());
     }

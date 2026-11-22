@@ -17,6 +17,7 @@ use pumpkin_core::entity::tnt::TNTEntity;
 use pumpkin_core::world::World;
 use pumpkin_core::world::bossbar::{Bossbar, BossbarDivisions};
 use pumpkin_core::world::scoreboard::{CollisionRule, NameTagVisibility, Team};
+use pumpkin_data::Block;
 use pumpkin_data::damage::DamageType;
 use pumpkin_data::data_component::DataComponent;
 use pumpkin_data::data_component_impl::{DataComponentImpl, DyedColorImpl, EquipmentSlot};
@@ -59,7 +60,7 @@ use crate::lod::{
     PLAYER_SIM_RANGE, PathBudget, SpatialBuckets,
 };
 use crate::raid::{
-    RaidSide, RaidSpec, WAVE_ADVANCE_REMAINING, WAVE_SPACING_TICKS, WaveMember, compose_wave,
+    RaidSide, RaidSpec, WAVE_ADVANCE_REMAINING, WAVE_SPACING_TICKS, WaveMember, compose_wave_for,
     spawn_offset,
 };
 use crate::repair::{self, RepairJob};
@@ -72,6 +73,7 @@ use crate::siege::{
     in_courtyard, near_flag, on_flag_plate, owner_banner, owner_wool, tick_flag_hold,
 };
 use crate::sim::{SimSnapshot, write_named_snapshots_with_kills};
+use crate::tactics::{self, GateState, SiegeApproach};
 use crate::town::town_containing;
 
 const FORCELOAD_CAP: usize = 256;
@@ -119,6 +121,8 @@ const REPAIR_QUEUE_CAP: usize = 24;
 const REPAIR_SCAN_COLUMNS: usize = 4;
 /// No flag-distance progress for this long counts as a stuck column.
 const STUCK_TICKS: u32 = 200;
+/// Ram and ladder crews get this long to work before packed raiders storm.
+const SIEGE_STORM_DELAY: u32 = 1_600;
 
 const COMBAT_LOG_CAP: usize = 512;
 const RESPAWN_PERIOD: u32 = 200;
@@ -266,6 +270,14 @@ pub struct WarTownLine {
     pub sappers_detonated: u32,
     pub blast_destroyed: u32,
     pub blast_queued: u32,
+    pub approach: String,
+    pub gate_state: String,
+    pub gate_hp: u32,
+    pub ladders_placed: u32,
+    pub ladders_toppled: u32,
+    pub ram_hits: u32,
+    pub gate_breaks: u32,
+    pub gate_repairs: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -304,6 +316,14 @@ pub struct BattleState {
     pub sappers_detonated: u32,
     pub blast_destroyed: u32,
     pub blast_queued: u32,
+    pub approach: String,
+    pub gate_state: String,
+    pub gate_hp: u32,
+    pub ladders_placed: u32,
+    pub ladders_toppled: u32,
+    pub ram_hits: u32,
+    pub gate_breaks: u32,
+    pub gate_repairs: u32,
 }
 
 /// Live supply cart as shown on `GET /state`.
@@ -359,6 +379,11 @@ pub enum CombatKind {
     Explosion,
     SapperPlanted,
     SapperDetonated,
+    LadderPlaced,
+    LadderToppled,
+    RamHit,
+    GateBroken,
+    GateRepaired,
 }
 
 impl CombatKind {
@@ -395,6 +420,11 @@ impl CombatKind {
             Self::Explosion => "explosion",
             Self::SapperPlanted => "sapper_planted",
             Self::SapperDetonated => "sapper_detonated",
+            Self::LadderPlaced => "ladder_placed",
+            Self::LadderToppled => "ladder_toppled",
+            Self::RamHit => "ram_hit",
+            Self::GateBroken => "gate_broken",
+            Self::GateRepaired => "gate_repaired",
         }
     }
 }
@@ -584,6 +614,17 @@ struct TownWar {
     retake_hold: u32,
     gates_closed: bool,
     gate_breached: bool,
+    approach: SiegeApproach,
+    gate_state: GateState,
+    gate_hp: u32,
+    live_ladders: Vec<tactics::LiveLadder>,
+    ladders_placed_n: u32,
+    ladders_toppled_n: u32,
+    ram_hits: u32,
+    gate_breaks: u32,
+    gate_repairs: u32,
+    gate_jobs_placed: u32,
+    last_ram_hit_tick: u32,
     repair_jobs: VecDeque<RepairJob>,
     repair_assigned: HashMap<i32, RepairJob>,
     builders: Vec<i32>,
@@ -697,6 +738,7 @@ struct ActiveRaid {
     ram_spawned: bool,
     treb_spawned: bool,
     tower_spawned: bool,
+    approach: SiegeApproach,
     materialized: bool,
     virt_raiders: u16,
     virt_defenders: u16,
@@ -958,7 +1000,13 @@ impl Director {
                 .get(town_id)
                 .ok_or_else(|| format!("missing town {town_id}"))?;
             let keep = war.scene.keep();
-            let pillager_camp = war.scene.raid_camps().first().copied().unwrap_or(keep);
+            let gate_post = war.scene.gates().first().map(|g| ScenePost::new(g.x, g.z));
+            let pillager_camp = tactics::camp_outside(
+                war.scene.raid_camps().first().copied().unwrap_or(keep),
+                keep,
+                war.scene.keep_rect(),
+                gate_post,
+            );
             let camp = if spec.side.is_kingdom_army() {
                 war.scene.road_approach().unwrap_or_else(|| {
                     let mirrored =
@@ -996,6 +1044,9 @@ impl Director {
         let virt_raiders = spec.raiders;
         let virt_defenders = spec.extra_defenders;
         if let Some(war) = self.towns.get_mut(town_id) {
+            let profile = tactics::profile_from_scene(&war.scene);
+            let approach =
+                tactics::pick_approach(&profile, spec.raiders, tactics::mix_from_id(&war.info_id));
             war.raid = Some(ActiveRaid {
                 id,
                 spec,
@@ -1013,12 +1064,24 @@ impl Director {
                 ram_spawned: false,
                 treb_spawned: false,
                 tower_spawned: false,
+                approach,
                 materialized,
                 virt_raiders,
                 virt_defenders,
                 virt_march: 0,
                 ghosts: Vec::new(),
             });
+            war.approach = approach;
+            war.gate_state = GateState::Open;
+            war.gate_hp = tactics::GATE_MAX_HP;
+            war.live_ladders.clear();
+            war.ladders_placed_n = 0;
+            war.ladders_toppled_n = 0;
+            war.ram_hits = 0;
+            war.gate_breaks = 0;
+            war.gate_repairs = 0;
+            war.gate_jobs_placed = 0;
+            war.last_ram_hit_tick = 0;
             war.gates_closed = false;
             war.gate_breached = false;
             war.ladders_placed = false;
@@ -1069,6 +1132,10 @@ impl Director {
             gate_x = gate.map(|g| g.x),
             gate_z = gate.map(|g| g.z),
             warm_until,
+            approach = self
+                .towns
+                .get(town_id)
+                .map_or("ram", |w| w.approach.as_str()),
             "kingdoms raid started"
         );
         Ok(id)
@@ -1219,6 +1286,14 @@ impl Director {
             sappers_detonated: war.sappers_detonated,
             blast_destroyed: war.blast_destroyed,
             blast_queued: war.blast_queued,
+            approach: war.approach.as_str().to_owned(),
+            gate_state: war.gate_state.as_str().to_owned(),
+            gate_hp: war.gate_hp,
+            ladders_placed: war.ladders_placed_n,
+            ladders_toppled: war.ladders_toppled_n,
+            ram_hits: war.ram_hits,
+            gate_breaks: war.gate_breaks,
+            gate_repairs: war.gate_repairs,
         })
     }
 
@@ -1297,6 +1372,14 @@ impl Director {
                     sappers_detonated: war.sappers_detonated,
                     blast_destroyed: war.blast_destroyed,
                     blast_queued: war.blast_queued,
+                    approach: war.approach.as_str().to_owned(),
+                    gate_state: war.gate_state.as_str().to_owned(),
+                    gate_hp: war.gate_hp,
+                    ladders_placed: war.ladders_placed_n,
+                    ladders_toppled: war.ladders_toppled_n,
+                    ram_hits: war.ram_hits,
+                    gate_breaks: war.gate_breaks,
+                    gate_repairs: war.gate_repairs,
                 }
             })
             .collect();
@@ -1599,6 +1682,7 @@ fn shout_kind(kind: CombatKind) -> Option<ShoutKind> {
         | CombatKind::FlagChanged => Some(ShoutKind::Victory),
         CombatKind::CaptureStarted => Some(ShoutKind::Charge),
         CombatKind::CapturePaused => Some(ShoutKind::Hold),
+        CombatKind::GateBroken => Some(ShoutKind::GateBreached),
         _ => None,
     }
 }
@@ -1643,6 +1727,17 @@ impl TownWar {
             retake_hold: 0,
             gates_closed: false,
             gate_breached: false,
+            approach: SiegeApproach::Ram,
+            gate_state: GateState::Open,
+            gate_hp: tactics::GATE_MAX_HP,
+            live_ladders: Vec::new(),
+            ladders_placed_n: 0,
+            ladders_toppled_n: 0,
+            ram_hits: 0,
+            gate_breaks: 0,
+            gate_repairs: 0,
+            gate_jobs_placed: 0,
+            last_ram_hit_tick: 0,
             repair_jobs: VecDeque::new(),
             repair_assigned: HashMap::new(),
             builders: Vec::new(),
@@ -1896,13 +1991,14 @@ fn apply_saved_town(war: &mut TownWar, saved: siege::SavedTown, now: u32) {
             living: Vec::new(),
             temps: Vec::new(),
             warm_until: now,
-            pending_members: compose_wave(raid.pending_left, raid.wave),
+            pending_members: compose_wave_for(raid.pending_left, raid.wave, war.approach),
             pending_retake: raid.pending_retake,
             spawn_cursor: 0,
             extra_left: raid.extra_left,
             ram_spawned: true,
             treb_spawned: true,
             tower_spawned: true,
+            approach: war.approach,
             materialized: false,
             virt_raiders: raid.virt_raiders,
             virt_defenders: raid.virt_defenders,
@@ -2725,6 +2821,11 @@ fn maybe_soak_sample(world: &World, tick: u32, mspt: f64, director_ms: f64, town
         .map(|w| w.repair_jobs.len() + w.repair_assigned.len())
         .sum();
     let repair_placed: u32 = dir.towns.values().map(|w| w.repair_placed).sum();
+    let ladders: u32 = dir.towns.values().map(|w| w.ladders_placed_n).sum();
+    let toppled: u32 = dir.towns.values().map(|w| w.ladders_toppled_n).sum();
+    let ram_hits: u32 = dir.towns.values().map(|w| w.ram_hits).sum();
+    let gate_breaks: u32 = dir.towns.values().map(|w| w.gate_breaks).sum();
+    let gate_repairs: u32 = dir.towns.values().map(|w| w.gate_repairs).sum();
     let capital_lost = dir.towns.values().any(|w| {
         parse_town_id(&w.info_id).is_some_and(|(_, cx, cz)| cx == 0 && cz == 0)
             && w.owner.as_str() != w.kingdom.as_str()
@@ -2734,7 +2835,7 @@ fn maybe_soak_sample(world: &World, tick: u32, mspt: f64, director_ms: f64, town
     let queued_total = REPAIR_QUEUED_TOTAL.load(Ordering::Relaxed);
     let placed_total = REPAIR_PLACED_TOTAL.load(Ordering::Relaxed);
     let line = format!(
-        "{tick},{mspt:.2},{director_ms:.2},{entities},{tickets},{rss_kb},{raids},{bodies},{live_fronts},{abstract_fronts},{live_bodies},{towns_us},{repair_queued},{repair_placed},{queued_total},{placed_total},{}\n",
+        "{tick},{mspt:.2},{director_ms:.2},{entities},{tickets},{rss_kb},{raids},{bodies},{live_fronts},{abstract_fronts},{live_bodies},{towns_us},{repair_queued},{repair_placed},{queued_total},{placed_total},{},{ladders},{toppled},{ram_hits},{gate_breaks},{gate_repairs}\n",
         u8::from(capital_lost)
     );
     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -3157,7 +3258,8 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                         if raid.spec.side.is_kingdom_army() {
                             raid.pending_retake = count;
                         } else {
-                            raid.pending_members = compose_wave(count, raid.wave);
+                            raid.pending_members =
+                                compose_wave_for(count, raid.wave, raid.approach);
                         }
                     }
                 }
@@ -3182,7 +3284,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                         && present < usize::from(raid.spec.raiders) / 2
                     {
                         let need = raid.spec.raiders.saturating_sub(present as u16).max(40);
-                        raid.pending_members = compose_wave(need, 0);
+                        raid.pending_members = compose_wave_for(need, 0, raid.approach);
                     }
                 } else if raid.materialized
                     && raid.wave >= raid.spec.waves
@@ -3876,9 +3978,9 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             let near_ladders =
                 (pos.x - f64::from(ladder_dest.x)).hypot(pos.z - f64::from(ladder_dest.z)) < 10.0;
             if !climbed && near_ladders && !in_courtyard(keep_rect, pos.x, pos.z) {
-                let nx = f64::from(keep_rect.min_x + keep_rect.width() / 2) + 0.5;
-                let ny = f64::from(ladder_dest.y.max(keep_dest.y));
-                let nz = f64::from(keep_rect.min_z + keep_rect.depth() / 2) + 0.5;
+                let nx = f64::from(ladder_dest.x) + 0.5;
+                let ny = f64::from(ladder_dest.y);
+                let nz = f64::from(ladder_dest.z) + 0.5;
                 base.set_pos(Vector3::new(nx, ny, nz));
                 climbed = true;
                 curtain_cross.get_or_insert((id, nx, ny, nz));
@@ -4087,6 +4189,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         log_slow_phase(tick, "engines", engines_started);
     }
     tick_sappers(world, town_id, tick);
+    tick_siege_tactics(world, town_id, tick, &snapshots, ram_at_gate);
     let ghosts = {
         let dir = lock();
         dir.towns
@@ -4094,20 +4197,34 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             .and_then(|w| w.raid.as_ref())
             .map_or_else(Vec::new, |r| r.ghosts.clone())
     };
-    let mut stormed = packed_storm_gate(
-        &snapshots,
-        &ghosts,
-        &siege_gates,
-        STORMING_RANGE,
-        STORMING_COUNT,
-    );
-    let last_progress = {
+    let (approach, wave_tick, already_breached, last_progress) = {
         let dir = lock();
         dir.towns
             .get(town_id)
-            .map_or(tick, |w| w.last_progress_tick)
+            .map_or((SiegeApproach::Ram, tick, false, tick), |w| {
+                (
+                    w.approach,
+                    w.raid.as_ref().map_or(tick, |r| r.last_wave_tick),
+                    w.gate_breached,
+                    w.last_progress_tick,
+                )
+            })
     };
-    if stormed.is_none() && tick.saturating_sub(last_progress) >= STUCK_TICKS {
+    let hold_storm = matches!(approach, SiegeApproach::Ram | SiegeApproach::Ladder)
+        && tick.saturating_sub(wave_tick) < SIEGE_STORM_DELAY
+        && !already_breached;
+    let mut stormed = if hold_storm {
+        None
+    } else {
+        packed_storm_gate(
+            &snapshots,
+            &ghosts,
+            &siege_gates,
+            STORMING_RANGE,
+            STORMING_COUNT,
+        )
+    };
+    if stormed.is_none() && tick.saturating_sub(last_progress) >= STUCK_TICKS && !hold_storm {
         stormed = packed_storm_gate(
             &snapshots,
             &ghosts,
@@ -4118,7 +4235,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         .or_else(|| nearest_gate_to_raiders(&snapshots, &ghosts, &siege_gates));
     }
     let storming = stormed.is_some();
-    if ram_at_gate || storming {
+    if storming {
         let ram_gate = {
             let dir = lock();
             dir.towns.get(town_id).and_then(|w| {
@@ -4138,7 +4255,12 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             let mut dir = lock();
             let fire = if let Some(war) = dir.towns.get_mut(town_id) {
                 let already = war.gate_breached;
-                war.gate_breached = true;
+                if !already {
+                    war.gate_breached = true;
+                    war.gate_state = GateState::Broken;
+                    war.gate_hp = 0;
+                    war.gate_breaks = war.gate_breaks.saturating_add(1);
+                }
                 let fresh = cells.iter().any(|c| !war.pending_breach.contains(c));
                 if fresh {
                     war.pending_breach.extend(cells);
@@ -4158,11 +4280,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     other: Some(n as i32),
                     x: f64::from(gate.x),
                     z: f64::from(gate.z),
-                    note: if ram_at_gate && stormed.is_none() {
-                        format!("{town_id} ram breached gate")
-                    } else {
-                        format!("{town_id} raiders stormed the gate")
-                    },
+                    note: format!("{town_id} raiders stormed the gate"),
                 });
             }
         }
@@ -4434,7 +4552,11 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         dir.towns
             .get(town_id)
             .and_then(|w| w.raid.as_ref())
-            .is_some_and(|r| wave == 0 && !r.tower_spawned)
+            .is_some_and(|r| {
+                wave == 0
+                    && !r.tower_spawned
+                    && tactics::engines_for_approach(r.spec.raiders, r.approach).2
+            })
     };
     if spawn_tower {
         if take_spawn_slots(1) == 0 {
@@ -4462,7 +4584,7 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         dir.towns.get(town_id).and_then(|w| w.raid.as_ref()).map_or(
             (false, false, true, true),
             |r| {
-                let (ram, treb) = engines::engines_for_raid(r.spec.raiders);
+                let (ram, treb, _) = tactics::engines_for_approach(r.spec.raiders, r.approach);
                 (ram, treb, r.ram_spawned, r.treb_spawned)
             },
         )
@@ -4573,6 +4695,7 @@ fn spawn_wave_batch(world: &Arc<World>, town_id: &str, tick: u32) {
         let pos = spawn_offset(post, ring, y);
         if job != MarchJob::Ram
             && job != MarchJob::Sapper
+            && job != MarchJob::Ladder
             && should_virtualize(&players, pos.x, pos.z)
         {
             if remaining == 0 {
@@ -5727,6 +5850,7 @@ fn remember_builders(world: &World, town_id: &str) {
 
 fn note_repair_restored(town_id: &str, job: RepairJob, tick: u32) {
     let mut dir = lock();
+    let mut repaired = None;
     if let Some(war) = dir.towns.get_mut(town_id) {
         if war.repair_started == 0 {
             war.repair_started = tick;
@@ -5736,6 +5860,36 @@ fn note_repair_restored(town_id: &str, job: RepairJob, tick: u32) {
         war.repair_placed_this_tick = war.repair_placed_this_tick.saturating_add(1);
         war.last_repair_tick = tick;
         REPAIR_PLACED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if job.band == crate::repair::RepairBand::Gate as u8 {
+            war.gate_jobs_placed = war.gate_jobs_placed.saturating_add(1);
+            let left = war
+                .repair_jobs
+                .iter()
+                .chain(war.repair_assigned.values())
+                .filter(|j| j.band == crate::repair::RepairBand::Gate as u8)
+                .count() as u32;
+            if tactics::gate_restored(
+                war.gate_state == GateState::Broken,
+                left,
+                war.gate_jobs_placed,
+            ) {
+                war.gate_state = GateState::Closed;
+                war.gate_hp = tactics::GATE_MAX_HP;
+                war.gate_repairs = war.gate_repairs.saturating_add(1);
+                repaired = Some((war.scene.keep().x, war.scene.keep().z));
+            }
+        }
+    }
+    if let Some((x, z)) = repaired {
+        dir.push_event(CombatEvent {
+            tick,
+            kind: CombatKind::GateRepaired,
+            actor: job.x,
+            other: Some(job.z),
+            x: f64::from(x),
+            z: f64::from(z),
+            note: format!("{town_id} gate repaired"),
+        });
     }
 }
 
@@ -6217,10 +6371,16 @@ fn tick_moving_ram(
         }
         return;
     }
-    let (dest, kingdom_army) = {
+    let (dest, kingdom_army, ram_approach) = {
         let dir = lock();
         dir.towns.get(town_id).map_or_else(
-            || (ScenePost::new(ram_mut.x as i32, ram_mut.z as i32), false),
+            || {
+                (
+                    ScenePost::new(ram_mut.x as i32, ram_mut.z as i32),
+                    false,
+                    false,
+                )
+            },
             |w| {
                 (
                     w.threatened.unwrap_or_else(|| {
@@ -6232,6 +6392,7 @@ fn tick_moving_ram(
                     w.raid
                         .as_ref()
                         .is_some_and(|r| r.spec.side.is_kingdom_army()),
+                    w.approach == SiegeApproach::Ram,
                 )
             },
         )
@@ -6256,7 +6417,20 @@ fn tick_moving_ram(
     }
     let crew_near = crate::ram::count_near(&crew, ram_mut, crate::ram::crew_range());
     let def_near = crate::ram::count_near(&defenders, ram_mut, crate::ram::defender_range());
-    let result = crate::ram::tick_ram(world, ram_mut, dest, crew_near, def_near);
+    let army = !crew.is_empty()
+        || snapshots.iter().any(|(_, f)| {
+            if kingdom_army {
+                matches!(f, Faction::Kingdom(_))
+            } else {
+                matches!(f, Faction::Pillager)
+            }
+        });
+    let push = if ram_approach && army {
+        crew_near.max(tactics::RAM_CREW_MIN)
+    } else {
+        crew_near
+    };
+    let result = crate::ram::tick_ram(world, ram_mut, dest, push, def_near);
     match result {
         crate::ram::RamTick::AtGate if !breached => *ram_at_gate = true,
         crate::ram::RamTick::Destroyed => {
@@ -6493,7 +6667,11 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
     let spawn_missing_tower = {
         let dir = lock();
         dir.towns.get(town_id).is_some_and(|w| {
-            alarm && w.raid.as_ref().is_some_and(|r| !r.tower_spawned) && w.siege_tower.is_none()
+            alarm
+                && w.raid.as_ref().is_some_and(|r| {
+                    !r.tower_spawned && tactics::engines_for_approach(r.spec.raiders, r.approach).2
+                })
+                && w.siege_tower.is_none()
         })
     };
     if spawn_missing_tower {
@@ -6646,15 +6824,14 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
     if let Some(mut moving) = tower {
         let visible = player_near(world, moving.x, moving.z, PLAYER_SIM_RANGE);
         let arrived = engines::tick_tower(world, &mut moving, wall, visible);
-        if arrived && !ladders_done && !wrote {
+        if arrived && !wrote {
             let n = raise_ladders(world, wall, camp, ladder_floor);
             let mut dir = lock();
             if let Some(war) = dir.towns.get_mut(town_id) {
-                war.ladders_placed = true;
                 war.siege_tower = Some(moving);
             }
-            note_ladders_raised(&mut dir, town_id, tick, wall, n);
-            wrote = true;
+            record_ladder_plant(&mut dir, town_id, tick, wall, n);
+            wrote = n > 0;
         } else {
             let mut dir = lock();
             if let Some(war) = dir.towns.get_mut(town_id) {
@@ -6664,20 +6841,21 @@ fn tick_siege_engines(world: &Arc<World>, town_id: &str, tick: u32, alarm: bool)
     }
 
     if alarm && !ladders_done && !wrote {
+        let ladder_approach = {
+            let dir = lock();
+            dir.towns
+                .get(town_id)
+                .is_some_and(|w| w.approach == SiegeApproach::Ladder)
+        };
         let crew_at_wall = {
             let dir = lock();
-            dir.towns.get(town_id).is_some_and(|w| {
-                w.wired.len() > 2 && (w.raider_gate_dist < 16.0 || tick.is_multiple_of(40))
-            })
+            dir.towns.get(town_id).is_some_and(|w| w.wired.len() > 2)
         };
-        if crew_at_wall || tick.is_multiple_of(40) {
+        if ladder_approach && crew_at_wall {
             let n = raise_ladders(world, wall, camp, ladder_floor);
             if n > 0 {
                 let mut dir = lock();
-                if let Some(war) = dir.towns.get_mut(town_id) {
-                    war.ladders_placed = true;
-                }
-                note_ladders_raised(&mut dir, town_id, tick, wall, n);
+                record_ladder_plant(&mut dir, town_id, tick, wall, n);
                 wrote = true;
             }
         }
@@ -6956,6 +7134,432 @@ pub fn try_trade_tnt(player: &Player, target: &dyn EntityBase) -> bool {
         .color_named(NamedColor::Gold),
     );
     true
+}
+
+fn tick_siege_tactics(
+    world: &Arc<World>,
+    town_id: &str,
+    tick: u32,
+    snapshots: &[(Arc<dyn EntityBase>, Faction)],
+    ram_at_gate: bool,
+) {
+    let (gate, camp, keep, flag, approach, state, hp, last_hit) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        if !war.alarm {
+            return;
+        }
+        let gate = war.threatened.unwrap_or_else(|| {
+            war.scene
+                .gates()
+                .first()
+                .map_or_else(|| war.scene.keep(), |g| ScenePost::new(g.x, g.z))
+        });
+        (
+            gate,
+            war.raid
+                .as_ref()
+                .map_or_else(|| war.scene.keep(), |r| r.camp),
+            war.scene.keep_rect(),
+            (war.scene.flag().x, war.scene.flag().z),
+            war.approach,
+            war.gate_state,
+            war.gate_hp,
+            war.last_ram_hit_tick,
+        )
+    };
+    let mut attackers = Vec::new();
+    let mut defenders = Vec::new();
+    let mut ram_crew = Vec::new();
+    let mut ladder_crew = Vec::new();
+    let mut above = 0u32;
+    let walk_y = f64::from(tactics::wall_walk_y(standing_y(world, gate)));
+    for (entity, faction) in snapshots {
+        let p = entity.get_entity().pos.load();
+        let job = job_of(entity.get_entity());
+        match faction {
+            Faction::Pillager => {
+                attackers.push((p.x, p.z));
+                if job == MarchJob::Ram {
+                    ram_crew.push((p.x, p.z));
+                }
+                if job == MarchJob::Ladder {
+                    ladder_crew.push((p.x, p.z));
+                }
+            }
+            Faction::Kingdom(_) => {
+                defenders.push((p.x, p.z, p.y));
+                if (p.y - walk_y).abs() <= 2.0
+                    && tactics::dist_xz(p.x, p.z, gate) <= tactics::GATE_APPROACH_RANGE
+                {
+                    above += 1;
+                }
+            }
+            Faction::Neutral => {}
+        }
+    }
+    {
+        let dir = lock();
+        if let Some(raid) = dir.towns.get(town_id).and_then(|w| w.raid.as_ref()) {
+            for g in &raid.ghosts {
+                if !matches!(g.faction, Faction::Pillager) {
+                    continue;
+                }
+                attackers.push((g.x, g.z));
+                if g.job == MarchJob::Ram {
+                    ram_crew.push((g.x, g.z));
+                }
+                if g.job == MarchJob::Ladder {
+                    ladder_crew.push((g.x, g.z));
+                }
+            }
+        }
+    }
+    let attackers_near = tactics::count_near_post(&attackers, gate, tactics::GATE_APPROACH_RANGE);
+    let sallying = defenders
+        .iter()
+        .filter(|(x, z, _)| tactics::dist_xz(*x, *z, gate) <= tactics::SALLY_RANGE)
+        .count() as u32;
+    let mut crew = tactics::count_near_post(&ram_crew, gate, crate::ram::crew_range());
+    if ram_at_gate && approach == SiegeApproach::Ram {
+        crew = crew.max(tactics::RAM_CREW_MIN);
+    }
+    let ram_ready =
+        ram_at_gate || (approach == SiegeApproach::Ram && crew >= tactics::RAM_CREW_MIN);
+    let due = ram_ready && tick.saturating_sub(last_hit) >= tactics::RAM_HIT_PERIOD;
+    let update = tactics::tick_gate(state, attackers_near, sallying, hp, due, crew, above);
+    {
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.gate_state = update.state;
+            war.gate_hp = update.hp;
+            if update.closed {
+                war.gates_closed = true;
+            }
+            if update.ram_hit {
+                war.ram_hits = war.ram_hits.saturating_add(1);
+                war.last_ram_hit_tick = tick;
+            }
+            if update.broken {
+                war.gate_breached = true;
+                war.gate_breaks = war.gate_breaks.saturating_add(1);
+            }
+        }
+        let hits = dir.towns.get(town_id).map_or(0, |w| w.ram_hits as i32);
+        if update.ram_hit {
+            dir.push_event(CombatEvent {
+                tick,
+                kind: CombatKind::RamHit,
+                actor: crew as i32,
+                other: Some(update.hp as i32),
+                x: f64::from(gate.x),
+                z: f64::from(gate.z),
+                note: format!("{town_id} ram hit the gate hp={}", update.hp),
+            });
+        }
+        if update.broken {
+            dir.push_event(CombatEvent {
+                tick,
+                kind: CombatKind::GateBroken,
+                actor: crew as i32,
+                other: Some(hits),
+                x: f64::from(gate.x),
+                z: f64::from(gate.z),
+                note: format!("{town_id} gate broken"),
+            });
+        }
+    }
+    if update.closed {
+        let gates = {
+            let dir = lock();
+            dir.towns
+                .get(town_id)
+                .map(|w| w.scene.gates().to_vec())
+                .unwrap_or_default()
+        };
+        let cells = siege::portcullis_cells(world, &gates, |x, z| {
+            standing_y(world, ScenePost::new(x, z))
+        });
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            war.pending_bars = cells;
+        }
+    }
+    if update.opened_for_sally {
+        let info = {
+            let dir = lock();
+            dir.towns
+                .get(town_id)
+                .and_then(|w| w.scene.gates().first().copied())
+        };
+        if let Some(info) = info {
+            let cells = siege::gate_bar_cells(world, info, standing_y(world, gate));
+            let mut dir = lock();
+            if let Some(war) = dir.towns.get_mut(town_id) {
+                war.pending_breach.extend(cells.into_iter().take(4));
+            }
+        }
+    }
+    if update.broken {
+        let info = {
+            let dir = lock();
+            dir.towns.get(town_id).and_then(|w| {
+                w.threatened
+                    .or_else(|| w.scene.gates().first().map(|g| ScenePost::new(g.x, g.z)))
+                    .and_then(|post| {
+                        w.scene
+                            .gates()
+                            .iter()
+                            .copied()
+                            .find(|g| (g.x - post.x).abs() + (g.z - post.z).abs() < 8)
+                    })
+            })
+        };
+        if let Some(info) = info {
+            let cells = siege::gate_bar_cells(world, info, standing_y(world, gate));
+            let punches = collect_gate_punches(world, info, standing_y(world, gate), keep, flag, 4);
+            {
+                let mut dir = lock();
+                if let Some(war) = dir.towns.get_mut(town_id) {
+                    war.pending_breach.extend(cells);
+                }
+            }
+            enqueue_punch_break(town_id, punches, tick);
+        }
+    } else if update.ram_hit {
+        if let Some(info) = {
+            let dir = lock();
+            dir.towns.get(town_id).and_then(|w| {
+                w.scene
+                    .gates()
+                    .iter()
+                    .copied()
+                    .find(|g| (g.x - gate.x).abs() + (g.z - gate.z).abs() < 8)
+            })
+        } {
+            let punches = collect_gate_punches(world, info, standing_y(world, gate), keep, flag, 2);
+            enqueue_punch_break(town_id, punches, tick);
+        }
+        if above > 0 {
+            let mut dir = lock();
+            if let Some(war) = dir.towns.get_mut(town_id)
+                && let Some(ram) = war.ram.as_mut()
+            {
+                ram.hp -= tactics::murder_hole_chip(above);
+            }
+        }
+    }
+    if approach == SiegeApproach::Ladder {
+        tick_ladder_tactics(world, town_id, tick, &ladder_crew, &defenders, camp);
+    }
+}
+
+fn collect_gate_punches(
+    world: &World,
+    gate: crate::info::GateInfo,
+    floor_y: i32,
+    keep: crate::geom::Rect,
+    flag: (i32, i32),
+    budget: usize,
+) -> Vec<engines::PunchHit> {
+    let mut hits = Vec::new();
+    let (dx, dz) = match gate.facing {
+        crate::geom::Dir::North | crate::geom::Dir::South => (3, 1),
+        crate::geom::Dir::East | crate::geom::Dir::West => (1, 3),
+    };
+    'cells: for y in floor_y + 1..=floor_y + 5 {
+        for x in gate.x - dx..=gate.x + dx {
+            for z in gate.z - dz..=gate.z + dz {
+                if hits.len() >= budget {
+                    break 'cells;
+                }
+                if !tactics::ram_punch_allowed(x, z, keep, flag) {
+                    continue;
+                }
+                let pos = BlockPos::new(x, y, z);
+                if !world.is_loaded(&pos) {
+                    continue;
+                }
+                let (block, state) = world.get_block_and_state(&pos);
+                if engines::is_protected_block(block) || !state.is_solid() {
+                    continue;
+                }
+                if block.id == Block::IRON_BARS.id {
+                    continue;
+                }
+                hits.push(engines::PunchHit {
+                    x,
+                    y,
+                    z,
+                    was: state.id.as_u16(),
+                });
+            }
+        }
+    }
+    hits
+}
+
+fn tick_ladder_tactics(
+    world: &Arc<World>,
+    town_id: &str,
+    tick: u32,
+    crew: &[(f64, f64)],
+    defenders: &[(f64, f64, f64)],
+    camp: ScenePost,
+) {
+    let (posts, keep_y, need_seed) = {
+        let dir = lock();
+        let Some(war) = dir.towns.get(town_id) else {
+            return;
+        };
+        let posts: Vec<(i32, i32, i32)> = war
+            .scene
+            .archer_posts()
+            .iter()
+            .map(|p| (p.x, p.height_or(war.scene.keep().y), p.z))
+            .collect();
+        (posts, war.scene.keep().y, war.live_ladders.is_empty())
+    };
+    if need_seed {
+        let low = tactics::low_wall_points(&posts, 4);
+        let mut dir = lock();
+        if let Some(war) = dir.towns.get_mut(town_id) {
+            for (x, y, z) in low {
+                let (fx, fz, _, _) = tactics::ladder_foot((x, z), (camp.x, camp.z));
+                war.live_ladders.push(tactics::LiveLadder {
+                    wall_x: x,
+                    wall_z: z,
+                    foot_x: fx,
+                    foot_z: fz,
+                    floor_y: y.saturating_sub(tactics::wall_walk_y(0).max(1)),
+                    remaining: 0,
+                });
+            }
+            if war.live_ladders.is_empty() {
+                let wall = treb_wall_target(&war.scene, war.threatened, camp);
+                let (fx, fz, _, _) = tactics::ladder_foot((wall.x, wall.z), (camp.x, camp.z));
+                war.live_ladders.push(tactics::LiveLadder {
+                    wall_x: wall.x,
+                    wall_z: wall.z,
+                    foot_x: fx,
+                    foot_z: fz,
+                    floor_y: keep_y.saturating_sub(crate::siege::WALL_WALK_LIFT),
+                    remaining: 0,
+                });
+            }
+        }
+    }
+    let ladders = {
+        let dir = lock();
+        dir.towns
+            .get(town_id)
+            .map(|w| w.live_ladders.clone())
+            .unwrap_or_default()
+    };
+    let height = crate::siege::WALL_WALK_LIFT as u32;
+    for (i, ladder) in ladders.into_iter().enumerate() {
+        let wall = ScenePost::new(ladder.wall_x, ladder.wall_z);
+        let dist = crew
+            .iter()
+            .map(|(x, z)| (*x - f64::from(ladder.foot_x)).hypot(*z - f64::from(ladder.foot_z)))
+            .fold(f64::INFINITY, f64::min);
+        let close = tactics::can_place_ladder(dist, ladder.remaining, height)
+            || (dist <= tactics::GATE_APPROACH_RANGE && ladder.remaining < height)
+            || (crew.is_empty() && ladder.remaining < height && tick.is_multiple_of(10));
+        if close {
+            let n = raise_ladders(world, wall, camp, ladder.floor_y);
+            if n > 0 {
+                let mut dir = lock();
+                if let Some(war) = dir.towns.get_mut(town_id)
+                    && let Some(live) = war.live_ladders.get_mut(i)
+                {
+                    live.remaining = live.remaining.saturating_add(n).min(height);
+                }
+                record_ladder_plant(&mut dir, town_id, tick, wall, n);
+                break;
+            }
+        }
+        let on_walk = defenders
+            .iter()
+            .filter(|(x, z, y)| {
+                (*x - f64::from(ladder.wall_x)).hypot(*z - f64::from(ladder.wall_z))
+                    <= tactics::LADDER_TOPPLE_RANGE
+                    && *y >= f64::from(tactics::wall_walk_y(ladder.floor_y)) - 1.0
+            })
+            .count() as u32;
+        let knock = tactics::topple_blocks(on_walk, ladder.remaining);
+        if knock > 0 {
+            let n = engines::topple_assault_ladders(world, wall, camp, ladder.floor_y, knock);
+            if n > 0 {
+                let mut gone = false;
+                let mut dir = lock();
+                if let Some(war) = dir.towns.get_mut(town_id) {
+                    if let Some(live) = war.live_ladders.get_mut(i) {
+                        live.remaining = live.remaining.saturating_sub(n);
+                        gone = live.remaining == 0;
+                    }
+                    if gone {
+                        war.ladders_toppled_n = war.ladders_toppled_n.saturating_add(1);
+                    }
+                }
+                if gone {
+                    dir.push_event(CombatEvent {
+                        tick,
+                        kind: CombatKind::LadderToppled,
+                        actor: on_walk as i32,
+                        other: Some(n as i32),
+                        x: f64::from(wall.x),
+                        z: f64::from(wall.z),
+                        note: format!("{town_id} ladder toppled"),
+                    });
+                }
+                break;
+            }
+        }
+        if tactics::climb_ready(ladder.remaining, height) {
+            let climbers = crew
+                .iter()
+                .filter(|(x, z)| {
+                    (*x - f64::from(ladder.foot_x)).hypot(*z - f64::from(ladder.foot_z)) < 8.0
+                })
+                .count();
+            if climbers >= 2 {
+                let mut dir = lock();
+                if let Some(war) = dir.towns.get_mut(town_id) {
+                    war.gate_breached = true;
+                }
+            }
+        }
+    }
+}
+
+fn record_ladder_plant(dir: &mut Director, town_id: &str, tick: u32, wall: ScenePost, n: u32) {
+    if n == 0 {
+        return;
+    }
+    if let Some(war) = dir.towns.get_mut(town_id) {
+        war.ladders_placed = true;
+        war.ladders_placed_n = war.ladders_placed_n.saturating_add(1);
+    }
+    note_ladders_raised(dir, town_id, tick, wall, n);
+    note_ladder_placed(dir, town_id, tick, wall, n);
+}
+
+fn note_ladder_placed(dir: &mut Director, town_id: &str, tick: u32, wall: ScenePost, n: u32) {
+    if n == 0 {
+        return;
+    }
+    dir.push_event(CombatEvent {
+        tick,
+        kind: CombatKind::LadderPlaced,
+        actor: n as i32,
+        other: None,
+        x: f64::from(wall.x),
+        z: f64::from(wall.z),
+        note: format!("{town_id} ladder placed"),
+    });
 }
 
 fn tick_sappers(world: &Arc<World>, town_id: &str, tick: u32) {
@@ -10058,7 +10662,7 @@ fn materialize_raid(_world: &Arc<World>, town_id: &str, tick: u32) {
             raid.pending_retake = raid.virt_raiders;
             raid.pending_members.clear();
         } else {
-            raid.pending_members = compose_wave(raid.virt_raiders, 0);
+            raid.pending_members = compose_wave_for(raid.virt_raiders, 0, raid.approach);
             raid.pending_retake = 0;
         }
     }
@@ -10976,6 +11580,7 @@ mod tests {
         assert_eq!(HEAVY_TOWNS_PER_TICK, 1);
         assert_eq!(STORMING_COUNT, 8);
         assert!((STORMING_RANGE - 16.0).abs() < f64::EPSILON);
+        assert_eq!(SIEGE_STORM_DELAY, 1_600);
         assert_eq!(STUCK_STORM_COUNT, 3);
         assert!((STUCK_STORM_RANGE - 24.0).abs() < f64::EPSILON);
         assert!((PLAYER_SIM_RANGE - 64.0).abs() < f64::EPSILON);
@@ -11746,10 +12351,21 @@ mod tests {
             sappers_detonated: 1,
             blast_destroyed: 6,
             blast_queued: 8,
+            approach: "ram".to_owned(),
+            gate_state: "broken".to_owned(),
+            gate_hp: 0,
+            ladders_placed: 2,
+            ladders_toppled: 1,
+            ram_hits: 6,
+            gate_breaks: 1,
+            gate_repairs: 0,
         };
         assert_eq!(state.owner, "pillager");
         assert_eq!(state.explosions, 2);
         assert!(state.gate_breached);
+        assert_eq!(state.gate_state, "broken");
+        assert_eq!(state.approach, "ram");
+        assert_eq!(state.ram_hits, 6);
         assert_eq!(state.occupy_need, 3);
         assert_eq!(state.flag_status, "capturing");
     }
@@ -12133,6 +12749,11 @@ mod tests {
         assert_eq!(CombatKind::Explosion.as_str(), "explosion");
         assert_eq!(CombatKind::SapperPlanted.as_str(), "sapper_planted");
         assert_eq!(CombatKind::SapperDetonated.as_str(), "sapper_detonated");
+        assert_eq!(CombatKind::LadderPlaced.as_str(), "ladder_placed");
+        assert_eq!(CombatKind::LadderToppled.as_str(), "ladder_toppled");
+        assert_eq!(CombatKind::RamHit.as_str(), "ram_hit");
+        assert_eq!(CombatKind::GateBroken.as_str(), "gate_broken");
+        assert_eq!(CombatKind::GateRepaired.as_str(), "gate_repaired");
     }
 
     #[test]

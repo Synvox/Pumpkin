@@ -539,6 +539,35 @@ mod tests {
     }
 
     #[test]
+    fn write_round23_gate_iso_when_artifacts_exist() {
+        let out = std::path::Path::new("/opt/cursor/artifacts");
+        if !out.is_dir() {
+            return;
+        }
+        let plan = sample_plan();
+        let volume = crate::stamp::fill_volume(&plan);
+        crate::render::write_gate_sequence(&plan, &volume, out, "round23-gate")
+            .expect("gate iso sequence");
+        for name in [
+            "round23-gate-before.png",
+            "round23-gate-after.png",
+            "round23-gate-repaired.png",
+        ] {
+            let path = out.join(name);
+            assert!(
+                path.metadata().is_ok_and(|m| m.len() > 800),
+                "{name} missing or tiny"
+            );
+        }
+        let before = std::fs::read(out.join("round23-gate-before.png")).expect("before bytes");
+        let after = std::fs::read(out.join("round23-gate-after.png")).expect("after bytes");
+        let repaired =
+            std::fs::read(out.join("round23-gate-repaired.png")).expect("repaired bytes");
+        assert_ne!(before, after, "ram break must change the iso");
+        assert_eq!(before, repaired, "repair restores the planned gate");
+    }
+
+    #[test]
     fn write_round22_breach_iso_when_artifacts_exist() {
         let out = std::path::Path::new("/opt/cursor/artifacts");
         if !out.is_dir() {
