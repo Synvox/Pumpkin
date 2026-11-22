@@ -460,7 +460,7 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
     let max_z = (volume.min_z + volume.sz - 1).min(plan.bounds.max_z);
     let min_x = volume.min_x.max(plan.bounds.min_x);
     let max_x = (volume.min_x + volume.sx - 1).min(plan.bounds.max_x);
-    let mut fails = floating_in_rect(plan, volume, min_x, max_x, min_z, max_z, "town");
+    let mut fails = floating_in_rect(plan, volume, min_x, max_x, min_z, max_z, "town", true);
     for scene in &plan.scenes {
         if !matches!(
             scene.kind,
@@ -483,7 +483,16 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
         ) {
             continue;
         }
-        let mut crop = scene.rect.inflate(4);
+        let mut crop = scene.rect.inflate(
+            if matches!(
+                scene.kind,
+                SceneKind::PillagerStronghold | SceneKind::RuinedCastle
+            ) {
+                crate::scenes::WAR_SCENE_CROP
+            } else {
+                4
+            },
+        );
         if scene.kind == SceneKind::RidgeMill {
             for lot in &plan.lots {
                 if lot.kind == BuildingKind::Windmill && lot.rect.intersects(scene.rect) {
@@ -506,7 +515,13 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
             continue;
         }
         let tag = format!("{:?} crop", scene.kind);
-        fails.extend(floating_in_rect(plan, volume, cx0, cx1, cz0, cz1, &tag));
+        let clip_sails = !matches!(
+            scene.kind,
+            SceneKind::PillagerStronghold | SceneKind::RuinedCastle
+        );
+        fails.extend(floating_in_rect(
+            plan, volume, cx0, cx1, cz0, cz1, &tag, clip_sails,
+        ));
     }
     fails.truncate(48);
     fails
@@ -552,6 +567,7 @@ fn floating_in_rect(
     min_z: i32,
     max_z: i32,
     tag: &str,
+    ignore_clipped_sails: bool,
 ) -> Vec<String> {
     let in_crop = |x: i32, z: i32| x >= min_x && x <= max_x && z >= min_z && z <= max_z;
     let mut above = HashSet::new();
@@ -680,9 +696,12 @@ fn floating_in_rect(
             if !flags_as_floating_kind(kind) {
                 return false;
             }
-            // A neighbouring mill's blade clipped by this crop is not a floater;
-            // the hub sits outside in_crop so the town-wide flood already passed.
-            if kind == CellKind::WindSail
+            // A neighbouring mill's blade clipped by this crop is not a floater
+            // on most scene crops; the hub sits outside in_crop so the
+            // town-wide flood already passed. War-scene close-ups still flag
+            // those blades: they read as detached timber in the iso crop.
+            if ignore_clipped_sails
+                && kind == CellKind::WindSail
                 && let Some(mill) = crate::stamp::nearest_mill(plan, x, z)
             {
                 let (cx, cz) = mill.rect.center();

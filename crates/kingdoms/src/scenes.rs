@@ -29,6 +29,9 @@ pub const TOWN_TREE_MARGIN: i32 = 8;
 /// Extra stamp strip so hanging Features canopies cannot sit on the fosse.
 pub const TREE_STRIP_MARGIN: i32 = 16;
 
+/// Close-up iso pad around the war scenes (`inflate(8)` plus render pad 2).
+pub(crate) const WAR_SCENE_CROP: i32 = 10;
+
 /// Cog hull along the keel. Beam is 7 so the bow can taper to a point.
 const COG_LEN: i32 = 19;
 const COG_BEAM: i32 = 7;
@@ -352,6 +355,8 @@ pub fn place_scenes(
         rng,
         &mut scenes,
     );
+    // Before mills and wayside POIs so mill-sail and quarry-jib keepout can see it.
+    place_pillager_stronghold(occ, grid, castle, town, search, lots, seed, &mut scenes);
     place_edge_mills(occ, grid, search, town, keep_out, lots, seed, rng, &scenes);
     paint_wind_sails(occ, lots);
     paint_forge_yards(occ, lots);
@@ -384,7 +389,6 @@ pub fn place_scenes(
         &mut extra,
         &mut scenes,
     );
-    place_pillager_stronghold(occ, grid, castle, town, search, lots, seed, &mut scenes);
     protect_war_scenes(occ, &scenes, town);
     scenes
 }
@@ -1648,9 +1652,7 @@ fn place_quarry(
 }
 
 fn mill_sail_keepout(lots: &[Lot], rect: Rect) -> bool {
-    lots.iter().any(|lot| {
-        lot.kind == BuildingKind::Windmill && lot.rect.inflate(MILL_SAIL_RADIUS).intersects(rect)
-    })
+    windmill_hits(lots, rect)
 }
 
 fn find_quarry_site(
@@ -5866,7 +5868,15 @@ fn landmark_blocked(scenes: &[Scene], rect: Rect) -> bool {
         ) {
             return false;
         }
-        scene.rect.deflate(2).intersects(rect)
+        let pad = if matches!(
+            scene.kind,
+            SceneKind::PillagerStronghold | SceneKind::RuinedCastle
+        ) {
+            scene.rect.inflate(WAR_SCENE_CROP)
+        } else {
+            scene.rect.deflate(2)
+        };
+        pad.intersects(rect)
     })
 }
 
@@ -9712,7 +9722,7 @@ fn mill_crop_keepout(scenes: &[Scene], cx: i32, cz: i32) -> bool {
                 | SceneKind::Festival
                 | SceneKind::PillagerStronghold
                 | SceneKind::RuinedCastle
-        ) && mill_disc_hits_rect(cx, cz, scene.rect.inflate(4))
+        ) && mill_disc_hits_rect(cx, cz, scene.rect.inflate(WAR_SCENE_CROP))
     })
 }
 
@@ -9722,7 +9732,7 @@ fn windmill_hits(lots: &[Lot], rect: Rect) -> bool {
             return false;
         }
         let (cx, cz) = lot.rect.center();
-        mill_disc_hits_rect(cx, cz, rect.inflate(8))
+        mill_disc_hits_rect(cx, cz, rect.inflate(WAR_SCENE_CROP))
     })
 }
 
@@ -9784,6 +9794,7 @@ fn mill_keepout(kind: CellKind, lot: u16, skip: Option<u16>) -> bool {
             | CellKind::CastleInnerWall
             | CellKind::Palisade
             | CellKind::PalisadeWalk
+            | CellKind::Ruin
             | CellKind::Tent
             | CellKind::WarTent
             | CellKind::CampCourt
@@ -17042,5 +17053,46 @@ mod tests {
             }
         }
         assert_eq!(crop, 0, "ruined castle courtyard still cropped {crop}");
+        let volume = crate::stamp::fill_volume(&plan);
+        let floating = crate::watertight::check_floating_fragments(&plan, &volume);
+        let war: Vec<_> = floating
+            .iter()
+            .filter(|line| {
+                line.contains("PillagerStronghold crop") || line.contains("RuinedCastle crop")
+            })
+            .cloned()
+            .collect();
+        assert!(
+            war.is_empty(),
+            "war-scene crop floating on default seed 0,0: {war:?}"
+        );
+        for scene in plan.scenes.iter().filter(|s| {
+            matches!(
+                s.kind,
+                SceneKind::PillagerStronghold | SceneKind::RuinedCastle
+            )
+        }) {
+            assert!(
+                !windmill_hits(&plan.lots, scene.rect),
+                "{:?} mill sail clips crop {:?}",
+                scene.kind,
+                scene.rect
+            );
+            let crop = scene.rect.inflate(WAR_SCENE_CROP);
+            for other in &plan.scenes {
+                if matches!(
+                    other.kind,
+                    SceneKind::Quarry | SceneKind::MillHamlet | SceneKind::RoadsideInn
+                ) {
+                    assert!(
+                        !crop.intersects(other.rect),
+                        "{:?} crop overlaps {:?} {:?}",
+                        scene.kind,
+                        other.kind,
+                        other.rect
+                    );
+                }
+            }
+        }
     }
 }

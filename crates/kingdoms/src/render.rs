@@ -109,7 +109,7 @@ pub fn write_renders(
     Ok(())
 }
 
-/// Round 37b review set: aerial plus two obliques of each scene, and cutaways.
+/// Round 37 review set: aerial plus two obliques of each scene, and cutaways.
 pub fn write_round37b_renders(
     plan: &TownPlan,
     volume: &VolumeSink,
@@ -2822,6 +2822,8 @@ fn is_natural_ground(state: &BlockState) -> bool {
         || id == Block::MUD.id
         || id == Block::GRANITE.id
         || id == Block::DIORITE.id
+        || id == Block::ANDESITE.id
+        || id == Block::POLISHED_ANDESITE.id
 }
 
 fn occlusion(volume: &VolumeSink, x: i32, y: i32, z: i32) -> f32 {

@@ -3656,11 +3656,16 @@ fn place_ruined_castle_yard(
         z,
         if in_nave {
             palette.cobble
-        } else {
+        } else if near {
             match mix % 9 {
                 0 => palette.mossy,
                 1 => Block::COARSE_DIRT.default_state,
-                2 if near => palette.mossy_bricks,
+                2 => palette.mossy_bricks,
+                _ => palette.grass,
+            }
+        } else {
+            match mix % 36 {
+                0 => palette.mossy,
                 _ => palette.grass,
             }
         },
@@ -3687,7 +3692,7 @@ fn place_ruined_castle_yard(
             _ => {}
         }
     } else {
-        match mix % 17 {
+        match mix % 48 {
             0 => sink.put(x, ground + 1, z, Block::FERN.default_state),
             1 => sink.put(x, ground + 1, z, Block::OAK_SAPLING.default_state),
             _ => {}
