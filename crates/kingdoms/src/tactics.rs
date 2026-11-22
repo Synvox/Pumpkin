@@ -251,6 +251,12 @@ pub fn pick_approach(profile: &DefenceProfile, raid_size: u16, mix: u32) -> Sieg
     }
 }
 
+/// Attackers may occupy the keep plate. A ram siege waits until the gate is broken.
+#[must_use]
+pub fn plate_open(approach: SiegeApproach, gate_breached: bool) -> bool {
+    gate_breached || approach != SiegeApproach::Ram
+}
+
 /// Ladder crew size for a wave on a ladder approach.
 #[must_use]
 pub fn ladder_crew_size(count: usize) -> usize {
@@ -571,6 +577,10 @@ mod tests {
         };
         assert_eq!(pick_approach(&capital, 120, 0), SiegeApproach::Sapper);
         assert_eq!(pick_approach(&capital, 120, 1), SiegeApproach::Ram);
+        assert!(!plate_open(SiegeApproach::Ram, false));
+        assert!(plate_open(SiegeApproach::Ram, true));
+        assert!(plate_open(SiegeApproach::Ladder, false));
+        assert!(plate_open(SiegeApproach::Sapper, false));
     }
 
     #[test]

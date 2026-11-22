@@ -214,6 +214,7 @@ pub fn write_gate_sequence(
     }
     let after = render_iso(&broken, gx - pad, gz - pad, gx + pad, gz + pad, 10, 1);
     save(&out_dir.join(format!("{stem}-after.png")), &after)?;
+    save(&out_dir.join(format!("{stem}-broken.png")), &after)?;
     let repaired = render_iso(volume, gx - pad, gz - pad, gx + pad, gz + pad, 10, 1);
     save(&out_dir.join(format!("{stem}-repaired.png")), &repaired)?;
     Ok((gx, gz))

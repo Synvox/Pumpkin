@@ -2826,6 +2826,13 @@ fn maybe_soak_sample(world: &World, tick: u32, mspt: f64, director_ms: f64, town
     let ram_hits: u32 = dir.towns.values().map(|w| w.ram_hits).sum();
     let gate_breaks: u32 = dir.towns.values().map(|w| w.gate_breaks).sum();
     let gate_repairs: u32 = dir.towns.values().map(|w| w.gate_repairs).sum();
+    let ram_gate_hp: u32 = dir
+        .towns
+        .values()
+        .filter(|w| w.approach == SiegeApproach::Ram)
+        .map(|w| w.gate_hp)
+        .min()
+        .unwrap_or(tactics::GATE_MAX_HP);
     let capital_lost = dir.towns.values().any(|w| {
         parse_town_id(&w.info_id).is_some_and(|(_, cx, cz)| cx == 0 && cz == 0)
             && w.owner.as_str() != w.kingdom.as_str()
@@ -2835,7 +2842,7 @@ fn maybe_soak_sample(world: &World, tick: u32, mspt: f64, director_ms: f64, town
     let queued_total = REPAIR_QUEUED_TOTAL.load(Ordering::Relaxed);
     let placed_total = REPAIR_PLACED_TOTAL.load(Ordering::Relaxed);
     let line = format!(
-        "{tick},{mspt:.2},{director_ms:.2},{entities},{tickets},{rss_kb},{raids},{bodies},{live_fronts},{abstract_fronts},{live_bodies},{towns_us},{repair_queued},{repair_placed},{queued_total},{placed_total},{},{ladders},{toppled},{ram_hits},{gate_breaks},{gate_repairs}\n",
+        "{tick},{mspt:.2},{director_ms:.2},{entities},{tickets},{rss_kb},{raids},{bodies},{live_fronts},{abstract_fronts},{live_bodies},{towns_us},{repair_queued},{repair_placed},{queued_total},{placed_total},{},{ladders},{toppled},{ram_hits},{gate_breaks},{gate_repairs},{ram_gate_hp}\n",
         u8::from(capital_lost)
     );
     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -3465,6 +3472,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         _well_dest,
         siege_gates,
         capturing,
+        plate_open,
     ) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
@@ -3545,6 +3553,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             PostTarget::from_post(well, standing_y(world, well)),
             war.scene.gates().to_vec(),
             war.occupy_hold > 0,
+            tactics::plate_open(war.approach, war.gate_breached),
         )
     };
     let work_dests = standing_dests(&work_posts, keep_dest.y, 0);
@@ -3752,6 +3761,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                         breached,
                         capturing,
                         keep_dest,
+                        plate_open,
                     );
                     if dest_is_plate(dest, keep_dest) {
                         plate_slot(base.entity_id, dest)
@@ -3885,7 +3895,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                 alarm,
                 in_combat,
                 breached,
-                capturing,
+                capturing && plate_open,
                 repair_dest,
                 if owner_pillager {
                     keep_dest
@@ -3913,6 +3923,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
             breached,
             capturing,
             keep_dest,
+            plate_open,
         );
         let dest = if matches!(faction, Faction::Pillager) && dest_is_plate(dest, keep_dest) {
             plate_slot(id, dest)
@@ -4122,6 +4133,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
         &siege_gates,
         breached,
         capturing,
+        plate_open,
         &owner_faction,
         &mut attackers_on_plate,
         &mut defenders_on_plate,
@@ -6417,22 +6429,26 @@ fn tick_moving_ram(
     }
     let crew_near = crate::ram::count_near(&crew, ram_mut, crate::ram::crew_range());
     let def_near = crate::ram::count_near(&defenders, ram_mut, crate::ram::defender_range());
-    let army = !crew.is_empty()
-        || snapshots.iter().any(|(_, f)| {
-            if kingdom_army {
-                matches!(f, Faction::Kingdom(_))
-            } else {
-                matches!(f, Faction::Pillager)
-            }
-        });
-    let push = if ram_approach && army {
+    // Abstract fronts have empty snapshots, so the ram has to walk on the
+    // approach alone. Live crew still chips faster when they stand with it.
+    let push = if ram_approach {
         crew_near.max(tactics::RAM_CREW_MIN)
     } else {
         crew_near
     };
     let result = crate::ram::tick_ram(world, ram_mut, dest, push, def_near);
     match result {
-        crate::ram::RamTick::AtGate if !breached => *ram_at_gate = true,
+        crate::ram::RamTick::AtGate if !breached => {
+            *ram_at_gate = true;
+            if tick.is_multiple_of(40) {
+                tracing::info!(
+                    "kingdoms ram at the gate town={town_id} x={:.1} z={:.1} hp={:.1} crew={crew_near}",
+                    ram_mut.x,
+                    ram_mut.z,
+                    ram_mut.hp
+                );
+            }
+        }
         crate::ram::RamTick::Destroyed => {
             let mut dir = lock();
             dir.push_event(CombatEvent {
@@ -7148,7 +7164,9 @@ fn tick_siege_tactics(
         let Some(war) = dir.towns.get(town_id) else {
             return;
         };
-        if !war.alarm {
+        // Ram/ladder towns held off the plate never walk the keep, so they
+        // never trip the interior alarm. The raid still has to swing.
+        if !war.alarm && war.raid.is_none() {
             return;
         }
         let gate = war.threatened.unwrap_or_else(|| {
@@ -7258,6 +7276,12 @@ fn tick_siege_tactics(
                 z: f64::from(gate.z),
                 note: format!("{town_id} ram hit the gate hp={}", update.hp),
             });
+            tracing::info!(
+                town = town_id,
+                hp = update.hp,
+                hits,
+                "kingdoms ram hit the gate"
+            );
         }
         if update.broken {
             dir.push_event(CombatEvent {
@@ -9709,6 +9733,10 @@ fn dest_is_plate(dest: PostTarget, flag: PostTarget) -> bool {
     (dest.x - flag.x).abs() <= 1 && (dest.z - flag.z).abs() <= 1
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "mirrors the director tick flags (breach/capture/plate)"
+)]
 fn overlay_flag_dest(
     dest: PostTarget,
     faction: &Faction,
@@ -9721,9 +9749,16 @@ fn overlay_flag_dest(
     breached: bool,
     capturing: bool,
     flag_dest: PostTarget,
+    plate_open: bool,
 ) -> PostTarget {
     let raider = bearer || matches!(faction, Faction::Pillager);
     if !raider {
+        return dest;
+    }
+    if !plate_open {
+        if !gates.is_empty() {
+            return outermost_gate_dest(gates, flag_dest);
+        }
         return dest;
     }
     if in_capture_zone(inner, gatehouse, x, z) {
@@ -9987,6 +10022,7 @@ fn tick_ghosts(
     siege_gates: &[GateInfo],
     breached: bool,
     capturing: bool,
+    plate_open: bool,
     owner_faction: &Faction,
     attackers_on_plate: &mut u32,
     defenders_on_plate: &mut u32,
@@ -10026,6 +10062,7 @@ fn tick_ghosts(
                     breached,
                     capturing,
                     keep_dest,
+                    plate_open,
                 );
                 let dest = if dest_is_plate(dest, keep_dest) {
                     plate_slot(i as i32, dest)
@@ -10305,6 +10342,14 @@ fn tick_town_flag(
             )
         }
     });
+    let presence = if tactics::plate_open(war.approach, war.gate_breached) {
+        presence
+    } else {
+        FlagPresence {
+            attackers_on_plate: 0,
+            ..presence
+        }
+    };
     let occupy_need = capture_need(surviving.max(presence.attackers_on_plate));
     let allied = war
         .wired
@@ -11761,6 +11806,7 @@ mod tests {
             true,
             false,
             flag,
+            true,
         );
         assert_eq!((dest.x, dest.z), (flag.x, flag.z));
         let dest = overlay_flag_dest(
@@ -11775,6 +11821,7 @@ mod tests {
             false,
             false,
             flag,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
@@ -11793,6 +11840,7 @@ mod tests {
             true,
             false,
             flag,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
@@ -11811,6 +11859,7 @@ mod tests {
             true,
             false,
             flag,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
@@ -11829,6 +11878,7 @@ mod tests {
             true,
             false,
             flag,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
@@ -11864,6 +11914,7 @@ mod tests {
                 true,
                 false,
                 flag,
+                true,
             );
             assert_eq!(
                 (dest.x, dest.z),
@@ -11883,6 +11934,7 @@ mod tests {
                 true,
                 false,
                 flag,
+                true,
             );
             assert_eq!(
                 (dest.x, dest.z),
@@ -11963,6 +12015,7 @@ mod tests {
             true,
             false,
             flag,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
@@ -12031,6 +12084,7 @@ mod tests {
             true,
             false,
             flag,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
@@ -12049,6 +12103,7 @@ mod tests {
             true,
             false,
             flag,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
@@ -12067,6 +12122,7 @@ mod tests {
             true,
             false,
             flag,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
@@ -12085,6 +12141,7 @@ mod tests {
             true,
             false,
             flag,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
@@ -12103,12 +12160,36 @@ mod tests {
             false,
             false,
             flag,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
             (gates[0].x, gates[0].z),
             "before any breach the column walks the outer town gate, not the castle"
         );
+        let dest = overlay_flag_dest(
+            march,
+            &Faction::Pillager,
+            false,
+            20.5,
+            22.5,
+            inner,
+            gatehouse,
+            &gates,
+            false,
+            true,
+            flag,
+            false,
+        );
+        assert_eq!(
+            (dest.x, dest.z),
+            (gates[0].x, gates[0].z),
+            "a ram siege holds the plate until the gate is broken dest={dest:?}"
+        );
+        assert!(!crate::tactics::plate_open(
+            crate::tactics::SiegeApproach::Ram,
+            false
+        ));
     }
 
     #[test]
@@ -12257,6 +12338,7 @@ mod tests {
             true,
             true,
             keep,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
@@ -12306,6 +12388,7 @@ mod tests {
             true,
             true,
             keep,
+            true,
         );
         assert_eq!(
             (dest.x, dest.z),
