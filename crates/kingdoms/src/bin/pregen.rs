@@ -22,7 +22,9 @@ use pumpkin_kingdoms::chunk_fill::fill_volume_from_chunks_in;
 use pumpkin_kingdoms::height::register_world_gen;
 use pumpkin_kingdoms::marker;
 use pumpkin_kingdoms::plan::{plan_for, plan_from_cache};
-use pumpkin_kingdoms::render::{overview_bounds, write_planner_renders, write_renders};
+use pumpkin_kingdoms::render::{
+    overview_bounds, write_planner_renders, write_renders, write_round37b_renders,
+};
 use pumpkin_kingdoms::stamp::{MARKER_FLOOR, fill_volume};
 use pumpkin_kingdoms::town::{CELL_SIZE, nearest_town, town_in_cell};
 use pumpkin_kingdoms::watertight::{check_floating_fragments, check_town};
@@ -189,6 +191,14 @@ fn render_one(
         return false;
     }
     println!("  wrote planner PNGs");
+    if seed == 20_261_025
+        && cell_x == 0
+        && cell_z == 0
+        && let Err(error) = write_round37b_renders(&plan_a, &vol_a, out_dir, "round37b")
+    {
+        eprintln!("round37b render failed: {error}");
+        return false;
+    }
 
     if planner_only {
         println!("  (--planner-only, skipped real chunks)");

@@ -1005,8 +1005,11 @@ pub fn furnish_crypt(
         return;
     }
     let mix = (x.wrapping_mul(9) + z.wrapping_mul(3)).unsigned_abs();
-    if mix % 3 == 0 {
-        sink.put(x, cy + 1, z, Block::DARK_OAK_SLAB.default_state);
+    let lx = x - rect.min_x;
+    let lz = z - rect.min_z;
+    if lx % 4 == 1 && lz % 3 == 1 {
+        sink.put(x, cy + 1, z, Block::DARK_OAK_PLANKS.default_state);
+        sink.put(x, cy + 2, z, Block::DARK_OAK_SLAB.default_state);
     } else if mix % 5 == 0 {
         sink.put(x, cy + 1, z, Block::IRON_BARS.default_state);
         sink.put(x, cy + 2, z, Block::IRON_BARS.default_state);
@@ -1014,9 +1017,12 @@ pub fn furnish_crypt(
         sink.put(x, cy + 1, z, Block::COBWEB.default_state);
     } else if mix % 7 == 0 {
         sink.put(x, cy + 1, z, Block::CHEST.default_state);
+    } else if mix % 11 == 0 {
+        sink.put(x, cy + 1, z, Block::BONE_BLOCK.default_state);
     }
     if x == cx + 1 && z == cz {
-        sink.put(x, cy + 3, z, Block::LANTERN.default_state);
+        sink.put(x, cy + 1, z, Block::DARK_OAK_PLANKS.default_state);
+        sink.put(x, cy + 2, z, Block::LANTERN.default_state);
     }
 }
 

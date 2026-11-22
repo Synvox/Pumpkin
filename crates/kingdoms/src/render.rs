@@ -109,6 +109,117 @@ pub fn write_renders(
     Ok(())
 }
 
+/// Round 37b review set: aerial plus two obliques of each scene, and cutaways.
+pub fn write_round37b_renders(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(out_dir)?;
+    save(
+        &out_dir.join(format!("{stem}-overview-aerial.png")),
+        &render_topdown(plan, volume),
+    )?;
+    save(
+        &out_dir.join(format!("{stem}-overview-iso.png")),
+        &render_iso(
+            volume,
+            plan.bounds.min_x,
+            plan.bounds.min_z,
+            plan.bounds.max_x,
+            plan.bounds.max_z,
+            3,
+            1,
+        ),
+    )?;
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::PillagerStronghold)
+    {
+        let rect = scene.rect.inflate(8);
+        let title = "Pillager stronghold · tall war tower, tents, cages, forge, siege yard";
+        save(
+            &out_dir.join(format!("{stem}-pillager-stronghold-aerial.png")),
+            &render_topdown_rect(plan, volume, rect),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-pillager-stronghold-close-sw.png")),
+            &render_exterior_rot(volume, rect, 2, title, 2),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-pillager-stronghold-close-ne.png")),
+            &render_exterior_rot(volume, rect, 2, title, 3),
+        )?;
+        if let Some(lot) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Watchtower && scene.rect.intersects(lot.rect))
+        {
+            let floor = lot_floor(plan, lot);
+            save(
+                &out_dir.join(format!("{stem}-stronghold-tower-cutaway.png")),
+                &render_room(
+                    volume,
+                    lot.rect,
+                    floor,
+                    floor + crate::scenes::WAR_TOWER_H + 2,
+                    "Stronghold · war tower interior",
+                ),
+            )?;
+        }
+    }
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::RuinedCastle)
+    {
+        let rect = scene.rect.inflate(8);
+        let title = "Ruined castle · keep, curtain towers, fallen drum, chapel and gatehouse";
+        save(
+            &out_dir.join(format!("{stem}-ruined-castle-aerial.png")),
+            &render_topdown_rect(plan, volume, rect),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-ruined-castle-close-sw.png")),
+            &render_exterior_rot(volume, rect, 2, title, 0),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-ruined-castle-close-ne.png")),
+            &render_exterior_rot(volume, rect, 2, title, 2),
+        )?;
+        if let Some(lot) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Outpost && scene.rect.intersects(lot.rect))
+        {
+            let floor = ridge_floor(plan, lot.rect);
+            save(
+                &out_dir.join(format!("{stem}-ruined-keep-cutaway.png")),
+                &render_room(
+                    volume,
+                    lot.rect,
+                    floor,
+                    floor + crate::scenes::RUINED_KEEP_H,
+                    "Ruined castle · half-intact keep",
+                ),
+            )?;
+            save(
+                &out_dir.join(format!("{stem}-ruined-crypt-cutaway.png")),
+                &render_room(
+                    volume,
+                    lot.rect,
+                    floor - 5,
+                    floor - 1,
+                    "Ruined castle · furnished crypt",
+                ),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Iso of one wall section: intact, after a blast crater, then restored.
 pub fn write_breach_sequence(
     plan: &TownPlan,
@@ -718,10 +829,10 @@ fn write_scene_renders(
             SceneKind::Festival => "Festival square · maypole, market cross and pillory",
             SceneKind::RidgeMill => "Ridge mill · oak-stock sails fixed to the hub",
             SceneKind::PillagerStronghold => {
-                "Pillager stronghold · war tower, cages, forge, ballista yard"
+                "Pillager stronghold · tall war tower, tents, cages, forge, siege yard"
             }
             SceneKind::RuinedCastle => {
-                "Ruined castle · broken curtain, toppled tower, overgrown court"
+                "Ruined castle · keep, curtain towers, fallen drum, chapel and gatehouse"
             }
             _ => kind.label(),
         };
@@ -1329,7 +1440,7 @@ fn write_cutaways(
                     volume,
                     lot.rect,
                     floor,
-                    floor + 19,
+                    floor + crate::scenes::WAR_TOWER_H + 2,
                     "Stronghold · war tower interior",
                 ),
             )?;
@@ -1346,7 +1457,7 @@ fn write_cutaways(
                     volume,
                     lot.rect,
                     floor,
-                    floor + 5,
+                    floor + 7,
                     "Stronghold · forge and armoury",
                 ),
             )?;
@@ -1401,7 +1512,7 @@ fn write_cutaways(
                 volume,
                 lot.rect,
                 floor,
-                floor + 8,
+                floor + 16,
                 "Ruined castle · half-intact keep",
             ),
         )?;
