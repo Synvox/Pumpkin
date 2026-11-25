@@ -109,6 +109,117 @@ pub fn write_renders(
     Ok(())
 }
 
+/// Round 37 review set: aerial plus two obliques of each scene, and cutaways.
+pub fn write_round37b_renders(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(out_dir)?;
+    save(
+        &out_dir.join(format!("{stem}-overview-aerial.png")),
+        &render_topdown(plan, volume),
+    )?;
+    save(
+        &out_dir.join(format!("{stem}-overview-iso.png")),
+        &render_iso(
+            volume,
+            plan.bounds.min_x,
+            plan.bounds.min_z,
+            plan.bounds.max_x,
+            plan.bounds.max_z,
+            3,
+            1,
+        ),
+    )?;
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::PillagerStronghold)
+    {
+        let rect = scene.rect.inflate(8);
+        let title = "Pillager stronghold · tall war tower, tents, cages, forge, siege yard";
+        save(
+            &out_dir.join(format!("{stem}-pillager-stronghold-aerial.png")),
+            &render_topdown_rect(plan, volume, rect),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-pillager-stronghold-close-sw.png")),
+            &render_exterior_rot(volume, rect, 2, title, 2),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-pillager-stronghold-close-ne.png")),
+            &render_exterior_rot(volume, rect, 2, title, 3),
+        )?;
+        if let Some(lot) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Watchtower && scene.rect.intersects(lot.rect))
+        {
+            let floor = lot_floor(plan, lot);
+            save(
+                &out_dir.join(format!("{stem}-stronghold-tower-cutaway.png")),
+                &render_room(
+                    volume,
+                    lot.rect,
+                    floor,
+                    floor + crate::scenes::WAR_TOWER_H + 2,
+                    "Stronghold · war tower interior",
+                ),
+            )?;
+        }
+    }
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::RuinedCastle)
+    {
+        let rect = scene.rect.inflate(8);
+        let title = "Ruined castle · keep, curtain towers, fallen drum, chapel and gatehouse";
+        save(
+            &out_dir.join(format!("{stem}-ruined-castle-aerial.png")),
+            &render_topdown_rect(plan, volume, rect),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-ruined-castle-close-sw.png")),
+            &render_exterior_rot(volume, rect, 2, title, 0),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-ruined-castle-close-ne.png")),
+            &render_exterior_rot(volume, rect, 2, title, 2),
+        )?;
+        if let Some(lot) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Outpost && scene.rect.intersects(lot.rect))
+        {
+            let floor = ridge_floor(plan, lot.rect);
+            save(
+                &out_dir.join(format!("{stem}-ruined-keep-cutaway.png")),
+                &render_room(
+                    volume,
+                    lot.rect,
+                    floor,
+                    floor + crate::scenes::RUINED_KEEP_H,
+                    "Ruined castle · half-intact keep",
+                ),
+            )?;
+            save(
+                &out_dir.join(format!("{stem}-ruined-crypt-cutaway.png")),
+                &render_room(
+                    volume,
+                    lot.rect,
+                    floor - 5,
+                    floor - 1,
+                    "Ruined castle · furnished crypt",
+                ),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Iso of one wall section: intact, after a blast crater, then restored.
 pub fn write_breach_sequence(
     plan: &TownPlan,
@@ -165,6 +276,59 @@ pub fn write_breach_sequence(
     let repaired = render_iso(volume, wx - pad, wz - pad, wx + pad, wz + pad, 10, 1);
     save(&out_dir.join(format!("{stem}-repaired.png")), &repaired)?;
     Ok(wall)
+}
+
+/// Iso of one gatehouse: intact, after a ram break, then restored from the plan.
+pub fn write_gate_sequence(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<(i32, i32)> {
+    std::fs::create_dir_all(out_dir)?;
+    let keep = plan.castle.inner;
+    let flag = plan.castle.flag;
+    let gate = plan
+        .gates
+        .iter()
+        .find(|g| {
+            ((g.x - keep.min_x).abs() > 8 || (g.z - keep.min_z).abs() > 8)
+                && ((g.x - flag.0).abs() > 6 || (g.z - flag.1).abs() > 6)
+        })
+        .or_else(|| plan.gates.first())
+        .ok_or_else(|| std::io::Error::other("no gate to render"))?;
+    let (gx, gz) = (gate.x, gate.z);
+    let pad = 12;
+    let before = render_iso(volume, gx - pad, gz - pad, gx + pad, gz + pad, 10, 1);
+    save(&out_dir.join(format!("{stem}-before.png")), &before)?;
+    let mut broken = clone_volume(volume);
+    let air = Block::AIR.default_state;
+    let fx = gate.facing.dx();
+    let fz = gate.facing.dz();
+    let wx = i32::from(fx == 0);
+    let wz = i32::from(fz == 0);
+    let gate_top = broken.top(gx, gz).map_or(80, |(y, _)| y);
+    // Ram smash: strip the crown (visible in iso) and open a standing-height
+    // tunnel through the leaves and flanking towers.
+    for d in -4..=4 {
+        for w in -5..=5 {
+            let x = gx + fx * d + wx * w;
+            let z = gz + fz * d + wz * w;
+            let Some((top, _)) = broken.top(x, z) else {
+                continue;
+            };
+            let floor = gate_top.saturating_sub(12).max(top.saturating_sub(14));
+            for y in floor..=top {
+                broken.put(x, y, z, air);
+            }
+        }
+    }
+    let after = render_iso(&broken, gx - pad, gz - pad, gx + pad, gz + pad, 10, 1);
+    save(&out_dir.join(format!("{stem}-after.png")), &after)?;
+    save(&out_dir.join(format!("{stem}-broken.png")), &after)?;
+    let repaired = render_iso(volume, gx - pad, gz - pad, gx + pad, gz + pad, 10, 1);
+    save(&out_dir.join(format!("{stem}-repaired.png")), &repaired)?;
+    Ok((gx, gz))
 }
 
 fn write_flag_renders(
@@ -388,6 +552,8 @@ fn write_scene_renders(
         let pad = match scene.kind {
             SceneKind::Harbour | SceneKind::Riverside => 4,
             SceneKind::PillagerCamp
+            | SceneKind::PillagerStronghold
+            | SceneKind::RuinedCastle
             | SceneKind::Farmstead
             | SceneKind::Hamlet
             | SceneKind::Cathedral
@@ -632,6 +798,8 @@ fn write_scene_renders(
         SceneKind::Festival,
         SceneKind::RidgeMill,
         SceneKind::PilgrimChapel,
+        SceneKind::PillagerStronghold,
+        SceneKind::RuinedCastle,
     ] {
         let scene = if kind == SceneKind::Watchtower {
             plan.scenes
@@ -713,6 +881,12 @@ fn write_scene_renders(
             }
             SceneKind::Festival => "Festival square · maypole, market cross and pillory",
             SceneKind::RidgeMill => "Ridge mill · oak-stock sails fixed to the hub",
+            SceneKind::PillagerStronghold => {
+                "Pillager stronghold · tall war tower, tents, cages, forge, siege yard"
+            }
+            SceneKind::RuinedCastle => {
+                "Ruined castle · keep, curtain towers, fallen drum, chapel and gatehouse"
+            }
             _ => kind.label(),
         };
         save(
@@ -1300,6 +1474,111 @@ fn write_cutaways(
                 ),
             )?;
         }
+    }
+
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::PillagerStronghold)
+    {
+        if let Some(lot) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Watchtower && scene.rect.intersects(lot.rect))
+        {
+            let floor = lot_floor(plan, lot);
+            save(
+                &out_dir.join(format!("{stem}-stronghold-tower-cutaway.png")),
+                &render_room(
+                    volume,
+                    lot.rect,
+                    floor,
+                    floor + crate::scenes::WAR_TOWER_H + 2,
+                    "Stronghold · war tower interior",
+                ),
+            )?;
+        }
+        if let Some(lot) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Blacksmith && scene.rect.intersects(lot.rect))
+        {
+            let floor = lot_floor(plan, lot);
+            save(
+                &out_dir.join(format!("{stem}-stronghold-forge-cutaway.png")),
+                &render_room(
+                    volume,
+                    lot.rect,
+                    floor,
+                    floor + 7,
+                    "Stronghold · forge and armoury",
+                ),
+            )?;
+        }
+        let mut cage: Option<Rect> = None;
+        for z in scene.rect.min_z..=scene.rect.max_z {
+            for x in scene.rect.min_x..=scene.rect.max_x {
+                if plan.occ.kind(x, z) != CellKind::Cage {
+                    continue;
+                }
+                cage = Some(cage.map_or_else(
+                    || Rect::new(x, z, x, z),
+                    |rect| {
+                        Rect::new(
+                            rect.min_x.min(x),
+                            rect.min_z.min(z),
+                            rect.max_x.max(x),
+                            rect.max_z.max(z),
+                        )
+                    },
+                ));
+            }
+        }
+        if let Some(cage) = cage {
+            let floor = ridge_floor(plan, cage);
+            save(
+                &out_dir.join(format!("{stem}-stronghold-dungeon-cutaway.png")),
+                &render_room(
+                    volume,
+                    cage,
+                    floor,
+                    floor + 5,
+                    "Stronghold · cage pen with captives",
+                ),
+            )?;
+        }
+    }
+
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::RuinedCastle)
+        && let Some(lot) = plan
+            .lots
+            .iter()
+            .find(|lot| lot.kind == BuildingKind::Outpost && scene.rect.intersects(lot.rect))
+    {
+        let floor = ridge_floor(plan, lot.rect);
+        save(
+            &out_dir.join(format!("{stem}-ruined-keep-cutaway.png")),
+            &render_room(
+                volume,
+                lot.rect,
+                floor,
+                floor + 16,
+                "Ruined castle · half-intact keep",
+            ),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-ruined-crypt-cutaway.png")),
+            &render_room(
+                volume,
+                lot.rect,
+                floor - 5,
+                floor - 1,
+                "Ruined castle · furnished crypt",
+            ),
+        )?;
     }
     Ok(())
 }
@@ -2596,6 +2875,8 @@ fn is_natural_ground(state: &BlockState) -> bool {
         || id == Block::MUD.id
         || id == Block::GRANITE.id
         || id == Block::DIORITE.id
+        || id == Block::ANDESITE.id
+        || id == Block::POLISHED_ANDESITE.id
 }
 
 fn occlusion(volume: &VolumeSink, x: i32, y: i32, z: i32) -> f32 {

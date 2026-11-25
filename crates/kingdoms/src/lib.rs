@@ -77,6 +77,7 @@ pub mod siege;
 pub mod sim;
 pub mod stamp;
 pub mod supply;
+pub mod tactics;
 pub mod town;
 pub mod watertight;
 pub mod wfc;

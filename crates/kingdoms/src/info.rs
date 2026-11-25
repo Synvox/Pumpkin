@@ -289,7 +289,7 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
 
     for scene in &plan.scenes {
         match scene.kind {
-            SceneKind::PillagerCamp => {
+            SceneKind::PillagerCamp | SceneKind::PillagerStronghold => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::PillagerRally, cx, cz));
                 // Walk every column. A coarse `step_by(6)` misses the rebuilt
@@ -348,6 +348,7 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             | SceneKind::HermitTower
             | SceneKind::BanditHideout
             | SceneKind::CastleRuin
+            | SceneKind::RuinedCastle
             | SceneKind::TollBridge => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));

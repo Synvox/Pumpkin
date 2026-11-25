@@ -978,6 +978,54 @@ fn furnish_keep_room(
     }
 }
 
+/// Vault under a ruined keep: coffins, bars, cobwebs and a lantern.
+pub fn furnish_crypt(
+    sink: &mut impl BlockSink,
+    rect: Rect,
+    x: i32,
+    floor: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let cy = floor - 5;
+    let (cx, cz) = rect.center();
+    if rect.on_edge(x, z) {
+        for y in cy..floor {
+            sink.put(x, y, z, palette.masonry((x.wrapping_mul(5) + z + y) as u8));
+        }
+        return;
+    }
+    sink.put(x, cy, z, palette.cobble);
+    for y in (cy + 1)..floor {
+        if !(x == cx && z == cz) {
+            sink.put(x, y, z, Block::AIR.default_state);
+        }
+    }
+    if x == cx && z == cz {
+        return;
+    }
+    let mix = (x.wrapping_mul(9) + z.wrapping_mul(3)).unsigned_abs();
+    let lx = x - rect.min_x;
+    let lz = z - rect.min_z;
+    if lx % 4 == 1 && lz % 3 == 1 {
+        sink.put(x, cy + 1, z, Block::DARK_OAK_PLANKS.default_state);
+        sink.put(x, cy + 2, z, Block::DARK_OAK_SLAB.default_state);
+    } else if mix % 5 == 0 {
+        sink.put(x, cy + 1, z, Block::IRON_BARS.default_state);
+        sink.put(x, cy + 2, z, Block::IRON_BARS.default_state);
+    } else if mix % 6 == 0 {
+        sink.put(x, cy + 1, z, Block::COBWEB.default_state);
+    } else if mix % 7 == 0 {
+        sink.put(x, cy + 1, z, Block::CHEST.default_state);
+    } else if mix % 11 == 0 {
+        sink.put(x, cy + 1, z, Block::BONE_BLOCK.default_state);
+    }
+    if x == cx + 1 && z == cz {
+        sink.put(x, cy + 1, z, Block::DARK_OAK_PLANKS.default_state);
+        sink.put(x, cy + 2, z, Block::LANTERN.default_state);
+    }
+}
+
 /// Gatehouse winch room over the passage.
 pub fn furnish_winch(sink: &mut impl BlockSink, x: i32, floor: i32, z: i32, at_center: bool) {
     if at_center {
