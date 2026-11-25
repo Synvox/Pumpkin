@@ -63,7 +63,7 @@ Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `F
 
 Each castle keeps a flag plinth in the inner bailey (never the gatehouse): a 3×3 stone pedestal, oak-fence mast, owner banner, and a ring of stone pressure plates. A town flips when attackers (players of the attacking kingdom, or the raid's bot standard-bearer) stand on that plate with **no defenders within 4 blocks** for 200 ticks (~10 s, `KINGDOMS_HOLD_TICKS`). The hold needs `max(3, 5% of the surviving raid)` on the plate. A defender on the plate or within 4 blocks **pauses** the clock; an empty plate **decays** progress. Hiding in a wall or cellar does nothing. Defenders reclaim the same way. Nearby players see a boss-bar (`Flag 3/3 hold 80/200`); captains shout on start/pause/flip. `/raid stop` and battle end (`Victory` / capture / retake) despawn leftover raid soldiers, extra defenders tagged `kingdoms:temp`, and ram display entities so a later fight does not stack bodies. The plate, mast, and banner are indestructible to players, trebuchet punches, and repair.
 
-A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). The director picks a ladder, ram, or sapper stroke from the town's defences: ladder crews plant at low curtain points (defenders can shove them off; climbers fight on the wall walk), a ram crew hammers a closed gate until its HP hits zero (murder-holes chip the frame; a sally opens a few bars), and sappers still plant breach charges on 40+ raids. Broken leaves enqueue the builder plan-diff. Capture is still a hold on the keep flag plate. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks) or their captain dies; a living captain rallies routed soldiers within 16 blocks.
+A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). The director picks a ladder, ram, or sapper stroke from the town's defences: ladder crews plant at low curtain points (defenders can shove them off; climbers fight on the wall walk), a ram crew hammers a closed gate until its HP hits zero (murder-holes chip the frame; a sally opens a few bars), and sappers still plant breach charges on 40+ raids. Broken leaves enqueue the builder plan-diff. Capture is still a hold on the keep flag plate. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks), 2:1 near a player, their captain or bearer dies, or losses pile up; a living captain or bearer rallies routed soldiers within 16 blocks.
 
 When no HTTP director has talked to the API in the last 30 s, a war clock starts the next raid on a timer (`KINGDOMS_WAR_CLOCK`, default on; `KINGDOMS_WAR_CLOCK_TICKS`, default 2400 ≈ 2 min). After a flip it waits out the 400-tick hold lockout **plus** a 400-tick repair window so builders can work for the new owner. It can run several concurrent fronts (`KINGDOMS_WAR_CLOCK_FRONTS`, default 1) and alternates pillager raids with alder↔raven border marches. Size/extras: `KINGDOMS_WAR_CLOCK_SIZE` (default 24) and `KINGDOMS_WAR_CLOCK_DEFENDERS`. An authenticated HTTP call that is not observational (`GET /war`, `GET|POST /lines`, `GET|POST /heroes`) marks the external director as connected and pauses the clock.
 
@@ -159,14 +159,36 @@ Vanilla scoreboard teams `k_alder`, `k_raven`, `k_pillager` are created with fri
 
 ### Roles
 
-| Role | Equipment | Alarm behaviour |
+A joined client tells these apart from held items and armour, not from scoreboard tags.
+
+| Role | Equipment a player sees | Alarm behaviour |
 | --- | --- | --- |
-| Guard | iron sword, chainmail | melee pillagers; rally to the threatened gate |
-| Archer | bow, leather | hold a tower/wall; `BowAttackGoal` |
+| Guard | iron sword, shield, chainmail chest | melee at gates and breaches |
+| Spearman | iron spear, dyed leather | hold the gate line |
+| Archer | bow, dyed leather | hold a tower or wall walk |
+| Captain | iron body armour, kingdom banner on the head, iron sword | lead at the threatened gate; rally routed soldiers in 16 blocks |
+| Bearer | dyed leather, iron sword, kingdom banner in the off hand | stand with the line; same rally radius as a captain |
+| Builder | iron axe, leather (no helmet) | walk the repair queue after a siege |
 | Civilian | none | work by day, home at night; flee to the keep and ring a bell (`block.bell.use`) on alarm |
-| Builder | none | after a siege, walk to missing/wrong blocks vs `plan.planned_column` and place them (gates, then walls, then houses), one block / 10 ticks with a swing |
+| Quartermaster | emerald | market post; flee to the keep on alarm |
+
+Pillager waves match the same silhouette: captains wear the ominous banner, assault troops split spear / axe-and-shield, crossbows keep the crossbow, ram crews a pickaxe, sappers flint-and-steel plus TNT.
 
 Iron golems keep vanilla melee / monster targeting and also rally.
+
+### Morale
+
+Soldiers tagged `kingdoms:routed` slide toward the keep (kingdom) or raid camp (pillagers) instead of the fight. Causes, each with a brief overlay plus chat line (cooldown shared with captain shouts so it does not spam):
+
+| Trigger | Who breaks |
+| --- | --- |
+| Local 3:1 with at least 8 foes | that cluster |
+| Local 2:1 with at least 5 foes, within 48 blocks of a player | that cluster |
+| Captain or standard-bearer death | the rest of that side |
+| Heavy losses (at least 6 dead and 2/5 of the force) | the rest of that side |
+| Flag captured | the side that just lost the town |
+
+A living captain or standard-bearer within 16 blocks clears the routed tag. Overlay examples: `The Raven line is breaking!` / `The Alder line holds!`. A rally holds the local 2:1 / loss checks for ~10 s so the line does not flip every other tick.
 
 ### Raids
 

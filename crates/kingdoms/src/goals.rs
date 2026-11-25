@@ -639,10 +639,15 @@ fn dyed_leather(item: &'static Item, rgb: i32) -> ItemStack {
     stack
 }
 
-fn kit_kingdom(mob: &dyn Mob, kingdom: &crate::faction::KingdomId) {
+fn kit_leather(mob: &dyn Mob, kingdom: &crate::faction::KingdomId, helmet: bool) {
     let rgb = crate::faction::kingdom_color_rgb(kingdom);
+    if helmet {
+        mob.get_mob_entity().set_item_slot(
+            &EquipmentSlot::HEAD,
+            dyed_leather(&Item::LEATHER_HELMET, rgb),
+        );
+    }
     let pieces = [
-        (EquipmentSlot::HEAD, &Item::LEATHER_HELMET),
         (EquipmentSlot::CHEST, &Item::LEATHER_CHESTPLATE),
         (EquipmentSlot::LEGS, &Item::LEATHER_LEGGINGS),
         (EquipmentSlot::FEET, &Item::LEATHER_BOOTS),
@@ -650,6 +655,46 @@ fn kit_kingdom(mob: &dyn Mob, kingdom: &crate::faction::KingdomId) {
     for (slot, item) in pieces {
         mob.get_mob_entity()
             .set_item_slot(&slot, dyed_leather(item, rgb));
+    }
+}
+
+fn kit_swordsman(mob: &dyn Mob, kingdom: &crate::faction::KingdomId) {
+    let rgb = crate::faction::kingdom_color_rgb(kingdom);
+    mob.get_mob_entity().set_item_slot(
+        &EquipmentSlot::HEAD,
+        dyed_leather(&Item::LEATHER_HELMET, rgb),
+    );
+    mob.get_mob_entity().set_item_slot(
+        &EquipmentSlot::CHEST,
+        ItemStack::new(1, &Item::CHAINMAIL_CHESTPLATE),
+    );
+    mob.get_mob_entity().set_item_slot(
+        &EquipmentSlot::LEGS,
+        dyed_leather(&Item::LEATHER_LEGGINGS, rgb),
+    );
+    mob.get_mob_entity().set_item_slot(
+        &EquipmentSlot::FEET,
+        dyed_leather(&Item::LEATHER_BOOTS, rgb),
+    );
+}
+
+fn kit_captain_body(mob: &dyn Mob) {
+    mob.get_mob_entity().set_item_slot(
+        &EquipmentSlot::CHEST,
+        ItemStack::new(1, &Item::IRON_CHESTPLATE),
+    );
+    mob.get_mob_entity().set_item_slot(
+        &EquipmentSlot::LEGS,
+        ItemStack::new(1, &Item::IRON_LEGGINGS),
+    );
+    mob.get_mob_entity()
+        .set_item_slot(&EquipmentSlot::FEET, ItemStack::new(1, &Item::IRON_BOOTS));
+}
+
+fn kingdom_banner_item(kingdom: &crate::faction::KingdomId) -> &'static Item {
+    match kingdom.as_str() {
+        "raven" => &Item::BLUE_BANNER,
+        _ => &Item::GREEN_BANNER,
     }
 }
 
@@ -694,7 +739,21 @@ pub fn bind_citizen(
             strip_vanilla_combat(mob);
             equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_SWORD);
             equip(mob, EquipmentSlot::OFF_HAND, &Item::SHIELD);
-            kit_kingdom(mob, kingdom);
+            kit_swordsman(mob, kingdom);
+            mob.get_mob_entity()
+                .add_goal(2, ThrottledMeleeGoal::new(MELEE_SPEED));
+            mob.get_mob_entity().add_goal(
+                3,
+                MoveToPostGoal::new(PATROL_SPEED, move |m| {
+                    crate::director::post_for_role(m, &town, role_copy)
+                }),
+            );
+        }
+        VillagerRole::Spearman => {
+            remove_avoid(mob);
+            strip_vanilla_combat(mob);
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_SPEAR);
+            kit_leather(mob, kingdom, true);
             mob.get_mob_entity()
                 .add_goal(2, ThrottledMeleeGoal::new(MELEE_SPEED));
             mob.get_mob_entity().add_goal(
@@ -707,10 +766,46 @@ pub fn bind_citizen(
         VillagerRole::Archer => {
             remove_avoid(mob);
             strip_vanilla_combat(mob);
-            equip(mob, EquipmentSlot::MAIN_HAND, &Item::CROSSBOW);
-            kit_kingdom(mob, kingdom);
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::BOW);
+            kit_leather(mob, kingdom, true);
             mob.get_mob_entity()
                 .add_goal(2, ThrottledBowGoal::default());
+            mob.get_mob_entity().add_goal(
+                3,
+                MoveToPostGoal::new(PATROL_SPEED, move |m| {
+                    crate::director::post_for_role(m, &town, role_copy)
+                }),
+            );
+        }
+        VillagerRole::Captain => {
+            remove_avoid(mob);
+            strip_vanilla_combat(mob);
+            tag(entity, TAG_CAPTAIN);
+            tag(entity, TAG_BEARER);
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_SWORD);
+            kit_captain_body(mob);
+            mob.get_mob_entity().set_item_slot(
+                &EquipmentSlot::HEAD,
+                ItemStack::new(1, kingdom_banner_item(kingdom)),
+            );
+            mob.get_mob_entity()
+                .add_goal(2, ThrottledMeleeGoal::new(MELEE_SPEED));
+            mob.get_mob_entity().add_goal(
+                3,
+                MoveToPostGoal::new(PATROL_SPEED, move |m| {
+                    crate::director::post_for_role(m, &town, role_copy)
+                }),
+            );
+        }
+        VillagerRole::Bearer => {
+            remove_avoid(mob);
+            strip_vanilla_combat(mob);
+            tag(entity, TAG_BEARER);
+            equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_SWORD);
+            equip(mob, EquipmentSlot::OFF_HAND, kingdom_banner_item(kingdom));
+            kit_leather(mob, kingdom, true);
+            mob.get_mob_entity()
+                .add_goal(2, ThrottledMeleeGoal::new(MELEE_SPEED));
             mob.get_mob_entity().add_goal(
                 3,
                 MoveToPostGoal::new(PATROL_SPEED, move |m| {
@@ -736,6 +831,7 @@ pub fn bind_citizen(
         }
         VillagerRole::Builder => {
             equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_AXE);
+            kit_leather(mob, kingdom, false);
             mob.get_mob_entity().add_goal(3, BuilderStubGoal::default());
             mob.get_mob_entity().add_goal(
                 4,
@@ -815,8 +911,12 @@ pub fn bind_raider(
             equip(mob, EquipmentSlot::OFF_HAND, &Item::TNT);
         }
         MarchJob::Assault => {
-            equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_AXE);
-            equip(mob, EquipmentSlot::OFF_HAND, &Item::SHIELD);
+            if entity.entity_id % 2 == 1 {
+                equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_SPEAR);
+            } else {
+                equip(mob, EquipmentSlot::MAIN_HAND, &Item::IRON_AXE);
+                equip(mob, EquipmentSlot::OFF_HAND, &Item::SHIELD);
+            }
         }
         MarchJob::Crossbow | MarchJob::Ladder => {
             equip(mob, EquipmentSlot::MAIN_HAND, &Item::CROSSBOW);

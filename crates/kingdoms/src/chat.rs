@@ -236,6 +236,54 @@ pub fn try_shout_as(
     true
 }
 
+/// Actionbar (overlay) plus a chat line to nearby players. Same town/kind
+/// cooldown as shouts so a breaking line is not spammed.
+pub fn try_overlay(
+    world: &World,
+    tick: u32,
+    town_id: &str,
+    kind: ShoutKind,
+    x: f64,
+    z: f64,
+    last: &mut ShoutLog,
+    text: &str,
+) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let key = (format!("{town_id}:overlay"), kind);
+    if last
+        .get(&key)
+        .is_some_and(|t| tick.saturating_sub(*t) < CHAT_COOLDOWN_TICKS)
+    {
+        return false;
+    }
+    let overlay = TextComponent::text(text.to_owned()).color_named(NamedColor::Gold);
+    let chat = TextComponent::text(text.to_owned()).color_named(NamedColor::Gold);
+    let mut n = 0u32;
+    for player in world.players.load().iter() {
+        let pos = player.living_entity.entity.pos.load();
+        if (pos.x - x).hypot(pos.z - z) <= CHAT_RANGE {
+            player.send_system_message_raw(&overlay, true);
+            player.send_system_message(&chat);
+            n += 1;
+        }
+    }
+    tracing::info!(
+        town = town_id,
+        kind = kind.as_str(),
+        heard = n,
+        text,
+        "kingdoms morale overlay"
+    );
+    if n == 0 {
+        return false;
+    }
+    last.insert(key, tick);
+    true
+}
+
 /// True when this player can hear another squad reply.
 #[must_use]
 pub fn squad_reply_ready(last: Option<u32>, tick: u32) -> bool {
@@ -312,6 +360,7 @@ mod tests {
         assert_eq!(ShoutKind::parse("fallen"), Some(ShoutKind::Fallen));
         assert!(line(ShoutKind::Charge).contains("flag"));
         assert!(ShoutKind::parse("kill").is_none());
+        assert!(line(ShoutKind::Retreat).contains("keep"));
     }
 
     #[test]
