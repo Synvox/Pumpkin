@@ -243,6 +243,185 @@ pub fn write_round37b_renders(
     Ok(())
 }
 
+/// Round 38 review set: cathedral city plus street-level roof/material shots.
+pub fn write_round38_renders(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(out_dir)?;
+    save(
+        &out_dir.join(format!("{stem}-overview-aerial.png")),
+        &render_topdown(plan, volume),
+    )?;
+    let (gx, gz) = plan
+        .gates
+        .iter()
+        .find(|gate| gate.kind == crate::info::GateKind::Town)
+        .map_or(plan.well, |gate| (gate.x, gate.z));
+    write_eye_level_road(
+        plan,
+        volume,
+        out_dir,
+        &format!("{stem}-town-road-eye"),
+        gx,
+        gz,
+        "Town road · eye-level from the gate a joining player walks",
+    )?;
+    write_eye_level_road(
+        plan,
+        volume,
+        out_dir,
+        &format!("{stem}-market-street-eye"),
+        plan.well.0,
+        plan.well.1,
+        "Market street · timber, mixed stone and varied roofs",
+    )?;
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::CathedralCity)
+    {
+        let rect = scene.rect.inflate(4);
+        let title = "Cathedral city · walls, streets, market, guild halls, cathedral";
+        save(
+            &out_dir.join(format!("{stem}-cathedral-city-aerial.png")),
+            &render_topdown_rect(plan, volume, rect),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-cathedral-city-iso.png")),
+            &render_exterior_rot(volume, rect, 2, title, 0),
+        )?;
+        save(
+            &out_dir.join(format!("{stem}-cathedral-city-iso-sw.png")),
+            &render_exterior_rot(volume, rect, 2, title, 1),
+        )?;
+        let (cx, _) = scene.rect.center();
+        let mut gate = (cx, scene.rect.max_z);
+        for z in scene.rect.min_z..=scene.rect.max_z {
+            for x in scene.rect.min_x..=scene.rect.max_x {
+                if plan.occ.kind(x, z) == CellKind::TownGate {
+                    gate = (x, z);
+                }
+            }
+        }
+        write_eye_level_road(
+            plan,
+            volume,
+            out_dir,
+            &format!("{stem}-cathedral-city-gate-eye"),
+            gate.0,
+            gate.1,
+            "Cathedral city gate · eye-level from the road",
+        )?;
+        let mut nave = None;
+        for z in scene.rect.min_z..=scene.rect.max_z {
+            for x in scene.rect.min_x..=scene.rect.max_x {
+                if plan.occ.kind(x, z) == CellKind::CathedralNave {
+                    nave = Some(nave.map_or_else(
+                        || crate::geom::Rect::new(x, z, x, z),
+                        |rect: crate::geom::Rect| {
+                            crate::geom::Rect::new(
+                                rect.min_x.min(x),
+                                rect.min_z.min(z),
+                                rect.max_x.max(x),
+                                rect.max_z.max(z),
+                            )
+                        },
+                    ));
+                }
+            }
+        }
+        if let Some(nave) = nave {
+            let floor = ridge_floor(plan, nave);
+            save(
+                &out_dir.join(format!("{stem}-cathedral-city-nave-cutaway.png")),
+                &render_room(
+                    volume,
+                    nave,
+                    floor,
+                    floor + 12,
+                    "Cathedral city · nave, pews, altar, chandeliers",
+                ),
+            )?;
+            write_eye_level_road(
+                plan,
+                volume,
+                out_dir,
+                &format!("{stem}-cathedral-city-nave-eye"),
+                nave.min_x,
+                nave.center().1,
+                "Cathedral west front · eye-level from the street",
+            )?;
+        }
+    }
+    if let Some(lot) = plan.lots.iter().find(|lot| {
+        matches!(
+            lot.kind,
+            BuildingKind::Townhouse | BuildingKind::Timber | BuildingKind::Cottage
+        )
+    }) {
+        save(
+            &out_dir.join(format!("{stem}-townhouse-roofs-iso.png")),
+            &render_exterior(
+                volume,
+                lot.rect.inflate(8),
+                4,
+                "Town houses · gable, hip, cross-gable, dormers",
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// Tight high-tile iso around a road column, as a joining player would see.
+pub fn write_eye_level_road(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+    x: i32,
+    z: i32,
+    title: &str,
+) -> std::io::Result<()> {
+    let ground = plan.heights.height(x, z);
+    let rect = crate::geom::Rect::new(x - 14, z - 14, x + 14, z + 14);
+    save(
+        &out_dir.join(format!("{stem}.png")),
+        &render_iso_view(
+            volume,
+            rect.min_x,
+            rect.min_z,
+            rect.max_x,
+            rect.max_z,
+            12,
+            1,
+            |_, y, _| y >= ground - 1 && y <= ground + 18,
+            Some(title),
+            false,
+            0,
+        ),
+    )?;
+    save(
+        &out_dir.join(format!("{stem}-sw.png")),
+        &render_iso_view(
+            volume,
+            rect.min_x,
+            rect.min_z,
+            rect.max_x,
+            rect.max_z,
+            12,
+            1,
+            |_, y, _| y >= ground - 1 && y <= ground + 18,
+            Some(title),
+            false,
+            1,
+        ),
+    )?;
+    Ok(())
+}
+
 /// Iso of one wall section: intact, after a blast crater, then restored.
 pub fn write_breach_sequence(
     plan: &TownPlan,
@@ -617,7 +796,8 @@ fn write_scene_renders(
             | SceneKind::Shipyard
             | SceneKind::Festival
             | SceneKind::RidgeMill
-            | SceneKind::PilgrimChapel => 6,
+            | SceneKind::PilgrimChapel
+            | SceneKind::CathedralCity => 6,
             _ => 3,
         };
         let mut rect = scene.rect;
@@ -823,6 +1003,7 @@ fn write_scene_renders(
         SceneKind::PilgrimChapel,
         SceneKind::PillagerStronghold,
         SceneKind::RuinedCastle,
+        SceneKind::CathedralCity,
     ] {
         let scene = if kind == SceneKind::Watchtower {
             plan.scenes
@@ -909,6 +1090,9 @@ fn write_scene_renders(
             }
             SceneKind::RuinedCastle => {
                 "Ruined castle · keep, curtain towers, fallen drum, chapel and gatehouse"
+            }
+            SceneKind::CathedralCity => {
+                "Cathedral city · walled streets, market, guild halls and cathedral"
             }
             _ => kind.label(),
         };

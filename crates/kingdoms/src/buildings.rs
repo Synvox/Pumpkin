@@ -140,6 +140,34 @@ impl BuildingKind {
                 | Self::HuntingLodge
         )
     }
+
+    /// Civilian lots that pick a gable, hip or cross-gable roof.
+    #[must_use]
+    pub const fn varies_roof(self) -> bool {
+        matches!(
+            self,
+            Self::Cottage
+                | Self::Timber
+                | Self::Townhouse
+                | Self::Longhouse
+                | Self::Tavern
+                | Self::Blacksmith
+                | Self::Barn
+                | Self::HuntingLodge
+                | Self::Scriptorium
+                | Self::ChapterHouse
+                | Self::Winepress
+                | Self::Chapel
+        )
+    }
+}
+
+/// Pitched roof form for a civilian lot. Desert lots stay flat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HouseRoofKind {
+    Gable,
+    Hip,
+    CrossGable,
 }
 
 /// A placed building lot.
@@ -173,5 +201,34 @@ impl Lot {
             seed,
             facade,
         }
+    }
+
+    /// Roof form from the lot seed so neighbouring houses do not match.
+    #[must_use]
+    pub fn roof_kind(&self, desert: bool) -> HouseRoofKind {
+        if desert || !self.kind.varies_roof() {
+            return HouseRoofKind::Gable;
+        }
+        match (self.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) % 5 {
+            0 | 1 => HouseRoofKind::Gable,
+            2 => HouseRoofKind::Hip,
+            3 => HouseRoofKind::CrossGable,
+            _ => HouseRoofKind::Gable,
+        }
+    }
+
+    /// Extra dormer windows on the eave (taverns always, others by seed).
+    #[must_use]
+    pub fn has_dormers(&self, desert: bool) -> bool {
+        if desert {
+            return false;
+        }
+        if self.kind == BuildingKind::Tavern {
+            return true;
+        }
+        matches!(
+            self.kind,
+            BuildingKind::Townhouse | BuildingKind::Timber | BuildingKind::Cottage
+        ) && (self.seed % 5 == 4 || self.roof_kind(false) == HouseRoofKind::CrossGable)
     }
 }

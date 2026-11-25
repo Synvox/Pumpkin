@@ -377,6 +377,7 @@ fn poi_needs_road(kind: SceneKind) -> bool {
             | SceneKind::Manor
             | SceneKind::RidgeMill
             | SceneKind::PilgrimChapel
+            | SceneKind::CathedralCity
     )
 }
 
@@ -683,7 +684,7 @@ mod tests {
             "too few road tiles {}",
             report.road_tiles
         );
-        assert_eq!(PLAN_CACHE_VERSION, 31);
+        assert_eq!(PLAN_CACHE_VERSION, 33);
     }
 
     #[test]

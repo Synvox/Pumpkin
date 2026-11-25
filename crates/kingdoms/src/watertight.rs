@@ -24,6 +24,8 @@ pub struct BuildingCheck {
     pub sky_open: usize,
     /// Keep/hall roof ridges that leave a slot (opposing stairs or walls in the peak).
     pub open_ridges: usize,
+    /// Perimeter wall columns whose top does not meet a roof block.
+    pub wall_roof_gaps: usize,
 }
 
 impl BuildingCheck {
@@ -37,6 +39,7 @@ impl BuildingCheck {
             && self.leak.is_none()
             && self.sky_open == 0
             && self.open_ridges == 0
+            && self.wall_roof_gaps == 0
     }
 }
 
@@ -73,8 +76,14 @@ impl TownCheck {
                 .iter()
                 .map(|b| {
                     format!(
-                        "{} leak={:?} float={} sky={} ridge={} seed={:?}",
-                        b.name, b.leak, b.floating_roofs, b.sky_open, b.open_ridges, b.seed
+                        "{} leak={:?} float={} sky={} ridge={} wall={} seed={:?}",
+                        b.name,
+                        b.leak,
+                        b.floating_roofs,
+                        b.sky_open,
+                        b.open_ridges,
+                        b.wall_roof_gaps,
+                        b.seed
                     )
                 })
                 .collect();
@@ -480,6 +489,7 @@ pub fn check_floating_fragments(plan: &TownPlan, volume: &VolumeSink) -> Vec<Str
                 | SceneKind::Harbour
                 | SceneKind::PillagerStronghold
                 | SceneKind::RuinedCastle
+                | SceneKind::CathedralCity
         ) {
             continue;
         }
@@ -1184,6 +1194,7 @@ fn check_columns(
             floating_roofs: 0,
             sky_open: 0,
             open_ridges: 0,
+            wall_roof_gaps: 0,
         };
     }
     let set: std::collections::HashSet<(i32, i32)> = columns.iter().copied().collect();
@@ -1205,6 +1216,13 @@ fn check_columns(
     } else {
         0
     };
+    // Merlons, mills and church belfries are meant to sit above the roof.
+    // Only the civilian houses whose roofs this round varies must meet it.
+    let wall_roof_gaps = if check_sky && is_varied_roof_lot(name) {
+        count_wall_roof_gaps(&set, volume)
+    } else {
+        0
+    };
     BuildingCheck {
         name: name.to_string(),
         columns: columns.len(),
@@ -1213,6 +1231,7 @@ fn check_columns(
         floating_roofs,
         sky_open,
         open_ridges,
+        wall_roof_gaps,
     }
 }
 
@@ -1328,6 +1347,7 @@ fn check_mill_connected(plan: &TownPlan, mill: &Lot, volume: &VolumeSink) -> Bui
         floating_roofs: 0,
         sky_open: 0,
         open_ridges: 0,
+        wall_roof_gaps: 0,
     }
 }
 
@@ -1604,6 +1624,9 @@ fn is_roof_stair(state: &BlockState) -> bool {
         || id == Block::SPRUCE_STAIRS.id
         || id == Block::SANDSTONE_STAIRS.id
         || id == Block::OAK_STAIRS.id
+        || id == Block::BRICK_STAIRS.id
+        || id == Block::STONE_BRICK_STAIRS.id
+        || id == Block::DEEPSLATE_TILE_STAIRS.id
 }
 
 fn is_ridge_cap(state: &BlockState) -> bool {
@@ -1633,6 +1656,7 @@ fn is_peak_trim(state: &BlockState) -> bool {
     let id = Block::from_state_id(state.id).id;
     id == Block::STONE_BRICK_WALL.id
         || id == Block::COBBLESTONE_WALL.id
+        || id == Block::SANDSTONE_WALL.id
         || id == Block::OAK_FENCE.id
         || id == Block::SPRUCE_FENCE.id
         || id == Block::DARK_OAK_FENCE.id
@@ -1751,6 +1775,9 @@ fn is_roof_block(state: &BlockState) -> bool {
         || id == Block::STONE_BRICK_STAIRS.id
         || id == Block::SANDSTONE_STAIRS.id
         || id == Block::OAK_STAIRS.id
+        || id == Block::BRICK_STAIRS.id
+        || id == Block::BRICK_SLAB.id
+        || id == Block::BRICKS.id
         || id == Block::DEEPSLATE_TILE_STAIRS.id
         || id == Block::DEEPSLATE_TILE_SLAB.id
         || id == Block::DEEPSLATE_TILES.id
@@ -1763,6 +1790,115 @@ fn is_roof_block(state: &BlockState) -> bool {
         || id == Block::CUT_SANDSTONE.id
         || id == Block::SNOW.id
         || id == Block::SNOW_BLOCK.id
+}
+
+fn is_house_roof_cover(state: &BlockState) -> bool {
+    if is_roof_block(state) || is_roof_stair(state) {
+        return true;
+    }
+    let id = Block::from_state_id(state.id).id;
+    id == Block::DARK_OAK_PLANKS.id
+        || id == Block::DARK_OAK_SLAB.id
+        || id == Block::SPRUCE_PLANKS.id
+        || id == Block::SPRUCE_SLAB.id
+}
+
+/// Edge columns of a roofed volume must have a roof block on or just above
+/// the highest wall, so gable/hip/cross-gable eaves stay closed.
+fn count_wall_roof_gaps(
+    columns: &std::collections::HashSet<(i32, i32)>,
+    volume: &VolumeSink,
+) -> usize {
+    let mut n = 0;
+    for &(x, z) in columns {
+        if !is_shell_edge(x, z, columns) {
+            continue;
+        }
+        let Some((top, _)) = volume.top(x, z) else {
+            n += 1;
+            continue;
+        };
+        let mut saw_roof = false;
+        let mut chimney = 0u32;
+        let mut wall_without_roof = false;
+        for y in (volume.min_y..=top).rev() {
+            let Some(state) = volume.get(x, y, z) else {
+                continue;
+            };
+            let id = Block::from_state_id(state.id).id;
+            // Rear-corner chimneys: campfire on a stone stack, not a missing roof.
+            if id == Block::CAMPFIRE.id {
+                chimney = 0;
+                break;
+            }
+            if state.is_air()
+                || is_furniture(Some(state))
+                || is_peak_trim(state)
+                || is_roof_debris(state)
+            {
+                continue;
+            }
+            if is_house_roof_cover(state) {
+                saw_roof = true;
+                chimney = 0;
+                continue;
+            }
+            if saw_roof {
+                break;
+            }
+            if is_chimney_stack(state) && chimney < 5 {
+                chimney += 1;
+                continue;
+            }
+            wall_without_roof = true;
+            break;
+        }
+        if wall_without_roof && chimney < 2 {
+            n += 1;
+        }
+    }
+    n
+}
+
+fn is_roof_debris(state: &BlockState) -> bool {
+    let id = Block::from_state_id(state.id).id;
+    id == Block::GRASS_BLOCK.id
+        || id == Block::DIRT.id
+        || id == Block::COARSE_DIRT.id
+        || id == Block::SNOW.id
+        || id == Block::SNOW_BLOCK.id
+        || id == Block::GLASS_PANE.id
+}
+
+fn is_chimney_stack(state: &BlockState) -> bool {
+    let id = Block::from_state_id(state.id).id;
+    id == Block::STONE.id
+        || id == Block::COBBLESTONE.id
+        || id == Block::MOSSY_COBBLESTONE.id
+        || id == Block::ANDESITE.id
+        || id == Block::TUFF.id
+        || id == Block::STONE_BRICKS.id
+        || id == Block::MOSSY_STONE_BRICKS.id
+        || id == Block::OAK_LOG.id
+        || id == Block::SPRUCE_LOG.id
+        || id == Block::DARK_OAK_LOG.id
+}
+
+fn is_varied_roof_lot(name: &str) -> bool {
+    name.contains("Cottage")
+        || name.contains("Timber")
+        || name.contains("Townhouse")
+        || name.contains("Tavern")
+        || name.contains("Blacksmith")
+        || name.contains("Longhouse")
+}
+
+fn is_shell_edge(x: i32, z: i32, columns: &std::collections::HashSet<(i32, i32)>) -> bool {
+    columns.contains(&(x, z))
+        && !(columns.contains(&(x - 1, z))
+            && columns.contains(&(x + 1, z))
+            && columns.contains(&(x, z - 1))
+            && columns.contains(&(x, z + 1)))
 }
 
 #[cfg(test)]
@@ -2110,6 +2246,10 @@ mod tests {
                         let id = Block::from_state_id(state.id).id;
                         let covered = id == Block::DARK_OAK_STAIRS.id
                             || id == Block::DARK_OAK_SLAB.id
+                            || id == Block::DARK_OAK_PLANKS.id
+                            || id == Block::BRICK_STAIRS.id
+                            || id == Block::BRICK_SLAB.id
+                            || id == Block::BRICKS.id
                             || id == Block::CAMPFIRE.id;
                         if !covered {
                             let below = volume
@@ -2117,6 +2257,10 @@ mod tests {
                                 .map(|s| Block::from_state_id(s.id).id);
                             if below != Some(Block::DARK_OAK_STAIRS.id)
                                 && below != Some(Block::DARK_OAK_SLAB.id)
+                                && below != Some(Block::DARK_OAK_PLANKS.id)
+                                && below != Some(Block::BRICK_STAIRS.id)
+                                && below != Some(Block::BRICK_SLAB.id)
+                                && below != Some(Block::BRICKS.id)
                             {
                                 open += 1;
                             }
@@ -2138,6 +2282,39 @@ mod tests {
         assert_eq!(
             roofed_lots, timber_lots,
             "timber lots {timber_lots} roofed {roofed_lots}"
+        );
+    }
+
+    #[test]
+    fn hillside_dormers_keep_a_roof_cap() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            64,
+            48,
+            36,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let volume = fill_volume(&plan);
+        let check = check_town(&plan, &volume);
+        let house_gaps: Vec<_> = check
+            .buildings
+            .iter()
+            .filter(|b| b.wall_roof_gaps > 0)
+            .map(|b| format!("{} wall={}", b.name, b.wall_roof_gaps))
+            .collect();
+        assert!(
+            house_gaps.is_empty(),
+            "hillside wall/roof gaps: {}",
+            house_gaps.join("; ")
+        );
+        assert!(
+            plan.lots.iter().any(|lot| lot.has_dormers(false)),
+            "expected a dormered lot on this seed"
         );
     }
 

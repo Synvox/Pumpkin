@@ -268,6 +268,11 @@ pub fn furnish_cathedral(
     }
     if aisle && x % 4 == 0 && roof_y >= floor + 8 {
         hang_lantern(sink, x, roof_y - 2, z, roof_y);
+        // Cross-bar chandelier: extra lanterns on iron-bar arms.
+        sink.put(x, roof_y - 3, z, Block::IRON_BARS.default_state);
+        if (z - cz).abs() == 0 {
+            hang_lantern(sink, x, roof_y - 3, z, roof_y);
+        }
     }
 }
 

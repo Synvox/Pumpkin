@@ -132,6 +132,8 @@ pub enum SceneKind {
     PillagerStronghold,
     /// Older, partly collapsed castle (128×128+), terrain-following.
     RuinedCastle,
+    /// Hinterland walled city around a cathedral, market and guild halls.
+    CathedralCity,
 }
 
 impl SceneKind {
@@ -189,6 +191,7 @@ impl SceneKind {
             Self::PilgrimChapel => "Pilgrim chapel",
             Self::PillagerStronghold => "Pillager stronghold",
             Self::RuinedCastle => "Ruined castle",
+            Self::CathedralCity => "Cathedral city",
         }
     }
 }
@@ -244,6 +247,18 @@ pub fn place_scenes(
         &mut scenes,
     );
     place_orchard_and_pasture(occ, grid, search, town, keep_out, rng, &mut scenes);
+    // Hero landmark: sit it before hamlets and camps fill the hinterland.
+    place_cathedral_city(
+        occ,
+        grid,
+        town,
+        keep_out,
+        search,
+        lots,
+        seed,
+        palette,
+        &mut scenes,
+    );
     place_hamlet(
         occ,
         grid,
@@ -5901,6 +5916,7 @@ fn landmark_blocked(scenes: &[Scene], rect: Rect) -> bool {
                 | SceneKind::Shipyard
                 | SceneKind::RidgeMill
                 | SceneKind::PilgrimChapel
+                | SceneKind::CathedralCity
         ) {
             return false;
         }
@@ -9820,6 +9836,7 @@ fn mill_crop_keepout(scenes: &[Scene], cx: i32, cz: i32) -> bool {
                 | SceneKind::PillagerStronghold
                 | SceneKind::RuinedCastle
                 | SceneKind::Harbour
+                | SceneKind::CathedralCity
         ) && mill_disc_hits_rect(cx, cz, scene.rect.inflate(WAR_SCENE_CROP))
     })
 }
@@ -10041,6 +10058,7 @@ fn place_hero(
     scenes: &mut Vec<Scene>,
 ) {
     let keep = castle.inflate(10);
+    place_cathedral_city(occ, grid, town, keep, search, lots, seed, palette, scenes);
     place_cathedral_district(
         occ, grid, town, keep, search, lots, seed, capital, palette, rng, scenes,
     );
@@ -10066,6 +10084,11 @@ fn place_cathedral_district(
         find_cathedral_in_town(occ, grid, town, keep_out)
             .or_else(|| find_cathedral_in_town(occ, grid, town_inside_walls(occ, town), keep_out))
             .or_else(|| find_cathedral_site(occ, grid, search, town, keep_out, rng))
+    } else if scenes
+        .iter()
+        .any(|scene| scene.kind == SceneKind::CathedralCity)
+    {
+        return;
     } else {
         find_cathedral_site(occ, grid, search, town, keep_out, rng)
     };
@@ -10084,6 +10107,466 @@ fn place_cathedral_district(
     });
     paint_close_in_precinct(occ, grid, lots, seed, yard);
     paint_cathedral_close(occ, grid, lots, seed, yard, keep_out, scenes);
+}
+
+fn place_cathedral_city(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    town: Rect,
+    keep_out: Rect,
+    search: Rect,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    palette: PaletteKind,
+    scenes: &mut Vec<Scene>,
+) {
+    if scenes
+        .iter()
+        .any(|scene| scene.kind == SceneKind::CathedralCity)
+    {
+        return;
+    }
+    let mut rng = TownRng::salted(seed, 0xC47E, 38);
+    let Some(yard) = find_cathedral_city_site(occ, grid, search, town, keep_out, scenes, &mut rng)
+    else {
+        return;
+    };
+    evict_lots_from(occ, lots, yard.inflate(2));
+    for z in yard.min_z..=yard.max_z {
+        for x in yard.min_x..=yard.max_x {
+            if cathedral_city_reclaim(occ.kind(x, z)) {
+                occ.set(x, z, CellKind::Green, true);
+            }
+        }
+    }
+    paint_cathedral_city_walls(occ, yard, facing_town(yard, town));
+    let inner = yard.deflate(1);
+    let cat_yard = cathedral_city_nave_yard(inner);
+    match palette {
+        PaletteKind::Sandstone => paint_sandstone_basilica(occ, cat_yard),
+        PaletteKind::Spruce => paint_romanesque_church(occ, cat_yard),
+        PaletteKind::Oak => paint_gothic_cathedral(occ, cat_yard, seed),
+    }
+    paint_cathedral_city_market(occ, inner, cat_yard);
+    paint_cathedral_city_lots(
+        occ,
+        grid,
+        lots,
+        seed,
+        inner,
+        cat_yard,
+        facing_town(yard, town),
+    );
+    paint_cathedral_city_streets(
+        occ,
+        inner,
+        cat_yard,
+        cathedral_city_market_rect(inner, cat_yard),
+        facing_town(yard, town),
+    );
+    scenes.push(Scene {
+        kind: SceneKind::CathedralCity,
+        rect: yard,
+    });
+}
+
+fn cathedral_city_reclaim(kind: CellKind) -> bool {
+    matches!(
+        kind,
+        CellKind::Empty
+            | CellKind::Green
+            | CellKind::Farm
+            | CellKind::FarmEdge
+            | CellKind::Hedge
+            | CellKind::Orchard
+            | CellKind::Pasture
+            | CellKind::FieldWall
+            | CellKind::Plaza
+            | CellKind::Eave
+            | CellKind::Road
+            | CellKind::RoadStairN
+            | CellKind::RoadStairS
+            | CellKind::RoadStairE
+            | CellKind::RoadStairW
+    )
+}
+
+fn find_cathedral_city_site(
+    occ: &Occupancy,
+    grid: &HeightGrid,
+    search: Rect,
+    town: Rect,
+    keep_out: Rect,
+    scenes: &[Scene],
+    rng: &mut TownRng,
+) -> Option<Rect> {
+    let mut best = None;
+    let mut best_score = i32::MIN;
+    for &(w, d) in &[(80, 64), (72, 60), (64, 52), (56, 48)] {
+        let mut z = search.min_z + 8;
+        while z + d < search.max_z {
+            let mut x = search.min_x + 8;
+            while x + w < search.max_x {
+                let rect = Rect::new(x, z, x + w - 1, z + d - 1);
+                x += 10;
+                if town.inflate(20).intersects(rect) || keep_out.intersects(rect) {
+                    continue;
+                }
+                if landmark_blocked(scenes, rect.inflate(MIN_SETTLEMENT_GAP)) {
+                    continue;
+                }
+                if near_settlement(occ, rect, MIN_SETTLEMENT_GAP) {
+                    continue;
+                }
+                if near_gothic(occ, rect) {
+                    continue;
+                }
+                let dry = grid.dry_ratio(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+                if dry < 78 {
+                    continue;
+                }
+                let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+                if hi - lo > 22 || lo <= grid.sea_level + 1 {
+                    continue;
+                }
+                if !cathedral_city_site_open(occ, rect) {
+                    continue;
+                }
+                let (cx, cz) = rect.center();
+                let (tx, tz) = town.center();
+                let from_town = (cx - tx).abs() + (cz - tz).abs();
+                let score = from_town + dry - (hi - lo) * 3 + rng.gen_range(0, 6);
+                if score > best_score {
+                    best_score = score;
+                    best = Some(rect);
+                }
+            }
+            z += 10;
+        }
+        if best.is_some() {
+            return best;
+        }
+    }
+    best
+}
+
+fn cathedral_city_site_open(occ: &Occupancy, rect: Rect) -> bool {
+    let mut n = 0;
+    let mut blocked = 0;
+    for z in rect.min_z..=rect.max_z {
+        for x in rect.min_x..=rect.max_x {
+            n += 1;
+            if !cathedral_city_reclaim(occ.kind(x, z)) {
+                blocked += 1;
+            }
+        }
+    }
+    n > 0 && blocked * 5 < n
+}
+
+fn paint_cathedral_city_walls(occ: &mut Occupancy, yard: Rect, gate_dir: Dir) {
+    let (gx, gz) = yard.center();
+    for z in yard.min_z..=yard.max_z {
+        for x in yard.min_x..=yard.max_x {
+            if !yard.on_edge(x, z) {
+                continue;
+            }
+            let gate = match gate_dir {
+                Dir::South => z == yard.max_z && (x - gx).abs() <= 1,
+                Dir::North => z == yard.min_z && (x - gx).abs() <= 1,
+                Dir::East => x == yard.max_x && (z - gz).abs() <= 1,
+                Dir::West => x == yard.min_x && (z - gz).abs() <= 1,
+            };
+            if gate {
+                occ.set(x, z, CellKind::TownGate, true);
+                continue;
+            }
+            occ.set(
+                x,
+                z,
+                if yard.is_corner(x, z) {
+                    CellKind::TownTower
+                } else {
+                    CellKind::TownWall
+                },
+                true,
+            );
+        }
+    }
+}
+
+fn paint_cathedral_city_streets(
+    occ: &mut Occupancy,
+    inner: Rect,
+    cat: Rect,
+    market: Option<Rect>,
+    gate_dir: Dir,
+) {
+    let (cx, cz) = inner.center();
+    let spine = match gate_dir {
+        Dir::North | Dir::South => Rect::new(cx - 1, inner.min_z, cx + 1, inner.max_z),
+        Dir::East | Dir::West => Rect::new(inner.min_x, cz - 1, inner.max_x, cz + 1),
+    };
+    let cross = match gate_dir {
+        Dir::North | Dir::South => {
+            let z = inner.min_z + inner.depth() / 3;
+            Rect::new(inner.min_x, z - 1, inner.max_x, z + 1)
+        }
+        Dir::East | Dir::West => {
+            let x = inner.min_x + inner.width() / 3;
+            Rect::new(x - 1, inner.min_z, x + 1, inner.max_z)
+        }
+    };
+    for rect in [spine, cross] {
+        paint_cathedral_city_street_strip(occ, inner, cat, None, rect);
+    }
+    let mut z = inner.min_z + 8;
+    while z + 2 < inner.max_z {
+        paint_cathedral_city_street_strip(
+            occ,
+            inner,
+            cat,
+            market,
+            Rect::new(inner.min_x, z - 1, inner.max_x, z + 1),
+        );
+        z += 10;
+    }
+    let mut x = inner.min_x + 8;
+    while x + 2 < inner.max_x {
+        paint_cathedral_city_street_strip(
+            occ,
+            inner,
+            cat,
+            market,
+            Rect::new(x - 1, inner.min_z, x + 1, inner.max_z),
+        );
+        x += 10;
+    }
+}
+
+fn cathedral_city_street_cell(kind: CellKind) -> bool {
+    matches!(
+        kind,
+        CellKind::Green | CellKind::Empty | CellKind::Plaza | CellKind::Eave
+    )
+}
+
+fn cathedral_city_can_street(
+    occ: &Occupancy,
+    inner: Rect,
+    cat: Rect,
+    market: Option<Rect>,
+    x: i32,
+    z: i32,
+) -> bool {
+    inner.contains(x, z)
+        && !cat.contains(x, z)
+        && market.is_none_or(|m| !m.contains(x, z))
+        && (cathedral_city_street_cell(occ.kind(x, z))
+            || occ.kind(x, z).is_road_surface()
+            || matches!(occ.kind(x, z), CellKind::Well | CellKind::Fountain))
+}
+
+fn paint_cathedral_city_street_strip(
+    occ: &mut Occupancy,
+    inner: Rect,
+    cat: Rect,
+    market: Option<Rect>,
+    rect: Rect,
+) {
+    let along_x = rect.width() >= rect.depth();
+    if along_x {
+        let z0 = rect.min_z.midpoint(rect.max_z);
+        let mut x = rect.min_x;
+        while x <= rect.max_x {
+            let cells = [(x, z0 - 1), (x, z0), (x, z0 + 1)];
+            if cells
+                .iter()
+                .all(|&(cx, cz)| cathedral_city_can_street(occ, inner, cat, market, cx, cz))
+            {
+                for (cx, cz) in cells {
+                    if cathedral_city_street_cell(occ.kind(cx, cz)) {
+                        occ.set(cx, cz, CellKind::Road, true);
+                    }
+                }
+            }
+            x += 1;
+        }
+    } else {
+        let x0 = rect.min_x.midpoint(rect.max_x);
+        let mut z = rect.min_z;
+        while z <= rect.max_z {
+            let cells = [(x0 - 1, z), (x0, z), (x0 + 1, z)];
+            if cells
+                .iter()
+                .all(|&(cx, cz)| cathedral_city_can_street(occ, inner, cat, market, cx, cz))
+            {
+                for (cx, cz) in cells {
+                    if cathedral_city_street_cell(occ.kind(cx, cz)) {
+                        occ.set(cx, cz, CellKind::Road, true);
+                    }
+                }
+            }
+            z += 1;
+        }
+    }
+}
+
+fn cathedral_city_nave_yard(inner: Rect) -> Rect {
+    // South strip holds the market and guild halls so they do not clip the apse.
+    let south_reserve = 18;
+    let w = 42.min(inner.width() - 8);
+    let d = 28.min(inner.depth() - south_reserve - 2);
+    let x0 = inner.min_x + (inner.width() - w) / 2;
+    let z0 = inner.min_z + 2;
+    Rect::new(x0, z0, x0 + w - 1, z0 + d - 1)
+}
+
+fn cathedral_city_market_rect(inner: Rect, cat: Rect) -> Option<Rect> {
+    let w = 14.min(inner.width() - 8);
+    let d = 12.min((inner.max_z - cat.max_z - 3).max(0));
+    if w < 8 || d < 8 {
+        return None;
+    }
+    let mx0 = inner.min_x + (inner.width() - w) / 2;
+    let mz0 = cat.max_z + 3;
+    let market = Rect::new(mx0, mz0, mx0 + w - 1, mz0 + d - 1);
+    (inner.contains(market.min_x, market.min_z)
+        && inner.contains(market.max_x, market.max_z)
+        && !market.intersects(cat))
+    .then_some(market)
+}
+
+fn paint_cathedral_city_market(occ: &mut Occupancy, inner: Rect, cat: Rect) {
+    let Some(market) = cathedral_city_market_rect(inner, cat) else {
+        return;
+    };
+    occ.fill(market, CellKind::Plaza, true);
+    // Keep the well off the 3-wide spine so streets stay walkable width.
+    occ.set(market.min_x + 2, market.min_z + 2, CellKind::Well, true);
+    occ.set(market.min_x + 3, market.min_z + 2, CellKind::Fountain, true);
+}
+
+fn paint_cathedral_city_lots(
+    occ: &mut Occupancy,
+    grid: &HeightGrid,
+    lots: &mut Vec<Lot>,
+    seed: u64,
+    inner: Rect,
+    cat: Rect,
+    gate_dir: Dir,
+) {
+    let (hw, hd) = BuildingKind::TownHall.size();
+    let market = cathedral_city_market_rect(inner, cat);
+    let guild_z1 = market.map_or(inner.max_z - 3, |m| m.max_z.min(inner.max_z - 3));
+    let guilds = [
+        Rect::new(
+            inner.min_x + 3,
+            guild_z1 - hd + 1,
+            inner.min_x + 2 + hw,
+            guild_z1,
+        ),
+        Rect::new(
+            inner.max_x - 2 - hw,
+            guild_z1 - hd + 1,
+            inner.max_x - 3,
+            guild_z1,
+        ),
+    ];
+    for guild in guilds {
+        if !inner.contains(guild.min_x, guild.min_z) || !inner.contains(guild.max_x, guild.max_z) {
+            continue;
+        }
+        if guild.intersects(cat) || market.is_some_and(|m| guild.intersects(m)) {
+            continue;
+        }
+        let _ = force_lot(
+            occ,
+            grid,
+            lots,
+            seed,
+            BuildingKind::TownHall,
+            guild,
+            Dir::North,
+        );
+    }
+    let (sw, sd) = BuildingKind::Stall.size();
+    if let Some(market) = market {
+        let (mx, mz) = market.center();
+        for stall in [
+            Rect::new(mx - sw - 2, mz - sd / 2, mx - 3, mz - sd / 2 + sd - 1),
+            Rect::new(mx + 3, mz - sd / 2, mx + 2 + sw, mz - sd / 2 + sd - 1),
+        ] {
+            if inner.contains(stall.min_x, stall.min_z)
+                && inner.contains(stall.max_x, stall.max_z)
+                && !stall.intersects(cat)
+                && market.contains(stall.min_x, stall.min_z)
+            {
+                let _ = force_lot(
+                    occ,
+                    grid,
+                    lots,
+                    seed,
+                    BuildingKind::Stall,
+                    stall,
+                    Dir::South,
+                );
+            }
+        }
+    }
+    let house_kinds = [
+        BuildingKind::Townhouse,
+        BuildingKind::Timber,
+        BuildingKind::Cottage,
+        BuildingKind::Tavern,
+        BuildingKind::Blacksmith,
+    ];
+    let mut z = inner.min_z + 2;
+    let mut i = 0u16;
+    while z + 9 < inner.max_z - 2 {
+        let mut x = inner.min_x + 2;
+        while x + 10 < inner.max_x - 2 {
+            let kind = house_kinds[(i as usize) % house_kinds.len()];
+            let (w, d) = kind.size();
+            let rect = Rect::new(x, z, x + w - 1, z + d - 1);
+            x += w + 2;
+            i = i.wrapping_add(1);
+            if !inner.contains(rect.min_x, rect.min_z) || !inner.contains(rect.max_x, rect.max_z) {
+                continue;
+            }
+            if rect.intersects(cat.inflate(1)) || market.is_some_and(|m| rect.intersects(m)) {
+                continue;
+            }
+            let (cx, cz) = inner.center();
+            let on_spine = match gate_dir {
+                Dir::North | Dir::South => (rect.min_x..=rect.max_x).any(|rx| (rx - cx).abs() <= 1),
+                Dir::East | Dir::West => (rect.min_z..=rect.max_z).any(|rz| (rz - cz).abs() <= 1),
+            };
+            if on_spine {
+                continue;
+            }
+            let on_cross = match gate_dir {
+                Dir::North | Dir::South => {
+                    let zc = inner.min_z + inner.depth() / 3;
+                    (rect.min_z..=rect.max_z).any(|rz| (rz - zc).abs() <= 1)
+                }
+                Dir::East | Dir::West => {
+                    let xc = inner.min_x + inner.width() / 3;
+                    (rect.min_x..=rect.max_x).any(|rx| (rx - xc).abs() <= 1)
+                }
+            };
+            if on_cross {
+                continue;
+            }
+            let facing = if (z - inner.min_z) < (inner.max_z - z) {
+                gate_dir.opposite()
+            } else {
+                gate_dir
+            };
+            let _ = force_lot(occ, grid, lots, seed, kind, rect, facing);
+        }
+        z += 10;
+    }
 }
 
 fn evict_lots_from(occ: &mut Occupancy, lots: &mut Vec<Lot>, rect: Rect) {
@@ -17285,5 +17768,198 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn round38_cathedral_city_and_varied_roofs() {
+        use crate::buildings::HouseRoofKind;
+        use pumpkin_data::Block;
+
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            10,
+            4,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let cities: Vec<_> = plan
+            .scenes
+            .iter()
+            .filter(|s| s.kind == SceneKind::CathedralCity)
+            .collect();
+        assert!(
+            cities.len() <= 1,
+            "at most one cathedral city, got {}",
+            cities.len()
+        );
+        let city = *cities.first().unwrap_or_else(|| {
+            panic!(
+                "cathedral city missing in {:?}",
+                plan.scenes.iter().map(|s| s.kind).collect::<Vec<_>>()
+            )
+        });
+        assert!(
+            city.rect.width() >= 52 && city.rect.depth() >= 44,
+            "cathedral city {}x{}",
+            city.rect.width(),
+            city.rect.depth()
+        );
+        let mut wall = 0;
+        let mut road = 0;
+        let mut nave = 0;
+        let mut transept = 0;
+        let mut choir = 0;
+        let mut tower = 0;
+        let mut buttress = 0;
+        let mut well = 0;
+        for z in city.rect.min_z..=city.rect.max_z {
+            for x in city.rect.min_x..=city.rect.max_x {
+                match plan.occ.kind(x, z) {
+                    CellKind::TownWall | CellKind::TownTower => wall += 1,
+                    CellKind::Road
+                    | CellKind::RoadStairN
+                    | CellKind::RoadStairS
+                    | CellKind::RoadStairE
+                    | CellKind::RoadStairW
+                    | CellKind::TownGate => road += 1,
+                    CellKind::CathedralNave => nave += 1,
+                    CellKind::CathedralTransept => transept += 1,
+                    CellKind::CathedralChoir => choir += 1,
+                    CellKind::CathedralTower => tower += 1,
+                    CellKind::CathedralButtress => buttress += 1,
+                    CellKind::Well | CellKind::Fountain => well += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(wall >= 80, "city curtain {wall}");
+        assert!(road >= 40, "walkable streets {road}");
+        assert!(nave >= 40, "nave {nave}");
+        assert!(transept >= 8, "transept {transept}");
+        assert!(choir >= 8, "apse/choir {choir}");
+        assert!(tower >= 4, "bell tower {tower}");
+        assert!(buttress >= 4, "buttresses {buttress}");
+        assert!(well >= 1, "market well {well}");
+        let guilds = plan
+            .lots
+            .iter()
+            .filter(|lot| lot.kind == BuildingKind::TownHall && city.rect.intersects(lot.rect))
+            .count();
+        assert!(guilds >= 1, "guild halls {guilds}");
+        let houses = plan
+            .lots
+            .iter()
+            .filter(|lot| {
+                matches!(
+                    lot.kind,
+                    BuildingKind::Townhouse
+                        | BuildingKind::Timber
+                        | BuildingKind::Cottage
+                        | BuildingKind::Tavern
+                ) && city.rect.intersects(lot.rect)
+            })
+            .count();
+        assert!(houses >= 4, "city houses {houses}");
+
+        let roofs: Vec<_> = plan
+            .lots
+            .iter()
+            .filter(|lot| lot.kind.varies_roof())
+            .map(|lot| lot.roof_kind(false))
+            .collect();
+        assert!(
+            roofs.contains(&HouseRoofKind::Gable)
+                && roofs.contains(&HouseRoofKind::Hip)
+                && roofs.contains(&HouseRoofKind::CrossGable),
+            "expected gable, hip and cross-gable among {roofs:?}"
+        );
+        assert!(
+            plan.lots.iter().any(|lot| lot.has_dormers(false)),
+            "expected dormers on some lots"
+        );
+
+        let volume = crate::stamp::fill_volume(&plan);
+        let check = crate::watertight::check_town(&plan, &volume);
+        let fails: Vec<_> = check
+            .failures()
+            .into_iter()
+            .filter(|b| {
+                b.name.contains("cathedral")
+                    || b.name.contains("Townhouse")
+                    || b.name.contains("Timber")
+                    || b.name.contains("Cottage")
+                    || b.name.contains("Tavern")
+                    || b.name.contains("TownHall")
+            })
+            .map(|b| {
+                format!(
+                    "{} leak={:?} float={} sky={} ridge={} wall={}",
+                    b.name, b.leak, b.floating_roofs, b.sky_open, b.open_ridges, b.wall_roof_gaps
+                )
+            })
+            .collect();
+        assert!(fails.is_empty(), "enclosed round 38 pieces: {fails:?}");
+
+        let mut panes = 0;
+        let mut pews = 0;
+        let mut lanterns = 0;
+        let mut stone = 0;
+        let mut cobble = 0;
+        let mut andesite = 0;
+        let mut tuff = 0;
+        for z in city.rect.min_z..=city.rect.max_z {
+            for x in city.rect.min_x..=city.rect.max_x {
+                for y in volume.min_y..volume.min_y + volume.sy {
+                    let Some(state) = volume.get(x, y, z) else {
+                        continue;
+                    };
+                    let id = Block::from_state_id(state.id).id;
+                    if id == Block::PURPLE_STAINED_GLASS_PANE.id
+                        || id == Block::YELLOW_STAINED_GLASS_PANE.id
+                        || id == Block::PURPLE_STAINED_GLASS.id
+                        || id == Block::YELLOW_STAINED_GLASS.id
+                    {
+                        panes += 1;
+                    }
+                    if id == Block::OAK_STAIRS.id {
+                        pews += 1;
+                    }
+                    if id == Block::LANTERN.id {
+                        lanterns += 1;
+                    }
+                    if id == Block::STONE.id {
+                        stone += 1;
+                    }
+                    if id == Block::COBBLESTONE.id {
+                        cobble += 1;
+                    }
+                    if id == Block::ANDESITE.id {
+                        andesite += 1;
+                    }
+                    if id == Block::TUFF.id {
+                        tuff += 1;
+                    }
+                }
+            }
+        }
+        assert!(panes >= 8, "stained glass {panes}");
+        assert!(pews >= 8, "pews {pews}");
+        assert!(lanterns >= 4, "chandeliers/lanterns {lanterns}");
+        assert!(
+            stone >= 4 && cobble >= 4 && andesite >= 4,
+            "mixed stone stone={stone} cobble={cobble} andesite={andesite} tuff={tuff}"
+        );
+
+        let walk = crate::roads::check_plan_roads(&plan);
+        assert!(
+            walk.local_ok(),
+            "cathedral city walk-test {}",
+            walk.summary()
+        );
     }
 }

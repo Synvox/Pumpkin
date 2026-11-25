@@ -39,7 +39,7 @@ const HINTERLAND_PAD: i32 = 160;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 31;
+pub const PLAN_CACHE_VERSION: u32 = 33;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -2089,9 +2089,9 @@ fn paint_outbound_roads(
         // neighbouring cells meet even when terrain blocks a full walk.
         let inner = walk_astar_budget(Some(occ), grid, hinter, around, edge, 80_000)
             .unwrap_or_else(|| vec![edge]);
-        let leg1 = walk_astar_budget_dh(None, grid, leg_x, edge, mid, 40_000, 4)
+        let leg1 = walk_astar_budget_dh(None, grid, leg_x, edge, mid, 40_000, 4, &[])
             .unwrap_or_else(|| vec![edge]);
-        let leg2 = walk_astar_budget_dh(None, grid, leg_z, mid, route_goal, 40_000, 4)
+        let leg2 = walk_astar_budget_dh(None, grid, leg_z, mid, route_goal, 40_000, 4, &[])
             .unwrap_or_else(|| vec![mid]);
         let mut tail = leg1;
         if let Some(&first) = leg2.first()
@@ -2110,7 +2110,7 @@ fn paint_outbound_roads(
             path.extend(tail);
         }
         if path.len() >= 2 {
-            paint_wide_path(occ, overlay, grid, &path, true);
+            paint_wide_path(occ, overlay, grid, &path, true, &[]);
         }
         for dz in -1..=1 {
             for dx in -1..=1 {
@@ -2162,6 +2162,7 @@ fn paint_poi_roads(
         SceneKind::Manor,
         SceneKind::RidgeMill,
         SceneKind::PilgrimChapel,
+        SceneKind::CathedralCity,
     ];
     for scene in scenes.iter().filter(|scene| kinds.contains(&scene.kind)) {
         let (cx, cz) = scene.rect.center();
@@ -2178,7 +2179,13 @@ fn paint_poi_roads(
             grid,
             Rect::new(start.0, start.1, goal.0, goal.1).inflate(160),
         );
-        let Some(path) = walk_astar_budget_dh(Some(occ), grid, search, start, goal, 80_000, 4)
+        let avoid: Vec<Rect> = scenes
+            .iter()
+            .filter(|other| other.rect != scene.rect && kinds.contains(&other.kind))
+            .map(|other| other.rect)
+            .collect();
+        let Some(path) =
+            walk_astar_budget_dh(Some(occ), grid, search, start, goal, 80_000, 4, &avoid)
         else {
             continue;
         };
@@ -2192,7 +2199,7 @@ fn paint_poi_roads(
             continue;
         }
         if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
-            paint_country_path(occ, &mut overlay, grid, &path);
+            paint_country_path_avoiding(occ, &mut overlay, grid, &path, &avoid);
             place_roadside_markers(occ, grid, &path);
             roads.push(RoadInfo {
                 from: [first.0, first.1],
@@ -2243,13 +2250,14 @@ fn nearest_town_gate(gates: &[GateInfo], start: (i32, i32)) -> Option<(i32, i32)
         .min_by_key(|&(x, z)| (x - start.0).abs() + (z - start.1).abs())
 }
 
-fn paint_country_path(
+fn paint_country_path_avoiding(
     occ: &mut Occupancy,
     overlay: &mut HashMap<(i32, i32), CellKind>,
     grid: &HeightGrid,
     path: &[(i32, i32)],
+    avoid: &[Rect],
 ) {
-    paint_wide_path(occ, overlay, grid, path, true);
+    paint_wide_path(occ, overlay, grid, path, true, avoid);
 }
 
 fn place_roadside_markers(occ: &mut Occupancy, grid: &HeightGrid, path: &[(i32, i32)]) {
@@ -2311,7 +2319,7 @@ fn paint_path(
     grid: &HeightGrid,
     path: &[(i32, i32)],
 ) {
-    paint_wide_path(occ, overlay, grid, path, false);
+    paint_wide_path(occ, overlay, grid, path, false, &[]);
 }
 
 /// 3-wide terrain-following strip. Skips cells that drop more than two
@@ -2322,12 +2330,16 @@ fn paint_wide_path(
     grid: &HeightGrid,
     path: &[(i32, i32)],
     country: bool,
+    avoid: &[Rect],
 ) {
     let stamp = |occ: &mut Occupancy,
                  overlay: &mut HashMap<(i32, i32), CellKind>,
                  x: i32,
                  z: i32,
                  kind: CellKind| {
+        if avoid.iter().any(|rect| rect.contains(x, z)) {
+            return;
+        }
         if country {
             stamp_country_road_cell(occ, overlay, grid, x, z, kind);
         } else {
@@ -2895,6 +2907,7 @@ fn poi_needs_road(kind: SceneKind) -> bool {
             | SceneKind::RidgeMill
             | SceneKind::PilgrimChapel
             | SceneKind::Hamlet
+            | SceneKind::CathedralCity
     )
 }
 
@@ -3144,7 +3157,7 @@ fn walk_astar_budget(
     goal: (i32, i32),
     max_nodes: u32,
 ) -> Option<Vec<(i32, i32)>> {
-    walk_astar_budget_dh(occ, grid, bounds, start, goal, max_nodes, 2)
+    walk_astar_budget_dh(occ, grid, bounds, start, goal, max_nodes, 2, &[])
 }
 
 fn walk_astar_budget_dh(
@@ -3155,6 +3168,7 @@ fn walk_astar_budget_dh(
     goal: (i32, i32),
     max_nodes: u32,
     max_dh: i32,
+    avoid: &[Rect],
 ) -> Option<Vec<(i32, i32)>> {
     let mut open = BinaryHeap::new();
     let mut came: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
@@ -3194,6 +3208,9 @@ fn walk_astar_budget_dh(
             let mut cost = 1 + dh;
             if grid.height(nx, nz) <= grid.sea_level + 1 {
                 cost += 20;
+            }
+            if avoid.iter().any(|rect| rect.contains(nx, nz)) {
+                cost += 80;
             }
             let tentative = g.saturating_add(cost);
             if tentative < *gscore.get(&(nx, nz)).unwrap_or(&i32::MAX) {
@@ -4468,7 +4485,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 31);
+        assert_eq!(PLAN_CACHE_VERSION, 33);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -4506,8 +4523,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 31;
-    const PLAN_LAYOUT_HASH: u64 = 0xf4ca_426a_c2ae_0a33;
+    const PLAN_LAYOUT_VERSION: u32 = 33;
+    const PLAN_LAYOUT_HASH: u64 = 0x8ff8_6b33_2bfd_ee42;
 
     #[test]
     fn plan_cache_version_tracks_layout() {
