@@ -1348,6 +1348,10 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args.visibility {
+        if let Err(err) = bot.move_to(stand).await {
+            eprintln!("move to stand failed: {err}");
+            return ExitCode::from(1);
+        }
         match visibility_loop(&mut bot, &args.kingdom, args.seconds).await {
             Ok(true) => {
                 println!("done");

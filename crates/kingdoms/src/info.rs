@@ -385,7 +385,8 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             | SceneKind::Manor
             | SceneKind::Gorge
             | SceneKind::NobleQuarter
-            | SceneKind::SiegeCamp => {
+            | SceneKind::SiegeCamp
+            | SceneKind::CathedralCity => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));
             }

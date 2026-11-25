@@ -16,22 +16,23 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Instant;
 
 use pumpkin_data::Block;
 use pumpkin_data::dimension::Dimension;
-use pumpkin_kingdoms::check_plan_roads_with;
 use pumpkin_kingdoms::chunk_fill::fill_volume_from_chunks_in;
 use pumpkin_kingdoms::height::register_world_gen;
 use pumpkin_kingdoms::marker;
 use pumpkin_kingdoms::plan::{TownPlan, plan_for, plan_from_cache};
 use pumpkin_kingdoms::render::{
     overview_bounds, write_planner_renders, write_region_renders, write_renders,
-    write_round37b_renders,
+    write_round37b_renders, write_round38_renders,
 };
 use pumpkin_kingdoms::scenes::SceneKind;
 use pumpkin_kingdoms::stamp::{MARKER_FLOOR, VolumeSink, fill_volume};
 use pumpkin_kingdoms::town::{CELL_SIZE, nearest_town, town_in_cell};
 use pumpkin_kingdoms::watertight::{check_floating_fragments, check_town};
+use pumpkin_kingdoms::{check_plan_roads, check_plan_roads_with};
 use pumpkin_util::world_seed::Seed;
 use pumpkin_world::generation::generator::WorldGenerator;
 use pumpkin_world::generation::get_world_gen;
@@ -121,7 +122,9 @@ fn render_one(
         "seed {seed} cell ({cell_x},{cell_z}) origin ({}, {}) cell size {CELL_SIZE}",
         town.x, town.z
     );
+    let plan_start = Instant::now();
     let plan_a = plan_for(seed, cell_x, cell_z, &world_gen);
+    println!("  plan_for {} ms", plan_start.elapsed().as_millis());
     let Some(plan_b) = plan_from_cache(seed, cell_x, cell_z) else {
         eprintln!("plan missing from cache after build");
         return false;
@@ -166,8 +169,14 @@ fn render_one(
     if !tight.ok() {
         for fail in tight.failures() {
             eprintln!(
-                "  watertight fail {} cols={} leak={:?} float={} sky={} seed={:?}",
-                fail.name, fail.columns, fail.leak, fail.floating_roofs, fail.sky_open, fail.seed
+                "  watertight fail {} cols={} leak={:?} float={} sky={} wall={} seed={:?}",
+                fail.name,
+                fail.columns,
+                fail.leak,
+                fail.floating_roofs,
+                fail.sky_open,
+                fail.wall_roof_gaps,
+                fail.seed
             );
         }
         return false;
@@ -201,6 +210,25 @@ fn render_one(
         println!("  (well column is built; mossy floor may sit under water)");
     }
 
+    let walk_local = check_plan_roads(&plan_a);
+    println!("  walk-test local {}", walk_local.summary());
+    if !walk_local.local_ok() {
+        eprintln!("{}", walk_local.render());
+        return false;
+    }
+
+    if seed == 20_261_025 && cell_x == 0 && cell_z == 0 {
+        report_castle_sw_andesite(&plan_a, &vol_a);
+        if let Err(error) = write_round37b_renders(&plan_a, &vol_a, out_dir, "round37c") {
+            eprintln!("round37c render failed: {error}");
+            return false;
+        }
+        if let Err(error) = write_round38_renders(&plan_a, &vol_a, out_dir, "round38") {
+            eprintln!("round38 render failed: {error}");
+            return false;
+        }
+    }
+
     if let Err(error) = write_planner_renders(&plan_a, out_dir, &format!("{stem}-planner")) {
         eprintln!("planner render failed: {error}");
         return false;
@@ -224,10 +252,19 @@ fn render_one(
         return false;
     }
     println!("  wrote 512x512 aerial/oblique around gate {gx},{gz}");
+    if planner_only {
+        println!("  (--planner-only, skipped neighbour plan_for and real chunks)");
+        return true;
+    }
+    let neighbor_start = Instant::now();
     let neighbor_arcs: Vec<_> = [(1, 0), (-1, 0), (0, 1), (0, -1)]
         .into_iter()
         .map(|(dx, dz)| plan_for(seed, cell_x + dx, cell_z + dz, &world_gen))
         .collect();
+    println!(
+        "  neighbour plan_for {} ms",
+        neighbor_start.elapsed().as_millis()
+    );
     let neighbor_refs: Vec<_> = neighbor_arcs
         .iter()
         .map(std::convert::AsRef::as_ref)
@@ -240,18 +277,6 @@ fn render_one(
     }
     if !walk.neighbor_paths_fail.is_empty() {
         eprintln!("  neighbour-stitch {}", walk.render());
-    }
-    if seed == 20_261_025 && cell_x == 0 && cell_z == 0 {
-        report_castle_sw_andesite(&plan_a, &vol_a);
-        if let Err(error) = write_round37b_renders(&plan_a, &vol_a, out_dir, "round37c") {
-            eprintln!("round37c render failed: {error}");
-            return false;
-        }
-    }
-
-    if planner_only {
-        println!("  (--planner-only, skipped real chunks)");
-        return true;
     }
 
     println!("  generating real chunks through Features + decorator…");

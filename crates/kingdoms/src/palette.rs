@@ -202,6 +202,23 @@ impl Palette {
         }
     }
 
+    /// Mixed house masonry: stone, cobble, andesite, tuff and mossy variants.
+    #[must_use]
+    pub fn house_stone(self, variant: u8) -> &'static BlockState {
+        if matches!(self.kind, PaletteKind::Sandstone) {
+            return self.masonry(variant);
+        }
+        match variant % 8 {
+            0 | 1 => Block::STONE.default_state,
+            2 => self.cobble,
+            3 => self.andesite,
+            4 => Block::TUFF.default_state,
+            5 => self.mossy,
+            6 => self.bricks,
+            _ => self.cobble,
+        }
+    }
+
     /// Plaster infill, slightly varied so walls are not one flat color.
     #[must_use]
     pub fn infill(self, variant: u8) -> &'static BlockState {
