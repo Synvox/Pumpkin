@@ -1,5 +1,6 @@
-//! Morale: units rout when badly outnumbered or their captain dies.
-//! A living captain rallies routed soldiers in range.
+//! Morale: units rout when badly outnumbered, their captain dies, losses
+//! pile up, or their flag is taken. A living captain or standard-bearer
+//! rallies routed soldiers in range.
 //!
 //! Kingdom shock: losing a town cuts recruitment and raises desertion until
 //! the capital is held again.
@@ -8,10 +9,15 @@
 pub const ROUT_RATIO: u32 = 3;
 /// Do not rout a 2-vs-6 skirmish; need a real press.
 pub const ROUT_MIN_FOES: u32 = 8;
-/// Captains rally routed soldiers inside this radius.
+/// Captains and standard-bearers rally routed soldiers inside this radius.
 pub const RALLY_RANGE: f64 = 16.0;
 /// Local count radius for the outnumbered check.
 pub const MORALE_RANGE: f64 = 16.0;
+/// Minimum dead before a side's remaining troops consider a heavy-loss rout.
+pub const HEAVY_LOSS_KILLS: u32 = 8;
+/// Heavy-loss threshold is 2/5 of the force that started this fight.
+pub const HEAVY_LOSS_RATIO_NUM: u32 = 2;
+pub const HEAVY_LOSS_RATIO_DEN: u32 = 5;
 /// How long a lost-town shock lasts (~5 min) unless the capital restores it.
 pub const SHOCK_TICKS: u32 = 6000;
 /// Recruitment drop per lost town during shock.
@@ -41,6 +47,36 @@ pub struct MoraleState {
 #[must_use]
 pub const fn should_rout(friends: u32, foes: u32) -> bool {
     foes >= ROUT_MIN_FOES && foes >= friends.saturating_mul(ROUT_RATIO)
+}
+
+/// True when enough of this side has already fallen.
+#[must_use]
+pub const fn should_rout_losses(killed: u32, alive: u32) -> bool {
+    let total = killed.saturating_add(alive);
+    killed >= HEAVY_LOSS_KILLS
+        && killed.saturating_mul(HEAVY_LOSS_RATIO_DEN) >= total.saturating_mul(HEAVY_LOSS_RATIO_NUM)
+}
+
+/// Display name for actionbar/chat cues.
+#[must_use]
+pub fn side_line_name(side: &str) -> &'static str {
+    match side {
+        "raven" => "Raven",
+        "pillager" => "pillager",
+        _ => "Alder",
+    }
+}
+
+/// Overlay text when a line breaks. Brief, not spam.
+#[must_use]
+pub fn breaking_cue(side: &str) -> String {
+    format!("The {} line is breaking!", side_line_name(side))
+}
+
+/// Overlay text when a captain or standard rallies the line.
+#[must_use]
+pub fn rally_cue(side: &str) -> String {
+    format!("The {} line holds!", side_line_name(side))
 }
 
 /// Count friends and foes of `side_is_pillager` inside `range` of `(x, z)`.
@@ -179,5 +215,22 @@ mod tests {
         let a = should_desert(3, 40, 0.6);
         let b = should_desert(3, 40, 0.6);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn heavy_losses_need_a_real_butcher_bill() {
+        assert!(!should_rout_losses(7, 20));
+        assert!(!should_rout_losses(8, 20));
+        assert!(should_rout_losses(8, 8));
+        assert!(should_rout_losses(20, 20));
+        assert!(!should_rout_losses(8, 40));
+    }
+
+    #[test]
+    fn cues_name_the_kingdom() {
+        assert_eq!(breaking_cue("raven"), "The Raven line is breaking!");
+        assert_eq!(breaking_cue("alder"), "The Alder line is breaking!");
+        assert_eq!(rally_cue("raven"), "The Raven line holds!");
+        assert_eq!(side_line_name("pillager"), "pillager");
     }
 }

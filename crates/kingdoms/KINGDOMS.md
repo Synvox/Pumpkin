@@ -159,14 +159,35 @@ Vanilla scoreboard teams `k_alder`, `k_raven`, `k_pillager` are created with fri
 
 ### Roles
 
-| Role | Equipment | Alarm behaviour |
+A joined client tells these apart from held items and armour, not from scoreboard tags.
+
+| Role | Equipment a player sees | Alarm behaviour |
 | --- | --- | --- |
-| Guard | iron sword, chainmail | melee pillagers; rally to the threatened gate |
-| Archer | bow, leather | hold a tower/wall; `BowAttackGoal` |
+| Guard | iron sword, shield, chainmail chest | melee at gates and breaches |
+| Spearman | iron spear, dyed leather | hold the gate line |
+| Archer | bow, dyed leather | hold a tower or wall walk |
+| Captain | iron body armour, kingdom banner on the head, iron sword | lead at the threatened gate; rally routed soldiers in 16 blocks |
+| Bearer | dyed leather, iron sword, kingdom banner in the off hand | stand with the line; same rally radius as a captain |
+| Builder | iron axe, leather (no helmet) | walk the repair queue after a siege |
 | Civilian | none | work by day, home at night; flee to the keep and ring a bell (`block.bell.use`) on alarm |
-| Builder | none | after a siege, walk to missing/wrong blocks vs `plan.planned_column` and place them (gates, then walls, then houses), one block / 10 ticks with a swing |
+| Quartermaster | emerald | market post; flee to the keep on alarm |
+
+Pillager waves match the same silhouette: captains wear the ominous banner, assault troops split spear / axe-and-shield, crossbows keep the crossbow, ram crews a pickaxe, sappers flint-and-steel plus TNT.
 
 Iron golems keep vanilla melee / monster targeting and also rally.
+
+### Morale
+
+Soldiers tagged `kingdoms:routed` slide toward the keep (kingdom) or raid camp (pillagers) instead of the fight. Causes, each with a brief overlay plus chat line (cooldown shared with captain shouts so it does not spam):
+
+| Trigger | Who breaks |
+| --- | --- |
+| Local 3:1 with at least 8 foes | that cluster |
+| Captain death | the rest of that side |
+| Heavy losses (at least 8 dead and 2/5 of the force) | the rest of that side |
+| Flag captured | the side that just lost the town |
+
+A living captain or standard-bearer within 16 blocks clears the routed tag. Overlay examples: `The Raven line is breaking!` / `The Alder line holds!`. If a watching player is at the front and nothing has broken after warmup, a small nearby squad is shoved so the retreat is actually visible.
 
 ### Raids
 

@@ -36,9 +36,9 @@ use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
 use pumpkin_protocol::java::client::config::{CFinishConfig, CKnownPacks};
 use pumpkin_protocol::java::client::login::{CLoginSuccess, CSetCompression};
 use pumpkin_protocol::java::client::play::{
-    CChunkBatchEnd, CDamageEvent, CEntityPositionSync, CKeepAlive, CLogin, CPlayerPosition,
-    CRemoveEntities, CSetContainerContent, CSetContainerSlot, CSetEquipment, CSetHealth,
-    CSetPlayerInventory, CSpawnEntity, CSystemChatMessage,
+    CActionBar, CChunkBatchEnd, CDamageEvent, CEntityPositionSync, CKeepAlive, CLogin,
+    CPlayerPosition, CRemoveEntities, CSetContainerContent, CSetContainerSlot, CSetEquipment,
+    CSetHealth, CSetPlayerInventory, CSpawnEntity, CSystemChatMessage,
 };
 use pumpkin_protocol::java::packet_decoder::TCPNetworkDecoder;
 use pumpkin_protocol::java::packet_encoder::TCPNetworkEncoder;
@@ -194,6 +194,9 @@ struct Bot {
     moved_soldiers: HashSet<i32>,
     damage_events: u32,
     death_events: u32,
+    equipment: HashMap<i32, HashSet<String>>,
+    seen_roles: HashSet<String>,
+    morale_events: u32,
 }
 
 impl Bot {
@@ -258,6 +261,9 @@ impl Bot {
             moved_soldiers: HashSet::new(),
             damage_events: 0,
             death_events: 0,
+            equipment: HashMap::new(),
+            seen_roles: HashSet::new(),
+            morale_events: 0,
         };
 
         bot.send_packet(&SHandShake {
@@ -402,6 +408,10 @@ impl Bot {
         }
         println!("CHAT {text}");
         self.chat.push(text.to_owned());
+        if is_morale_text(text) {
+            self.morale_events += 1;
+            println!("MORALE {text}");
+        }
         if text.contains("death.attack") || text.contains("died") {
             self.dead = true;
         }
@@ -651,6 +661,20 @@ impl Bot {
             let mut slice = &pkt.payload[..];
             match CSetEquipment::read(&mut slice, &CURRENT_MC_VERSION) {
                 Ok(eq) => {
+                    let mut keys = Vec::new();
+                    for (slot, stack) in &eq.equipment {
+                        let key = stack.0.item.registry_key;
+                        if stack.0.item_count > 0 && !key.is_empty() && !key.ends_with(":air") {
+                            keys.push(key.to_string());
+                            self.equipment
+                                .entry(eq.entity_id.0)
+                                .or_default()
+                                .insert(key.to_string());
+                        }
+                        if eq.entity_id.0 == self.self_id || self.self_id == 0 {
+                            dump_kit("eq", i32::from(*slot), stack);
+                        }
+                    }
                     if eq.entity_id.0 == self.self_id || self.self_id == 0 {
                         println!(
                             "EQ entity={} self={} n={}",
@@ -658,12 +682,25 @@ impl Bot {
                             self.self_id,
                             eq.equipment.len()
                         );
-                        for (slot, stack) in eq.equipment {
-                            dump_kit("eq", i32::from(slot), &stack);
-                        }
+                    }
+                    let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+                    if let Some(role) = pumpkin_kingdoms::roles::classify_equipment(&refs)
+                        && self.seen_roles.insert(role.to_owned())
+                    {
+                        println!(
+                            "ROLE entity={} role={role} kit={}",
+                            eq.entity_id.0,
+                            keys.join(",")
+                        );
                     }
                 }
                 Err(err) => eprintln!("eq decode: {err}"),
+            }
+        } else if pkt.id == CActionBar::to_id(CURRENT_MC_VERSION) {
+            let text = extract_text(&pkt.payload);
+            if !text.is_empty() {
+                println!("ACTIONBAR {text}");
+                self.note_chat(&text);
             }
         } else if pkt.id == inv_id {
             println!("INV-RAW bytes={}", pkt.payload.len());
@@ -702,6 +739,16 @@ impl Bot {
             }
         }
     }
+}
+
+fn is_morale_text(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("line is breaking")
+        || t.contains("line holds")
+        || t.contains("fall back")
+        || t.contains("captain is down")
+        || t.contains("rout")
+        || t.contains("stand with")
 }
 
 fn dump_kit(tag: &str, slot: i32, stack: &ItemStackSerializer<'_>) {
@@ -1180,7 +1227,7 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
         if last_report.elapsed() >= Duration::from_secs(5) {
             last_report = Instant::now();
             println!(
-                "VIS-SEEN soldiers={} live_h={} live_s={} engines={} dmg={} deaths={} moved={} pos={:.1},{:.1},{:.1}",
+                "VIS-SEEN soldiers={} live_h={} live_s={} engines={} dmg={} deaths={} moved={} roles={} morale={} pos={:.1},{:.1},{:.1}",
                 bot.seen_soldiers.len(),
                 bot.hostiles.len(),
                 bot.soldiers.len(),
@@ -1188,15 +1235,23 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
                 bot.damage_events,
                 bot.death_events,
                 bot.moved_soldiers.len(),
+                bot.seen_roles.len(),
+                bot.morale_events,
                 bot.position.x,
                 bot.position.y,
                 bot.position.z
             );
         }
     }
-    let ok = bot.seen_soldiers.len() >= 20;
+    let roles_ok = bot.seen_roles.len() >= 3;
+    let morale_ok = bot.morale_events > 0;
+    let soldiers_ok = bot.seen_soldiers.len() >= 20;
+    let ok = soldiers_ok && roles_ok && morale_ok;
+    let mut roles: Vec<_> = bot.seen_roles.iter().cloned().collect();
+    roles.sort();
+    println!("VIS-ROLES n={} list={}", roles.len(), roles.join(","));
     println!(
-        "VIS-REPORT soldiers={} engines={} damage={} deaths={} moved={} live_h={} live_s={} pos={:.1},{:.1},{:.1} ok={ok}",
+        "VIS-REPORT soldiers={} engines={} damage={} deaths={} moved={} live_h={} live_s={} roles={} morale={} pos={:.1},{:.1},{:.1} ok={ok}",
         bot.seen_soldiers.len(),
         bot.seen_engines.len(),
         bot.damage_events,
@@ -1204,6 +1259,8 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
         bot.moved_soldiers.len(),
         bot.hostiles.len(),
         bot.soldiers.len(),
+        bot.seen_roles.len(),
+        bot.morale_events,
         bot.position.x,
         bot.position.y,
         bot.position.z
@@ -1262,7 +1319,9 @@ async fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             Ok(false) => {
-                eprintln!("visibility check failed: fewer than 20 distinct soldier spawn packets");
+                eprintln!(
+                    "visibility check failed: need >=20 soldiers, >=3 equipment roles, and a rout/rally cue"
+                );
                 return ExitCode::from(1);
             }
             Err(err) => {

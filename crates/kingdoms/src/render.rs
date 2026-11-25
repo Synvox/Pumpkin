@@ -35,6 +35,8 @@ pub fn write_region_renders(
         &out_dir.join(format!("{stem}-oblique-{size}.png")),
         &oblique,
     )?;
+    let eye = render_eye_level(plan, volume, cx, cz, (0.0, -0.12, 1.0));
+    save(&out_dir.join(format!("{stem}-eye-{size}.png")), &eye)?;
     Ok(())
 }
 
@@ -102,6 +104,22 @@ pub fn write_renders(
     save(&out_dir.join(format!("{stem}-iso.png")), &iso)?;
     save(&out_dir.join(format!("{stem}-castle.png")), &castle_iso)?;
     save(&out_dir.join(format!("{stem}-street.png")), &street)?;
+    let (gx, gz) = plan
+        .gates
+        .iter()
+        .find(|g| g.kind == crate::info::GateKind::Town)
+        .map_or(plan.well, |g| (g.x, g.z));
+    let keep_c = plan.castle.keep.center();
+    let look_keep = (f64::from(keep_c.0 - gx), 0.05, f64::from(keep_c.1 - gz));
+    let look_out = (-look_keep.0, -0.08, -look_keep.2);
+    save(
+        &out_dir.join(format!("{stem}-eye-gate.png")),
+        &render_eye_level(plan, volume, gx, gz, look_keep),
+    )?;
+    save(
+        &out_dir.join(format!("{stem}-eye-road.png")),
+        &render_eye_level(plan, volume, gx, gz + 24, look_out),
+    )?;
     save(&out_dir.join(format!("{stem}-bailey.png")), &bailey)?;
     save(&out_dir.join(format!("{stem}-castle-gate.png")), &gate)?;
     save(
@@ -2408,6 +2426,147 @@ fn shade(rgb: [u8; 3], light: f32) -> Rgb<u8> {
         (f32::from(rgb[1]) * f).min(255.0) as u8,
         (f32::from(rgb[2]) * f).min(255.0) as u8,
     ])
+}
+
+/// Eye-level view from a road column, the height a joining player stands at.
+#[must_use]
+pub fn render_eye_level(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    x: i32,
+    z: i32,
+    look: (f64, f64, f64),
+) -> RgbImage {
+    const W: u32 = 640;
+    const H: u32 = 360;
+    const FOV: f64 = 1.1;
+    let ground = volume
+        .top(x, z)
+        .map_or_else(|| plan.heights.height(x, z), |(y, _)| y);
+    let mut ox = f64::from(x) + 0.5;
+    let oy = f64::from(ground) + 1.62;
+    let mut oz = f64::from(z) + 0.5;
+    let mut fx = look.0;
+    let mut fy = look.1;
+    let mut fz = look.2;
+    let flen = fx.hypot(fz).max(0.001);
+    fx /= flen;
+    fy = fy.clamp(-0.6, 0.6);
+    fz /= flen;
+    // Step out of a solid so a banner or house column does not fill the frame.
+    for _ in 0..12 {
+        if volume
+            .get(ox.floor() as i32, oy.floor() as i32, oz.floor() as i32)
+            .is_none_or(BlockState::is_air)
+        {
+            break;
+        }
+        ox += fx;
+        oz += fz;
+    }
+    let rx = -fz;
+    let rz = fx;
+    let mut img = ImageBuffer::from_pixel(W, H, Rgb([168u8, 198, 230]));
+    let aspect = f64::from(W) / f64::from(H);
+    for py in 0..H {
+        for px in 0..W {
+            let u = (f64::from(px) / f64::from(W) - 0.5) * FOV * aspect;
+            let v = (0.5 - f64::from(py) / f64::from(H)) * FOV;
+            let mut dx = fx + rx * u;
+            let mut dy = fy + v;
+            let mut dz = fz + rz * u;
+            let dlen = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+            dx /= dlen;
+            dy /= dlen;
+            dz /= dlen;
+            if let Some((rgb, dist)) = ray_hit(volume, ox, oy, oz, dx, dy, dz) {
+                let fog = (1.0 - (dist / 96.0).clamp(0.0, 1.0)) as f32;
+                let shade_l = 0.55 + 0.45 * fog;
+                img.put_pixel(px, py, shade(rgb, shade_l));
+            }
+        }
+    }
+    img
+}
+
+fn ray_hit(
+    volume: &VolumeSink,
+    ox: f64,
+    oy: f64,
+    oz: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+) -> Option<([u8; 3], f64)> {
+    let mut x = ox.floor() as i32;
+    let mut y = oy.floor() as i32;
+    let mut z = oz.floor() as i32;
+    let step_x = if dx > 0.0 { 1 } else { -1 };
+    let step_y = if dy > 0.0 { 1 } else { -1 };
+    let step_z = if dz > 0.0 { 1 } else { -1 };
+    let t_delta_x = if dx.abs() < 1e-9 {
+        f64::INFINITY
+    } else {
+        (1.0 / dx).abs()
+    };
+    let t_delta_y = if dy.abs() < 1e-9 {
+        f64::INFINITY
+    } else {
+        (1.0 / dy).abs()
+    };
+    let t_delta_z = if dz.abs() < 1e-9 {
+        f64::INFINITY
+    } else {
+        (1.0 / dz).abs()
+    };
+    let mut t_max_x = if dx.abs() < 1e-9 {
+        f64::INFINITY
+    } else if dx > 0.0 {
+        (x as f64 + 1.0 - ox) / dx
+    } else {
+        (x as f64 - ox) / dx
+    };
+    let mut t_max_y = if dy.abs() < 1e-9 {
+        f64::INFINITY
+    } else if dy > 0.0 {
+        (y as f64 + 1.0 - oy) / dy
+    } else {
+        (y as f64 - oy) / dy
+    };
+    let mut t_max_z = if dz.abs() < 1e-9 {
+        f64::INFINITY
+    } else if dz > 0.0 {
+        (z as f64 + 1.0 - oz) / dz
+    } else {
+        (z as f64 - oz) / dz
+    };
+    for _ in 0..180 {
+        if let Some(state) = volume.get(x, y, z)
+            && !state.is_air()
+        {
+            let t = t_max_x.min(t_max_y).min(t_max_z);
+            return Some((block_rgb(state), t.max(0.0)));
+        }
+        if t_max_x < t_max_y {
+            if t_max_x < t_max_z {
+                x += step_x;
+                t_max_x += t_delta_x;
+            } else {
+                z += step_z;
+                t_max_z += t_delta_z;
+            }
+        } else if t_max_y < t_max_z {
+            y += step_y;
+            t_max_y += t_delta_y;
+        } else {
+            z += step_z;
+            t_max_z += t_delta_z;
+        }
+        if t_max_x.min(t_max_y).min(t_max_z) > 96.0 {
+            break;
+        }
+    }
+    None
 }
 
 /// Top-down map: block color plus a simple hillshade.
