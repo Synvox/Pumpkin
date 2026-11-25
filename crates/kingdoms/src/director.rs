@@ -10759,9 +10759,7 @@ fn retry_keep_teleports(world: &World) {
 
 pub fn join_kingdom(player: &Player, name: &str) -> (KingdomId, siege::Rank) {
     let (id, rank) = lock().join_kingdom(player, KingdomId::new(name));
-    if !player_already_in_home_town(player) {
-        teleport_to_keep(player);
-    }
+    teleport_to_keep(player);
     (id, rank)
 }
 
@@ -10811,6 +10809,56 @@ fn teleport_to_keep(player: &Player) {
         dir.pending_keep_tp
             .remove(&player.gameprofile.id.to_string())
     };
+    let uuid = player.gameprofile.id.to_string();
+    let Some(server) = world.server.upgrade() else {
+        place_at_keep(player, &world, x, y, z);
+        return;
+    };
+    let players = world.players.load();
+    let Some(player) = players
+        .iter()
+        .find(|p| p.gameprofile.id.to_string() == uuid)
+        .cloned()
+    else {
+        return;
+    };
+    server.spawn_task(async move {
+        let chunk = Vector2::new(x >> 4, z >> 4);
+        world.level.get_or_fetch_chunk(chunk, |_| ()).await;
+        let y = open_air_y(&world, x, z, y);
+        place_at_keep(&player, &world, x, y, z);
+    });
+}
+
+/// Feet Y with a solid block below and two blocks of air. Climbs out of a
+/// keep foundation and drops onto a floor if the planner height is in the air.
+fn open_air_y(world: &World, x: i32, z: i32, hint: i32) -> i32 {
+    let min_y = world.dimension.min_y + 1;
+    let max_y = world.dimension.min_y + world.dimension.height - 2;
+    let mut y = hint.clamp(min_y, max_y);
+    if !world.is_loaded(&BlockPos::new(x, y, z)) {
+        return y;
+    }
+    for _ in 0..96 {
+        let below = world.get_block_state(&BlockPos::new(x, y - 1, z));
+        let feet = world.get_block_state(&BlockPos::new(x, y, z));
+        let head = world.get_block_state(&BlockPos::new(x, y + 1, z));
+        if !below.is_air() && feet.is_air() && head.is_air() {
+            return y;
+        }
+        if feet.is_air() && head.is_air() {
+            y -= 1;
+        } else {
+            y += 1;
+        }
+        if y <= min_y || y >= max_y {
+            break;
+        }
+    }
+    hint.clamp(min_y, max_y)
+}
+
+fn place_at_keep(player: &Player, world: &Arc<World>, x: i32, y: i32, z: i32) {
     let _ = player.set_respawn_point(
         world.dimension.clone(),
         BlockPos::new(x, y, z),
@@ -10829,7 +10877,7 @@ fn teleport_to_keep(player: &Player) {
         Vector3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
         None,
         None,
-        world,
+        Arc::clone(world),
     );
 }
 

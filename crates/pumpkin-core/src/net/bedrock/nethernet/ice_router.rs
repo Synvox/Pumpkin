@@ -301,7 +301,96 @@ pub(super) fn proxy_answer(
             fields[5] = public_port.to_string();
         }
     });
+    // Vanilla Bedrock ignores candidates that lack the C++ WebRTC suffix.
+    let answer = with_nethernet_candidate_suffix(&answer, &ufrag);
     Ok((answer, ufrag, internal))
+}
+
+/// Rebuilds a WebRTC answer into the SDP shape vanilla Bedrock accepts.
+///
+/// Generic answers put the DTLS fingerprint on the session, before `m=`.
+/// Bedrock reads it from the media section and otherwise never starts ICE.
+pub(super) fn vanilla_nethernet_answer(sdp: &str) -> String {
+    let mut ufrag = None;
+    let mut pwd = None;
+    let mut fingerprint = None;
+    let mut identity = None;
+    let mut setup = None;
+    let mut candidates = Vec::new();
+    for line in sdp.lines() {
+        if let Some(value) = line.strip_prefix("a=ice-ufrag:") {
+            ufrag = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("a=ice-pwd:") {
+            pwd = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("a=fingerprint:") {
+            fingerprint = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("a=identity:") {
+            identity = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("a=setup:") {
+            setup = Some(value.to_owned());
+        } else if line.starts_with("a=candidate:") {
+            candidates.push(line.to_owned());
+        }
+    }
+    let (Some(ufrag), Some(pwd), Some(fingerprint)) = (ufrag, pwd, fingerprint) else {
+        return sdp.to_owned();
+    };
+    let mut out = String::new();
+    out.push_str("v=0\r\n");
+    out.push_str("o=- 0 2 IN IP4 127.0.0.1\r\n");
+    out.push_str("s=-\r\n");
+    out.push_str("t=0 0\r\n");
+    out.push_str("a=group:BUNDLE 0\r\n");
+    out.push_str("a=extmap-allow-mixed\r\n");
+    out.push_str("a=msid-semantic: WMS\r\n");
+    if let Some(identity) = identity {
+        out.push_str("a=identity:");
+        out.push_str(&identity);
+        out.push_str("\r\n");
+    }
+    out.push_str("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n");
+    out.push_str("c=IN IP4 0.0.0.0\r\n");
+    out.push_str("a=ice-ufrag:");
+    out.push_str(&ufrag);
+    out.push_str("\r\n");
+    out.push_str("a=ice-pwd:");
+    out.push_str(&pwd);
+    out.push_str("\r\n");
+    out.push_str("a=fingerprint:");
+    out.push_str(&fingerprint);
+    out.push_str("\r\n");
+    out.push_str("a=setup:");
+    out.push_str(setup.as_deref().unwrap_or("active"));
+    out.push_str("\r\n");
+    out.push_str("a=mid:0\r\n");
+    out.push_str("a=sctp-port:5000\r\n");
+    out.push_str("a=max-message-size:262144\r\n");
+    for candidate in &candidates {
+        out.push_str(candidate);
+        out.push_str("\r\n");
+    }
+    if candidates.is_empty() {
+        out.push_str("a=ice-options:trickle\r\n");
+    } else {
+        out.push_str("a=end-of-candidates\r\n");
+    }
+    out
+}
+
+fn with_nethernet_candidate_suffix(sdp: &str, ufrag: &str) -> String {
+    let mut out = String::with_capacity(sdp.len() + 64);
+    for line in sdp.lines() {
+        if line.starts_with("a=candidate:") && !line.contains(" generation ") {
+            out.push_str(line);
+            out.push_str(" generation 0 ufrag ");
+            out.push_str(ufrag);
+            out.push_str(" network-id 0 network-cost 0");
+        } else {
+            out.push_str(line);
+        }
+        out.push_str("\r\n");
+    }
+    out
 }
 
 fn rewrite_sdp_candidates(sdp: &str, mut rewrite: impl FnMut(&mut Vec<String>)) -> String {

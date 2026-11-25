@@ -21,7 +21,7 @@ use tokio::{
     net::UdpSocket,
     sync::{Mutex, mpsc},
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use webrtc::peer_connection::RTCIceCandidateInit;
 
 use super::{peer::negotiate, state::NetherNetState};
@@ -80,13 +80,12 @@ impl NetherNetDiscovery {
                 recipient_id,
                 data,
             }) if recipient_id == self.network_id => {
-                trace!(
-                    sender_id,
-                    recipient_id,
+                info!(
+                    %address,
                     signal = data
                         .split_once(' ')
                         .map_or(data.as_str(), |(signal, _)| signal),
-                    "Received NetherNet LAN signal from {address}"
+                    "NetherNet LAN signal"
                 );
                 self.handle_signal(state, address, sender_id, data).await;
             }
@@ -100,7 +99,7 @@ impl NetherNetDiscovery {
                 expected_recipient_id = self.network_id,
                 "Ignored NetherNet LAN signal for another server"
             ),
-            None => trace!("Ignored invalid {length}-byte NetherNet LAN packet from {address}"),
+            None => info!("Ignored invalid {length}-byte NetherNet LAN packet from {address}"),
         }
         Ok(())
     }
@@ -160,20 +159,25 @@ impl NetherNetDiscovery {
                 let offer = data.to_owned();
                 let network_id = self.network_id;
                 tokio::spawn(async move {
-                    let signal = match Box::pin(negotiate(
+                    let negotiated = Box::pin(negotiate(
                         &state,
                         address,
                         &offer,
                         Some(candidate_receiver),
                     ))
-                    .await
-                    {
+                    .await;
+                    let (signal, candidate_signals) = match negotiated {
                         Ok((answer, _session)) => {
-                            format!("CONNECTRESPONSE {connection_id} {answer}")
+                            info!(
+                                %address,
+                                candidates = answer.matches("a=candidate:").count(),
+                                "NetherNet LAN answer"
+                            );
+                            lan_answer_signals(connection_id, &answer)
                         }
                         Err(error) => {
                             warn!("NetherNet LAN negotiation with {address} failed: {error}");
-                            format!("CONNECTERROR {connection_id} 11")
+                            (format!("CONNECTERROR {connection_id} 11"), Vec::new())
                         }
                     };
                     match encode_message(network_id, sender_id, &signal) {
@@ -185,6 +189,20 @@ impl NetherNetDiscovery {
                             }
                         }
                         Err(error) => warn!("Failed to encode NetherNet LAN signal: {error}"),
+                    }
+                    for candidate_signal in candidate_signals {
+                        match encode_message(network_id, sender_id, &candidate_signal) {
+                            Ok(packet) => {
+                                if let Err(error) = socket.send_to(&packet, address).await {
+                                    warn!(
+                                        "Failed to send NetherNet LAN candidate to {address}: {error}"
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                warn!("Failed to encode NetherNet LAN candidate: {error}");
+                            }
+                        }
                     }
                     tokio::select! {
                         () = state.stop_token.cancelled() => {},
@@ -333,6 +351,30 @@ fn encode_response(
     body.extend_from_slice(&application_length.to_le_bytes());
     body.extend_from_slice(application_data.as_bytes());
     encode_packet(RESPONSE_PACKET, network_id, &body)
+}
+
+/// LAN answers carry no candidates. Each candidate follows as `CANDIDATEADD`.
+fn lan_answer_signals(connection_id: u64, answer: &str) -> (String, Vec<String>) {
+    let candidates = answer
+        .lines()
+        .filter(|line| line.starts_with("a=candidate:"))
+        .map(|line| line.trim_start_matches("a=").to_owned())
+        .map(|candidate| format!("CANDIDATEADD {connection_id} {candidate}"))
+        .collect();
+    let mut body = String::new();
+    let mut trickle = false;
+    for line in answer.lines() {
+        body.push_str(line);
+        body.push_str("\r\n");
+        if line.starts_with("a=ice-pwd:") && !trickle {
+            body.push_str("a=ice-options:trickle\r\n");
+            trickle = true;
+        }
+    }
+    (
+        format!("CONNECTRESPONSE {connection_id} {body}"),
+        candidates,
+    )
 }
 
 pub(super) fn encode_message(

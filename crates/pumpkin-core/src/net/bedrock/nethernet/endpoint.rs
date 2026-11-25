@@ -202,7 +202,7 @@ async fn join(
     headers: HeaderMap,
     offer: Bytes,
 ) -> Response {
-    trace!(%address, %network_id, length = offer.len(), "Received NetherNet SDP offer");
+    info!(%address, %network_id, length = offer.len(), "NetherNet HTTP offer");
     if offer.is_empty() {
         debug!(%address, %network_id, "Rejected empty NetherNet SDP offer");
         return (StatusCode::BAD_REQUEST, "Missing SDP offer").into_response();

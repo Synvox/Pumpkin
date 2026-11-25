@@ -18,7 +18,7 @@ use webrtc::{
 };
 
 use super::{
-    ice_router::{proxy_answer, proxy_offer},
+    ice_router::{proxy_answer, proxy_offer, vanilla_nethernet_answer},
     identity::{add_server_identity, authenticate_client_offer},
     session::NetherNetSession,
     state::NetherNetState,
@@ -56,6 +56,9 @@ async fn negotiate_inner(
     let signaling = if candidates.is_some() { "LAN" } else { "HTTP" };
     let direct_ip = candidates.is_none();
     let advertised_ip = state.external_ip.or(advertised_ip);
+    // LAN discovery otherwise gathers on 0.0.0.0 and advertises an ephemeral
+    // port. Bedrock then never sends gameplay UDP to 19132 (InitialConnection-83).
+    let mux = direct_ip || advertised_ip.is_some();
     let (offer, client_public_key) = {
         let offer = offer.to_string();
         let require_identity = direct_ip && state.require_client_identity;
@@ -98,7 +101,7 @@ async fn negotiate_inner(
 
     let configuration = rtc_configuration(&state.stun_servers);
 
-    let (offer, remote_candidates) = if direct_ip {
+    let (offer, remote_candidates) = if mux {
         proxy_offer(&offer, state.ice_router.internal_addr())
     } else {
         (offer, Vec::new())
@@ -107,7 +110,7 @@ async fn negotiate_inner(
         state,
         configuration,
         handler.clone(),
-        direct_ip,
+        mux,
         advertised_ip,
     ))
     .await?;
@@ -148,7 +151,7 @@ async fn negotiate_inner(
             .await
             .ok_or_else(|| "WebRTC did not produce a local description".to_string())?;
         let answer = remove_component_two_candidates(&answer.sdp);
-        let answer = if direct_ip {
+        let answer = if mux {
             let (answer, ufrag, internal) = proxy_answer(
                 &answer,
                 advertised_ip,
@@ -177,7 +180,8 @@ async fn negotiate_inner(
         } else {
             rayon::spawn(compute_task);
         }
-        rx.await.map_err(|_| "Task cancelled".to_string())?
+        let answer = rx.await.map_err(|_| "Task cancelled".to_string())??;
+        Ok(vanilla_nethernet_answer(&answer))
     }
     .await;
 
@@ -198,10 +202,10 @@ async fn build_peer(
     state: &NetherNetState,
     configuration: RTCConfiguration,
     handler: Arc<NetherNetEventHandler>,
-    direct_ip: bool,
+    mux: bool,
     advertised_ip: Option<IpAddr>,
 ) -> Result<Arc<dyn PeerConnection>, String> {
-    let ice_bind_addr = if direct_ip {
+    let ice_bind_addr = if mux {
         // Direct connections are relayed through the router's loopback socket.
         // Binding every interface would make the inner ICE source differ from
         // the loopback route registered after SDP generation.
@@ -210,7 +214,7 @@ async fn build_peer(
         SocketAddr::new(state.ice_local_addr.ip(), 0)
     };
     let mut setting_engine_builder = SettingEngineBuilder::default();
-    if direct_ip && let Some(external_ip) = advertised_ip {
+    if mux && let Some(external_ip) = advertised_ip {
         setting_engine_builder = setting_engine_builder
             .with_nat_1to1_ips(vec![external_ip.to_string()], RTCIceCandidateType::Host);
     }
