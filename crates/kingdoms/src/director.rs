@@ -183,6 +183,9 @@ const STORMING_COUNT: usize = 8;
 /// Stuck columns breach if this many raiders are within [`STUCK_STORM_RANGE`].
 const STUCK_STORM_COUNT: usize = 3;
 const STUCK_STORM_RANGE: f64 = 24.0;
+/// Vanilla villager/pillager tracking is 8 chunks (128 blocks). Join used to
+/// land at the town gate ~150 from the camp, so the client never saw soldiers.
+const FRONT_WATCH_FROM_CAMP: f64 = 40.0;
 
 static WORST_MSPT_CENTS: AtomicU32 = AtomicU32::new(0);
 static WORST_DIRECTOR_CENTS: AtomicU32 = AtomicU32::new(0);
@@ -11009,7 +11012,7 @@ fn spawn_extra_defenders(world: &Arc<World>, town_id: &str, max: u16) {
         let Some(raid) = war.raid.as_ref() else {
             return;
         };
-        let gate = war.threatened.unwrap_or_else(|| war.scene.keep());
+        let gate = deploy_post_for(war);
         (
             war.kingdom.clone(),
             gate,
@@ -11207,12 +11210,53 @@ pub fn format_player_stats(uuid: &str, name: &str) -> String {
     )
 }
 
+fn town_gate_post(war: &TownWar) -> ScenePost {
+    war.scene
+        .gates()
+        .iter()
+        .find(|gate| gate.kind == GateKind::Town)
+        .map(|gate| ScenePost::new(gate.x, gate.z))
+        .or_else(|| war.threatened.map(|p| ScenePost::new(p.x, p.z)))
+        .unwrap_or_else(|| {
+            let keep = war.scene.keep();
+            ScenePost::new(keep.x, keep.z)
+        })
+}
+
+fn raid_camp_post(war: &TownWar) -> ScenePost {
+    war.raid
+        .as_ref()
+        .map(|r| ScenePost::new(r.camp.x, r.camp.z))
+        .or_else(|| war.scene.raid_camps().first().copied())
+        .unwrap_or_else(|| town_gate_post(war))
+}
+
+/// Stand on the camp–gate road, close enough that vanilla tracking shows the
+/// raiders and [`PLAYER_SIM_RANGE`] actually runs their AI.
+fn front_watch_post(gate: ScenePost, camp: ScenePost) -> ScenePost {
+    let dx = f64::from(gate.x - camp.x);
+    let dz = f64::from(gate.z - camp.z);
+    let dist = dx.hypot(dz);
+    if dist <= FRONT_WATCH_FROM_CAMP {
+        return gate;
+    }
+    let t = FRONT_WATCH_FROM_CAMP / dist;
+    ScenePost::new(
+        camp.x + (dx * t).round() as i32,
+        camp.z + (dz * t).round() as i32,
+    )
+}
+
+fn deploy_post_for(war: &TownWar) -> ScenePost {
+    front_watch_post(town_gate_post(war), raid_camp_post(war))
+}
+
 /// Teleport a player to a friendly rally and materialise the front if it is abstract.
 pub fn deploy_player(player: &Player, town_arg: Option<&str>) -> Result<String, String> {
     let uuid = player.gameprofile.id.to_string();
     let world = Arc::clone(&player.get_entity().world.load());
     let pos = player.get_entity().pos.load();
-    let (kingdom, town_id, post, live) = {
+    let (kingdom, town_id, post, camp, live) = {
         let dir = lock();
         let Some(kingdom) = dir.player_kingdom(&uuid).cloned() else {
             return Err("join a kingdom first (/kingdom join alder|raven)".to_owned());
@@ -11228,34 +11272,13 @@ pub fn deploy_player(player: &Player, town_arg: Option<&str>) -> Result<String, 
         if war.raid.is_none() {
             return Err(format!("no battle at {town_id}"));
         }
-        let keep = war.scene.keep();
-        let friendly = war.owner.as_str() == kingdom.as_str() || war.kingdom == kingdom;
-        // Keep posts store the planner roof/floor Y. Always land on the live
-        // surface at a town gate (or the raid camp) so the player sees the fight,
-        // not the keep attic.
-        let post = if friendly {
-            war.scene
-                .gates()
-                .iter()
-                .find(|gate| gate.kind == GateKind::Town)
-                .map(|gate| ScenePost::new(gate.x, gate.z))
-                .or_else(|| war.threatened.map(|p| ScenePost::new(p.x, p.z)))
-                .unwrap_or_else(|| ScenePost::new(keep.x, keep.z))
-        } else {
-            war.raid
-                .as_ref()
-                .map(|r| ScenePost::new(r.camp.x, r.camp.z))
-                .or_else(|| {
-                    war.scene
-                        .raid_camps()
-                        .first()
-                        .map(|p| ScenePost::new(p.x, p.z))
-                })
-                .or_else(|| war.scene.road_approach().map(|p| ScenePost::new(p.x, p.z)))
-                .unwrap_or_else(|| ScenePost::new(keep.x, keep.z))
-        };
+        // Keep posts store the planner roof/floor Y. Land on the camp road so
+        // the client is inside villager/pillager tracking of the live column,
+        // not 150 blocks away at an empty gate or in the keep attic.
+        let post = deploy_post_for(war);
+        let camp = raid_camp_post(war);
         let live = war.raid.as_ref().is_some_and(|r| r.materialized);
-        (kingdom, town_id, post, live)
+        (kingdom, town_id, post, camp, live)
     };
     queue_raid_warmup(&town_id);
     let tick = lock().tick;
@@ -11263,6 +11286,8 @@ pub fn deploy_player(player: &Player, town_arg: Option<&str>) -> Result<String, 
     let hint_y = standing_y(&world, post);
     let x = post.x;
     let z = post.z;
+    let camp_x = camp.x;
+    let camp_z = camp.z;
     let Some(server) = world.server.upgrade() else {
         let dest = Vector3::new(f64::from(x) + 0.5, f64::from(hint_y), f64::from(z) + 0.5);
         player.teleport(dest, None, None, world);
@@ -11281,8 +11306,12 @@ pub fn deploy_player(player: &Player, town_arg: Option<&str>) -> Result<String, 
         return Err("player left".to_owned());
     };
     server.spawn_task(async move {
-        let chunk = Vector2::new(x >> 4, z >> 4);
-        world.level.get_or_fetch_chunk(chunk, |_| ()).await;
+        let watch_chunk = Vector2::new(x >> 4, z >> 4);
+        let camp_chunk = Vector2::new(camp_x >> 4, camp_z >> 4);
+        world.level.get_or_fetch_chunk(watch_chunk, |_| ()).await;
+        if camp_chunk != watch_chunk {
+            world.level.get_or_fetch_chunk(camp_chunk, |_| ()).await;
+        }
         let y = open_air_y(&world, x, z, hint_y);
         let dest = Vector3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5);
         player.teleport(dest, None, None, Arc::clone(&world));
@@ -11837,6 +11866,26 @@ mod tests {
         assert_eq!(crate::abstract_combat::PLAYER_APPROACH_RANGE, 256.0);
         assert_eq!(crate::lod::CIVILIAN_SLEEP_RANGE, 64.0);
         assert_eq!(crate::lod::PLAYER_CULL_RANGE, 176.0);
+    }
+
+    #[test]
+    fn front_watch_sits_inside_tracking_of_the_camp() {
+        let gate = ScenePost::new(1560, 597);
+        let camp = ScenePost::new(1568, 446);
+        let watch = front_watch_post(gate, camp);
+        let d_camp = f64::from(watch.x - camp.x).hypot(f64::from(watch.z - camp.z));
+        let d_gate = f64::from(watch.x - gate.x).hypot(f64::from(watch.z - gate.z));
+        assert!(
+            (d_camp - FRONT_WATCH_FROM_CAMP).abs() < 1.5,
+            "d_camp={d_camp}"
+        );
+        assert!(d_camp < PLAYER_SIM_RANGE);
+        assert!(
+            d_camp < 128.0 && d_gate > d_camp,
+            "d_camp={d_camp} d_gate={d_gate}"
+        );
+        let on_top = front_watch_post(ScenePost::new(10, 10), ScenePost::new(12, 12));
+        assert_eq!(on_top, ScenePost::new(10, 10));
     }
 
     #[test]

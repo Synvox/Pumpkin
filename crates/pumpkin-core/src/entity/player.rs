@@ -5042,6 +5042,13 @@ impl Player {
                 self.send_bedrock_teleport(client);
             }
         }
+        // `set_pos` updates the entity chunk, but watched_section / chunk tickets
+        // only move in `chunker::update_position`. Without that, a same-world
+        // teleport (kingdom join, /tp) leaves the client watching spawn chunks
+        // and never pairing nearby mobs.
+        if let Some(player_arc) = self.world().get_player_by_uuid(self.gameprofile.id) {
+            crate::world::chunker::update_position(&player_arc);
+        }
     }
 
     /// `MovePlayer` at the current position and rotation, for the own client and watchers

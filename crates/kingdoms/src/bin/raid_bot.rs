@@ -36,9 +36,9 @@ use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
 use pumpkin_protocol::java::client::config::{CFinishConfig, CKnownPacks};
 use pumpkin_protocol::java::client::login::{CLoginSuccess, CSetCompression};
 use pumpkin_protocol::java::client::play::{
-    CDamageEvent, CEntityPositionSync, CKeepAlive, CLogin, CPlayerPosition, CRemoveEntities,
-    CSetContainerContent, CSetContainerSlot, CSetEquipment, CSetHealth, CSetPlayerInventory,
-    CSpawnEntity, CSystemChatMessage,
+    CChunkBatchEnd, CDamageEvent, CEntityPositionSync, CKeepAlive, CLogin, CPlayerPosition,
+    CRemoveEntities, CSetContainerContent, CSetContainerSlot, CSetEquipment, CSetHealth,
+    CSetPlayerInventory, CSpawnEntity, CSystemChatMessage,
 };
 use pumpkin_protocol::java::packet_decoder::TCPNetworkDecoder;
 use pumpkin_protocol::java::packet_encoder::TCPNetworkEncoder;
@@ -48,8 +48,8 @@ use pumpkin_protocol::java::server::config::{
 use pumpkin_protocol::java::server::handshake::SHandShake;
 use pumpkin_protocol::java::server::login::{SLoginAcknowledged, SLoginStart};
 use pumpkin_protocol::java::server::play::{
-    SAttack, SChatCommand, SClientCommand, SConfirmTeleport, SKeepAlive, SPlayerLoaded,
-    SPlayerPosition, SPlayerPositionRotation, SSwingArm, SUseItem,
+    SAttack, SChatCommand, SChunkBatch, SClientCommand, SConfirmTeleport, SKeepAlive,
+    SPlayerLoaded, SPlayerPosition, SPlayerPositionRotation, SSwingArm, SUseItem,
 };
 use pumpkin_protocol::packet::MultiVersionJavaPacket;
 use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
@@ -540,6 +540,7 @@ impl Bot {
         let keep_id = CKeepAlive::to_id(CURRENT_MC_VERSION);
         let pos_id = CPlayerPosition::to_id(CURRENT_MC_VERSION);
         let spawn_id = CSpawnEntity::to_id(CURRENT_MC_VERSION);
+        let batch_end_id = CChunkBatchEnd::to_id(CURRENT_MC_VERSION);
         let chat_id = CSystemChatMessage::to_id(CURRENT_MC_VERSION);
         let remove_id = CRemoveEntities::to_id(CURRENT_MC_VERSION);
         let sync_id = CEntityPositionSync::to_id(CURRENT_MC_VERSION);
@@ -554,6 +555,13 @@ impl Bot {
                 .map_err(|err| format!("CKeepAlive: {err}"))?;
             self.send_packet(&SKeepAlive {
                 keep_alive_id: keep.keep_alive_id,
+            })
+            .await?;
+        } else if pkt.id == batch_end_id {
+            // Vanilla acks every CChunkBatchEnd. Without this the server holds
+            // in_flight_batches and never sends the front's chunks after teleport.
+            self.send_packet(&SChunkBatch {
+                chunks_per_tick: 80.0,
             })
             .await?;
         } else if pkt.id == pos_id {
@@ -1157,6 +1165,10 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
                 "VIS-FRONT pos={:.1},{:.1},{:.1} dist={dist:.0}",
                 bot.position.x, bot.position.y, bot.position.z
             );
+            // Nudge so the server chunker treats this as a move if teleport
+            // left watched_section on the old spawn cylinder.
+            let step = Vector3::new(bot.position.x + 1.0, bot.position.y, bot.position.z);
+            bot.move_to(step).await?;
             break;
         }
     }

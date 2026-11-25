@@ -172,7 +172,7 @@ Iron golems keep vanilla melee / monster targeting and also rally.
 
 `/raid start <town> [size]` — town is `here` (cell containing the sender), quoted `"0,0"` / `"20261025:0:0"`, or an unquoted word like `here`. Commas and colons need quotes. Default size 24. Waves of pillagers (crossbow) and vindicators (melee + door break) spawn on `PillagerSpawn` tent columns in the hinterland camp, captains wear the ominous banner, and they march on the threatened gate. `/raid retake <town> [size]` sends kingdom soldiers to retake a pillager-owned town. `/raid stop` ends every raid in the process.
 
-`/kingdom join <alder|raven>` is allowed for any player. It dyes leather armour in the team colour, puts the player on the scoreboard team (friendly fire off, name tags on), starts a live front if none is open, and teleports the player to that front so they see soldiers fighting. `/kingdom goto front` (alias `/kingdom deploy`) sends them back to the fighting; respawn is still the keep courtyard. Membership is saved in `kingdoms-ownership.json` and reapplied on join.
+`/kingdom join <alder|raven>` is allowed for any player. It dyes leather armour in the team colour, puts the player on the scoreboard team (friendly fire off, name tags on), starts a live front if none is open, and teleports the player onto the camp–gate road (about 40 blocks from the raid camp) so vanilla tracking shows the soldiers. `/kingdom goto front` (alias `/kingdom deploy`) sends them back to that watch post; respawn is still the keep courtyard. Membership is saved in `kingdoms-ownership.json` and reapplied on join.
 
 Archers within ~32 blocks of a logged-in player shoot real arrow entities. Distant shots stay director damage so 400 vs 400 does not spawn hundreds of arrows.
 
