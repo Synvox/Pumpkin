@@ -283,19 +283,43 @@ pub fn write_round38_renders(
         .iter()
         .find(|scene| scene.kind == SceneKind::CathedralCity)
     {
-        let rect = scene.rect.inflate(4);
+        let rect = scene.rect;
         let title = "Cathedral city · walls, streets, market, guild halls, cathedral";
         save(
             &out_dir.join(format!("{stem}-cathedral-city-aerial.png")),
-            &render_topdown_rect(plan, volume, rect),
+            &render_topdown_rect(plan, volume, rect.inflate(2)),
         )?;
         save(
             &out_dir.join(format!("{stem}-cathedral-city-iso.png")),
-            &render_exterior_rot(volume, rect, 2, title, 0),
+            &render_iso_view(
+                volume,
+                rect.min_x,
+                rect.min_z,
+                rect.max_x,
+                rect.max_z,
+                0,
+                1,
+                |x, _, z| rect.contains(x, z),
+                Some(title),
+                false,
+                0,
+            ),
         )?;
         save(
             &out_dir.join(format!("{stem}-cathedral-city-iso-sw.png")),
-            &render_exterior_rot(volume, rect, 2, title, 1),
+            &render_iso_view(
+                volume,
+                rect.min_x,
+                rect.min_z,
+                rect.max_x,
+                rect.max_z,
+                0,
+                1,
+                |x, _, z| rect.contains(x, z),
+                Some(title),
+                false,
+                1,
+            ),
         )?;
         let (cx, _) = scene.rect.center();
         let mut gate = (cx, scene.rect.max_z);
@@ -356,23 +380,91 @@ pub fn write_round38_renders(
             )?;
         }
     }
-    if let Some(lot) = plan.lots.iter().find(|lot| {
-        matches!(
-            lot.kind,
-            BuildingKind::Townhouse | BuildingKind::Timber | BuildingKind::Cottage
-        )
-    }) {
+    if let Some((rect, ids)) = town_street_cluster(plan) {
+        let title = "Town street · mixed stone, gable/hip/cross-gable, dormers";
+        let street = render_iso_view(
+            volume,
+            rect.min_x,
+            rect.min_z,
+            rect.max_x,
+            rect.max_z,
+            0,
+            1,
+            |x, _, z| town_street_keep(plan, &ids, rect, x, z),
+            Some(title),
+            false,
+            0,
+        );
         save(
             &out_dir.join(format!("{stem}-townhouse-roofs-iso.png")),
-            &render_exterior(
-                volume,
-                lot.rect.inflate(8),
-                4,
-                "Town houses · gable, hip, cross-gable, dormers",
-            ),
+            &street,
         )?;
+        save(&out_dir.join(format!("{stem}-town-street.png")), &street)?;
     }
     Ok(())
+}
+
+/// Complete house lots along a capital street, padded only for eaves so a
+/// neighbour is not sliced into a floating wall.
+fn town_street_cluster(plan: &TownPlan) -> Option<(Rect, Vec<u16>)> {
+    let civilian = |lot: &Lot| {
+        matches!(
+            lot.kind,
+            BuildingKind::Townhouse
+                | BuildingKind::Timber
+                | BuildingKind::Cottage
+                | BuildingKind::Tavern
+        ) && !plan
+            .scenes
+            .iter()
+            .any(|scene| scene.kind == SceneKind::CathedralCity && scene.rect.intersects(lot.rect))
+    };
+    let mut best: Option<(i32, Rect, Vec<u16>)> = None;
+    for seed in plan.lots.iter().filter(|lot| civilian(lot)) {
+        let mut cluster = seed.rect;
+        let mut ids = vec![seed.id];
+        for other in plan.lots.iter().filter(|lot| civilian(lot)) {
+            if other.id == seed.id || !other.rect.inflate(6).intersects(cluster) {
+                continue;
+            }
+            let next = Rect::new(
+                cluster.min_x.min(other.rect.min_x),
+                cluster.min_z.min(other.rect.min_z),
+                cluster.max_x.max(other.rect.max_x),
+                cluster.max_z.max(other.rect.max_z),
+            );
+            if next.width() > 36 || next.depth() > 36 {
+                continue;
+            }
+            cluster = next;
+            ids.push(other.id);
+        }
+        let n = ids.len() as i32;
+        match best {
+            Some((best_n, _, _)) if n <= best_n => {}
+            _ => best = Some((n, cluster, ids)),
+        }
+    }
+    best.map(|(_, rect, ids)| (rect.inflate(1), ids))
+}
+
+fn town_street_keep(plan: &TownPlan, ids: &[u16], rect: Rect, x: i32, z: i32) -> bool {
+    if !rect.contains(x, z) {
+        return false;
+    }
+    let lot = plan.occ.lot(x, z);
+    if ids.contains(&lot) {
+        return true;
+    }
+    if plan.occ.kind(x, z) == CellKind::Eave {
+        return crate::stamp::nearest_eave_lot(plan, x, z)
+            .is_some_and(|owner| ids.contains(&owner.id));
+    }
+    plan.occ.kind(x, z).is_road_surface()
+        || matches!(
+            plan.occ.kind(x, z),
+            CellKind::Green | CellKind::Plaza | CellKind::Well | CellKind::Fountain
+        )
 }
 
 /// Tight high-tile iso around a road column, as a joining player would see.

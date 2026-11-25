@@ -160,6 +160,23 @@ impl BuildingKind {
                 | Self::Chapel
         )
     }
+
+    /// Lots whose eave ring is a 1-block house roof/jetty, not a custom mass.
+    #[must_use]
+    pub const fn uses_house_overhang(self) -> bool {
+        matches!(
+            self,
+            Self::Cottage
+                | Self::Timber
+                | Self::Townhouse
+                | Self::Longhouse
+                | Self::Tavern
+                | Self::Barn
+                | Self::HuntingLodge
+                | Self::Scriptorium
+                | Self::Blacksmith
+        )
+    }
 }
 
 /// Pitched roof form for a civilian lot. Desert lots stay flat.

@@ -26,6 +26,8 @@ pub struct BuildingCheck {
     pub open_ridges: usize,
     /// Perimeter wall columns whose top does not meet a roof block.
     pub wall_roof_gaps: usize,
+    /// House or eave solids with no 6-connected support back to that lot.
+    pub unsupported: usize,
 }
 
 impl BuildingCheck {
@@ -40,6 +42,7 @@ impl BuildingCheck {
             && self.sky_open == 0
             && self.open_ridges == 0
             && self.wall_roof_gaps == 0
+            && self.unsupported == 0
     }
 }
 
@@ -76,13 +79,14 @@ impl TownCheck {
                 .iter()
                 .map(|b| {
                     format!(
-                        "{} leak={:?} float={} sky={} ridge={} wall={} seed={:?}",
+                        "{} leak={:?} float={} sky={} ridge={} wall={} unsupported={} seed={:?}",
                         b.name,
                         b.leak,
                         b.floating_roofs,
                         b.sky_open,
                         b.open_ridges,
                         b.wall_roof_gaps,
+                        b.unsupported,
                         b.seed
                     )
                 })
@@ -1013,13 +1017,24 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
             lot.kind,
             BuildingKind::Watchtower | BuildingKind::BellTower | BuildingKind::TownHall
         );
-        buildings.push(check_columns(
+        let mut check = check_columns(
             &format!("lot{}-{:?}", lot.id, lot.kind),
             cols,
             volume,
             plan,
             check_sky,
-        ));
+        );
+        if lot.kind.uses_house_overhang()
+            && !(lot.kind == BuildingKind::Blacksmith
+                && plan.has_scene(
+                    lot.rect.center().0,
+                    lot.rect.center().1,
+                    SceneKind::PillagerStronghold,
+                ))
+        {
+            check.unsupported = count_unsupported_house_parts(plan, lot, volume);
+        }
+        buildings.push(check);
         if lot.kind == BuildingKind::Windmill {
             buildings.push(check_mill_connected(plan, lot, volume));
         }
@@ -1195,6 +1210,7 @@ fn check_columns(
             sky_open: 0,
             open_ridges: 0,
             wall_roof_gaps: 0,
+            unsupported: 0,
         };
     }
     let set: std::collections::HashSet<(i32, i32)> = columns.iter().copied().collect();
@@ -1232,6 +1248,7 @@ fn check_columns(
         sky_open,
         open_ridges,
         wall_roof_gaps,
+        unsupported: 0,
     }
 }
 
@@ -1348,6 +1365,7 @@ fn check_mill_connected(plan: &TownPlan, mill: &Lot, volume: &VolumeSink) -> Bui
         sky_open: 0,
         open_ridges: 0,
         wall_roof_gaps: 0,
+        unsupported: 0,
     }
 }
 
@@ -1860,6 +1878,142 @@ fn count_wall_roof_gaps(
     n
 }
 
+/// Blocks on a house lot (and its eave ring) that are not 6-connected, via
+/// the lot itself, down to terrain. Catches a dormer or jetty stamped at the
+/// wrong Y so it floats beside the house.
+fn count_unsupported_house_parts(plan: &TownPlan, lot: &Lot, volume: &VolumeSink) -> usize {
+    let in_part = |x: i32, z: i32| {
+        if lot.rect.contains(x, z) && plan.occ.lot(x, z) == lot.id {
+            return true;
+        }
+        if plan.occ.kind(x, z) != CellKind::Eave {
+            return false;
+        }
+        crate::stamp::nearest_eave_lot(plan, x, z).is_some_and(|owner| owner.id == lot.id)
+    };
+    let min_x = lot.rect.min_x - 1;
+    let max_x = lot.rect.max_x + 1;
+    let min_z = lot.rect.min_z - 1;
+    let max_z = lot.rect.max_z + 1;
+    let mut above = HashSet::new();
+    let mut seeds = VecDeque::new();
+    for z in min_z..=max_z {
+        for x in min_x..=max_x {
+            if !in_part(x, z) {
+                continue;
+            }
+            let ground = plan.heights.height(x, z) - 1;
+            let y_hi = (ground + 40).min(volume.min_y + volume.sy - 1);
+            for y in (ground + 1)..=y_hi {
+                let Some(state) = volume.get(x, y, z) else {
+                    continue;
+                };
+                if state.is_air() || is_water_block(state) {
+                    continue;
+                }
+                let id = Block::from_state_id(state.id).id;
+                if is_leaf_or_plant(id) {
+                    continue;
+                }
+                above.insert((x, y, z));
+                let supported = FACE.iter().any(|(dx, dy, dz)| {
+                    let nx = x + dx;
+                    let ny = y + dy;
+                    let nz = z + dz;
+                    if !in_part(nx, nz) && *dy == 0 {
+                        return false;
+                    }
+                    let Some(nstate) = volume.get(nx, ny, nz) else {
+                        return false;
+                    };
+                    if nstate.is_air() {
+                        return false;
+                    }
+                    is_water_block(nstate) || ny < plan.heights.height(nx, nz)
+                });
+                if supported {
+                    seeds.push_back((x, y, z));
+                }
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    while let Some(pos) = seeds.pop_front() {
+        if !seen.insert(pos) {
+            continue;
+        }
+        let (x, y, z) = pos;
+        // Face plus edge neighbours so a 1-block roof pitch step (diagonal
+        // in YZ or XY) still counts as attached to the wall it belongs to.
+        for dy in -1i32..=1 {
+            for dz in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
+                    if dx.abs() + dy.abs() + dz.abs() > 2 {
+                        continue;
+                    }
+                    let next = (x + dx, y + dy, z + dz);
+                    if above.contains(&next) && !seen.contains(&next) {
+                        seeds.push_back(next);
+                    }
+                }
+            }
+        }
+    }
+    let mut grew = true;
+    while grew {
+        grew = false;
+        let hanging: Vec<(i32, i32, i32)> = above
+            .iter()
+            .copied()
+            .filter(|pos| {
+                !seen.contains(pos) && hangs_from_parent(volume, plan, &seen, *pos, in_part)
+            })
+            .collect();
+        for pos in hanging {
+            if seen.insert(pos) {
+                grew = true;
+            }
+        }
+    }
+    above
+        .difference(&seen)
+        .filter(|pos| {
+            volume
+                .get(pos.0, pos.1, pos.2)
+                .is_some_and(is_house_fragment)
+        })
+        .count()
+}
+
+fn is_house_fragment(state: &BlockState) -> bool {
+    if is_log(Block::from_state_id(state.id).id) {
+        return true;
+    }
+    let id = Block::from_state_id(state.id).id;
+    id == Block::OAK_PLANKS.id
+        || id == Block::SPRUCE_PLANKS.id
+        || id == Block::DARK_OAK_PLANKS.id
+        || id == Block::OAK_STAIRS.id
+        || id == Block::SPRUCE_STAIRS.id
+        || id == Block::DARK_OAK_STAIRS.id
+        || id == Block::BRICK_STAIRS.id
+        || id == Block::OAK_SLAB.id
+        || id == Block::SPRUCE_SLAB.id
+        || id == Block::DARK_OAK_SLAB.id
+        || id == Block::BRICK_SLAB.id
+        || id == Block::WHITE_TERRACOTTA.id
+        || id == Block::LIGHT_GRAY_TERRACOTTA.id
+        || id == Block::YELLOW_TERRACOTTA.id
+        || id == Block::ORANGE_TERRACOTTA.id
+        || id == Block::BROWN_TERRACOTTA.id
+        || id == Block::RED_TERRACOTTA.id
+        || id == Block::STRIPPED_OAK_LOG.id
+        || id == Block::STRIPPED_SPRUCE_LOG.id
+}
+
 fn is_roof_debris(state: &BlockState) -> bool {
     let id = Block::from_state_id(state.id).id;
     id == Block::GRASS_BLOCK.id
@@ -2023,6 +2177,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::print_stderr,
+        reason = "per-seed progress so a 7-seed showcase hang is visible"
+    )]
     fn showcase_and_random_world_seeds_are_watertight() {
         use pumpkin_data::dimension::Dimension;
         use pumpkin_util::world_seed::Seed;
@@ -2046,6 +2204,7 @@ mod tests {
             let plan = crate::plan::plan_for(seed, 0, 0, &world_gen);
             let volume = fill_volume(&plan);
             let check = check_town(&plan, &volume);
+            eprintln!("showcase seed {seed}: {}", check.summary());
             if !check.ok() {
                 failed.push(check.summary());
             }
@@ -2311,6 +2470,23 @@ mod tests {
             house_gaps.is_empty(),
             "hillside wall/roof gaps: {}",
             house_gaps.join("; ")
+        );
+        let unsupported: Vec<_> = check
+            .buildings
+            .iter()
+            .filter(|b| b.unsupported > 0)
+            .map(|b| format!("{} unsupported={}", b.name, b.unsupported))
+            .collect();
+        assert!(
+            unsupported.is_empty(),
+            "hillside unsupported house parts: {}",
+            unsupported.join("; ")
+        );
+        let floating = check_floating_fragments(&plan, &volume);
+        assert!(
+            floating.is_empty(),
+            "hillside floating fragments:\n{}",
+            floating.join("\n")
         );
         assert!(
             plan.lots.iter().any(|lot| lot.has_dormers(false)),

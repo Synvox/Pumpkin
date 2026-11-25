@@ -16,6 +16,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Instant;
 
 use pumpkin_data::Block;
 use pumpkin_data::dimension::Dimension;
@@ -121,7 +122,9 @@ fn render_one(
         "seed {seed} cell ({cell_x},{cell_z}) origin ({}, {}) cell size {CELL_SIZE}",
         town.x, town.z
     );
+    let plan_start = Instant::now();
     let plan_a = plan_for(seed, cell_x, cell_z, &world_gen);
+    println!("  plan_for {} ms", plan_start.elapsed().as_millis());
     let Some(plan_b) = plan_from_cache(seed, cell_x, cell_z) else {
         eprintln!("plan missing from cache after build");
         return false;
@@ -249,10 +252,19 @@ fn render_one(
         return false;
     }
     println!("  wrote 512x512 aerial/oblique around gate {gx},{gz}");
+    if planner_only {
+        println!("  (--planner-only, skipped neighbour plan_for and real chunks)");
+        return true;
+    }
+    let neighbor_start = Instant::now();
     let neighbor_arcs: Vec<_> = [(1, 0), (-1, 0), (0, 1), (0, -1)]
         .into_iter()
         .map(|(dx, dz)| plan_for(seed, cell_x + dx, cell_z + dz, &world_gen))
         .collect();
+    println!(
+        "  neighbour plan_for {} ms",
+        neighbor_start.elapsed().as_millis()
+    );
     let neighbor_refs: Vec<_> = neighbor_arcs
         .iter()
         .map(std::convert::AsRef::as_ref)
@@ -265,11 +277,6 @@ fn render_one(
     }
     if !walk.neighbor_paths_fail.is_empty() {
         eprintln!("  neighbour-stitch {}", walk.render());
-    }
-
-    if planner_only {
-        println!("  (--planner-only, skipped real chunks)");
-        return true;
     }
 
     println!("  generating real chunks through Features + decorator…");

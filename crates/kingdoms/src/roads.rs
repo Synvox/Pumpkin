@@ -684,7 +684,7 @@ mod tests {
             "too few road tiles {}",
             report.road_tiles
         );
-        assert_eq!(PLAN_CACHE_VERSION, 33);
+        assert_eq!(PLAN_CACHE_VERSION, 35);
     }
 
     #[test]

@@ -10200,54 +10200,67 @@ fn find_cathedral_city_site(
     scenes: &[Scene],
     rng: &mut TownRng,
 ) -> Option<Rect> {
-    let mut best = None;
-    let mut best_score = i32::MIN;
-    for &(w, d) in &[(80, 64), (72, 60), (64, 52), (56, 48)] {
-        let mut z = search.min_z + 8;
-        while z + d < search.max_z {
-            let mut x = search.min_x + 8;
-            while x + w < search.max_x {
-                let rect = Rect::new(x, z, x + w - 1, z + d - 1);
-                x += 10;
-                if town.inflate(20).intersects(rect) || keep_out.intersects(rect) {
-                    continue;
+    for min_relief in [8, 4, 0] {
+        let mut best = None;
+        let mut best_score = i32::MIN;
+        for &(w, d) in &[(80, 64), (72, 60), (64, 52), (56, 48)] {
+            let mut z = search.min_z + 8;
+            while z + d < search.max_z {
+                let mut x = search.min_x + 8;
+                while x + w < search.max_x {
+                    let rect = Rect::new(x, z, x + w - 1, z + d - 1);
+                    x += 10;
+                    if town.inflate(20).intersects(rect) || keep_out.intersects(rect) {
+                        continue;
+                    }
+                    if landmark_blocked(scenes, rect.inflate(MIN_SETTLEMENT_GAP)) {
+                        continue;
+                    }
+                    if near_settlement(occ, rect, MIN_SETTLEMENT_GAP) {
+                        continue;
+                    }
+                    if near_gothic(occ, rect) {
+                        continue;
+                    }
+                    let dry = grid.dry_ratio(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+                    if dry < 78 {
+                        continue;
+                    }
+                    let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
+                    let relief = hi - lo;
+                    if relief < min_relief || relief > 22 || lo <= grid.sea_level + 1 {
+                        continue;
+                    }
+                    if !cathedral_city_site_open(occ, rect) {
+                        continue;
+                    }
+                    let (cx, cz) = rect.center();
+                    let (tx, tz) = town.center();
+                    let from_town = (cx - tx).abs() + (cz - tz).abs();
+                    // Hillside first: 1–2 block contour terraces need relief.
+                    // Distance is a tie-break so a far pancake cannot beat a
+                    // nearer slope (that was the mean-floor plate).
+                    let slope = if (8..=16).contains(&relief) {
+                        40 + relief
+                    } else if relief >= 4 {
+                        10 + relief
+                    } else {
+                        relief - 24
+                    };
+                    let score = dry + slope * 8 + from_town / 8 + rng.gen_range(0, 6);
+                    if score > best_score {
+                        best_score = score;
+                        best = Some(rect);
+                    }
                 }
-                if landmark_blocked(scenes, rect.inflate(MIN_SETTLEMENT_GAP)) {
-                    continue;
-                }
-                if near_settlement(occ, rect, MIN_SETTLEMENT_GAP) {
-                    continue;
-                }
-                if near_gothic(occ, rect) {
-                    continue;
-                }
-                let dry = grid.dry_ratio(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
-                if dry < 78 {
-                    continue;
-                }
-                let (lo, hi) = grid.range(rect.min_x, rect.min_z, rect.max_x, rect.max_z);
-                if hi - lo > 22 || lo <= grid.sea_level + 1 {
-                    continue;
-                }
-                if !cathedral_city_site_open(occ, rect) {
-                    continue;
-                }
-                let (cx, cz) = rect.center();
-                let (tx, tz) = town.center();
-                let from_town = (cx - tx).abs() + (cz - tz).abs();
-                let score = from_town + dry - (hi - lo) * 3 + rng.gen_range(0, 6);
-                if score > best_score {
-                    best_score = score;
-                    best = Some(rect);
-                }
+                z += 10;
             }
-            z += 10;
         }
         if best.is_some() {
             return best;
         }
     }
-    best
+    None
 }
 
 fn cathedral_city_site_open(occ: &Occupancy, rect: Rect) -> bool {
@@ -17783,8 +17796,8 @@ mod tests {
             origin.z + 360,
             8,
             78,
-            10,
-            4,
+            24,
+            16,
         );
         let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
         let cities: Vec<_> = plan
@@ -17898,8 +17911,14 @@ mod tests {
             })
             .map(|b| {
                 format!(
-                    "{} leak={:?} float={} sky={} ridge={} wall={}",
-                    b.name, b.leak, b.floating_roofs, b.sky_open, b.open_ridges, b.wall_roof_gaps
+                    "{} leak={:?} float={} sky={} ridge={} wall={} unsupported={}",
+                    b.name,
+                    b.leak,
+                    b.floating_roofs,
+                    b.sky_open,
+                    b.open_ridges,
+                    b.wall_roof_gaps,
+                    b.unsupported
                 )
             })
             .collect();
@@ -17961,5 +17980,84 @@ mod tests {
             "cathedral city walk-test {}",
             walk.summary()
         );
+
+        let floating = crate::watertight::check_floating_fragments(&plan, &volume);
+        assert!(
+            floating.is_empty(),
+            "cathedral city floating fragments:\n{}",
+            floating.join("\n")
+        );
+        let unsupported: Vec<_> = check
+            .buildings
+            .iter()
+            .filter(|b| b.unsupported > 0)
+            .map(|b| format!("{} unsupported={}", b.name, b.unsupported))
+            .collect();
+        assert!(
+            unsupported.is_empty(),
+            "unsupported house parts: {}",
+            unsupported.join("; ")
+        );
+
+        let (lo, hi) = plan.heights.range(
+            city.rect.min_x,
+            city.rect.min_z,
+            city.rect.max_x,
+            city.rect.max_z,
+        );
+        let mut road_y = Vec::new();
+        for z in city.rect.min_z..=city.rect.max_z {
+            for x in city.rect.min_x..=city.rect.max_x {
+                if !plan.occ.kind(x, z).is_road_surface() {
+                    continue;
+                }
+                let ground = plan.heights.height(x, z);
+                if let Some((top, _)) = volume.top(x, z) {
+                    for y in volume.min_y..=top.min(ground + 3) {
+                        let Some(state) = volume.get(x, y, z) else {
+                            continue;
+                        };
+                        let id = Block::from_state_id(state.id).id;
+                        if id == Block::DIRT_PATH.id
+                            || id == Block::GRAVEL.id
+                            || id == Block::COBBLESTONE.id
+                        {
+                            road_y.push(y);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if hi - lo >= 4 && road_y.len() >= 8 {
+            let min_y = *road_y.iter().min().unwrap_or(&0);
+            let max_y = *road_y.iter().max().unwrap_or(&0);
+            assert!(
+                max_y - min_y >= 2,
+                "cathedral city roads should terrace with terrain lo={lo} hi={hi} road={min_y}..{max_y}"
+            );
+        }
+        let mut wall_top = Vec::new();
+        for z in city.rect.min_z..=city.rect.max_z {
+            for x in city.rect.min_x..=city.rect.max_x {
+                if !matches!(
+                    plan.occ.kind(x, z),
+                    CellKind::TownWall | CellKind::TownTower | CellKind::TownGate
+                ) {
+                    continue;
+                }
+                if let Some((top, _)) = volume.top(x, z) {
+                    wall_top.push(top);
+                }
+            }
+        }
+        if hi - lo >= 6 && wall_top.len() >= 8 {
+            let min_y = *wall_top.iter().min().unwrap_or(&0);
+            let max_y = *wall_top.iter().max().unwrap_or(&0);
+            assert!(
+                max_y - min_y >= 2,
+                "cathedral city curtain should step with terrain lo={lo} hi={hi} wall={min_y}..{max_y}"
+            );
+        }
     }
 }
