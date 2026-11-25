@@ -20,7 +20,7 @@ const LOCATE_DESC: &str = "Reports the nearest planned kingdoms town.";
 const LOCATE_PERM: &str = "kingdoms:command.locatetown";
 
 const KINGDOM_NAME: &str = "kingdom";
-const KINGDOM_DESC: &str = "Kingdom info, join, fronts, deploy, rally, rank, and stats.";
+const KINGDOM_DESC: &str = "Kingdom info, join, fronts, deploy, goto, rally, rank, and stats.";
 const KINGDOM_PERM: &str = "kingdoms:command.kingdom";
 
 const RAID_NAME: &str = "raid";
@@ -157,7 +157,7 @@ impl CommandExecutor for KingdomJoinExecutor {
         let (id, rank) = director::join_kingdom(&player, &raw);
         context.source.send_feedback(
             TextComponent::text(format!(
-                "Joined kingdom {} as {}",
+                "Joined kingdom {} as {}. Sent to the front. /kingdom goto front returns you to the fighting.",
                 id.as_str(),
                 rank.enlist().as_str()
             ))
@@ -312,6 +312,43 @@ impl CommandExecutor for KingdomFrontsExecutor {
 
 struct KingdomDeployExecutor {
     has_town: bool,
+}
+
+struct KingdomGotoExecutor {
+    has_town: bool,
+}
+
+impl CommandExecutor for KingdomGotoExecutor {
+    fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
+        let Some(player) = context.as_player() else {
+            context.source.send_feedback(
+                TextComponent::text("Only players can go to the front")
+                    .color_named(NamedColor::Red),
+                false,
+            );
+            return Ok(0);
+        };
+        let town = if self.has_town {
+            Some(StringArgumentType::get(context, "town")?)
+        } else {
+            None
+        };
+        match director::send_to_front(&player, town) {
+            Ok(msg) => {
+                context.source.send_feedback(
+                    TextComponent::text(msg).color_named(NamedColor::Green),
+                    true,
+                );
+                Ok(1)
+            }
+            Err(err) => {
+                context
+                    .source
+                    .send_feedback(TextComponent::text(err).color_named(NamedColor::Red), false);
+                Ok(0)
+            }
+        }
+    }
 }
 
 impl CommandExecutor for KingdomDeployExecutor {
@@ -533,6 +570,15 @@ pub fn register(dispatcher: &mut CommandDispatcher, permissions: &PermissionMana
                     .then(
                         argument("town", StringArgumentType::QuotablePhrase)
                             .executes(KingdomDeployExecutor { has_town: true }),
+                    ),
+            )
+            .then(
+                literal("goto")
+                    .executes(KingdomGotoExecutor { has_town: false })
+                    .then(literal("front").executes(KingdomGotoExecutor { has_town: false }))
+                    .then(
+                        argument("town", StringArgumentType::QuotablePhrase)
+                            .executes(KingdomGotoExecutor { has_town: true }),
                     ),
             )
             .then(literal("stats").executes(WarStatsExecutor))

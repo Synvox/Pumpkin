@@ -205,6 +205,45 @@ impl CellKind {
         )
     }
 
+    /// Walkable road, stair, bridge, plaza or gate surface.
+    #[must_use]
+    pub const fn is_walkable_road(self) -> bool {
+        self.is_road_surface() || matches!(self, Self::Plaza | Self::Market)
+    }
+
+    /// Packed path a player walks: roads, stairs, bridges, fords and gates.
+    /// Plaza lamp-posts and market stalls are not part of this set.
+    #[must_use]
+    pub const fn is_road_surface(self) -> bool {
+        matches!(
+            self,
+            Self::Road
+                | Self::RoadStairN
+                | Self::RoadStairS
+                | Self::RoadStairE
+                | Self::RoadStairW
+                | Self::Bridge
+                | Self::TownGate
+                | Self::CastleGate
+                | Self::PalisadeGate
+                | Self::Ford
+        )
+    }
+
+    /// Curtain, palisade or countryside wall that should form a closed circuit.
+    #[must_use]
+    pub const fn is_wall_ribbon(self) -> bool {
+        matches!(
+            self,
+            Self::TownWall
+                | Self::CastleWall
+                | Self::CastleInnerWall
+                | Self::FortressWall
+                | Self::Palisade
+                | Self::FieldWall
+        )
+    }
+
     /// Stone volumes that can bound an interior room.
     #[must_use]
     pub const fn is_shell(self) -> bool {

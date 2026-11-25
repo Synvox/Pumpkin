@@ -15,6 +15,29 @@ use crate::scenes::SceneKind;
 use crate::siege::FLAG_MAST_FENCES;
 use crate::stamp::{BlockSink, VolumeSink, fill_volume, ridge_floor};
 
+/// Aerial 512×512 plus a ground-level-ish oblique of the same crop.
+pub fn write_region_renders(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+    cx: i32,
+    cz: i32,
+    size: i32,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(out_dir)?;
+    let half = size / 2;
+    let rect = Rect::new(cx - half, cz - half, cx + half - 1, cz + half - 1);
+    let aerial = render_topdown_rect(plan, volume, rect);
+    let oblique = render_iso(volume, rect.min_x, rect.min_z, rect.max_x, rect.max_z, 2, 1);
+    save(&out_dir.join(format!("{stem}-aerial-{size}.png")), &aerial)?;
+    save(
+        &out_dir.join(format!("{stem}-oblique-{size}.png")),
+        &oblique,
+    )?;
+    Ok(())
+}
+
 /// Planner-only renders (no chunk generation).
 pub fn write_planner_renders(
     plan: &TownPlan,

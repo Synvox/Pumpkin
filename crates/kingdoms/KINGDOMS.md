@@ -172,7 +172,7 @@ Iron golems keep vanilla melee / monster targeting and also rally.
 
 `/raid start <town> [size]` — town is `here` (cell containing the sender), quoted `"0,0"` / `"20261025:0:0"`, or an unquoted word like `here`. Commas and colons need quotes. Default size 24. Waves of pillagers (crossbow) and vindicators (melee + door break) spawn on `PillagerSpawn` tent columns in the hinterland camp, captains wear the ominous banner, and they march on the threatened gate. `/raid retake <town> [size]` sends kingdom soldiers to retake a pillager-owned town. `/raid stop` ends every raid in the process.
 
-`/kingdom join <alder|raven>` is allowed for any player. It dyes leather armour in the team colour, puts the player on the scoreboard team (friendly fire off, name tags on), and sets respawn at that kingdom's keep. Membership is saved in `kingdoms-ownership.json` and reapplied on join.
+`/kingdom join <alder|raven>` is allowed for any player. It dyes leather armour in the team colour, puts the player on the scoreboard team (friendly fire off, name tags on), starts a live front if none is open, and teleports the player to that front so they see soldiers fighting. `/kingdom goto front` (alias `/kingdom deploy`) sends them back to the fighting; respawn is still the keep courtyard. Membership is saved in `kingdoms-ownership.json` and reapplied on join.
 
 Archers within ~32 blocks of a logged-in player shoot real arrow entities. Distant shots stay director damage so 400 vs 400 does not spawn hundreds of arrows.
 
@@ -452,7 +452,7 @@ Civilians work at a workstation by day (ticks 2000–11000) and go home to a bed
 
 On each director tick: spatial buckets (16 blocks) for target acquisition. Idle garrisons still `set_no_ai` stagger; a live raid does not, because skipping AI also skipped walking. Path-search cap 48/tick applies only to **squad leaders** refreshing live `navigator.set_progress`. Everyone else steers on a shared flow field (one BFS per gate/keep, 4-block cells, O(1) lookup). Followers keep cohesion with their leader; within ~16 blocks and LOS they walk straight at the target.
 
-Fronts with no player within 128 blocks of keep, gate, or camp stay **abstract**: virtual raider/defender counts, a 400-tick march, then Lanchester combat on a 20-tick timer. Entities and force-load tickets appear only when a player approaches (and the live body budget has room). `GET /war` reports `live` so the map can tell a materialised fight from a statistical one.
+Fronts with no player within 160 blocks of keep, gate, or camp stay **abstract**: virtual raider/defender counts, a 400-tick march, then Lanchester combat on a 20-tick timer. Entities and force-load tickets appear only when a player approaches (and the live body budget has room). `GET /war` reports `live` so the map can tell a materialised fight from a statistical one.
 
 `ThrottledMeleeGoal` (kingdoms, not Pumpkin) path-refreshes on that same cadence instead of vanilla melee's ~4 tick interval.
 
@@ -694,9 +694,10 @@ Plots: `/opt/cursor/artifacts/soak-r15-variance.json`, `soak-r13-branch{1,2,3}-s
 | --- | --- |
 | `/locatetown` | nearest planned town |
 | `/kingdom info` | town, kingdom, owner, battle counts, gate breach |
-| `/kingdom join <kingdom>` | `alder` or `raven`. Rank kit, name tag, friendly fire off, respawn at the keep |
+| `/kingdom join <kingdom>` | `alder` or `raven`. Rank kit, name tag, friendly fire off. Teleports to the live front so you see the fighting. Respawn is still the keep courtyard. |
 | `/kingdom fronts` | active battles (side, owner, live, counts) |
 | `/kingdom deploy [town]` | teleport to the threatened gate (live surface Y, not the keep roof); abstract fronts materialise on a staggered warmup |
+| `/kingdom goto [front\|town]` | same as deploy: open a live front if needed and send you there |
 | `/kingdom stats` | your rank, renown, kills, captures, defenses |
 | `/kingdom fire` | loose a camp trebuchet at the threatened wall (stand at the anvil) |
 | `/kingdom rally [follow\|hold\|charge]` | Freeman+ orders nearby bot soldiers (default follow). A goat horn or `/kingdom horn` cycles the same orders. |

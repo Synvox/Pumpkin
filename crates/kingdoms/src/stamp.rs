@@ -961,30 +961,6 @@ fn place_road(
     if let Some(dir) = stair {
         sink.put(x, ground + 1, z, stair_state(palette.cobble_stairs, dir));
     }
-    if country {
-        if mix.is_multiple_of(41) {
-            sink.put(x, ground + 1, z, palette.cobble);
-            sink.put(x, ground + 2, z, palette.cobble);
-            sink.put(x, ground + 3, z, palette.slab);
-        }
-        return;
-    }
-    if mix.is_multiple_of(9) {
-        sink.put(x, ground + 1, z, palette.cobble);
-        sink.put(x, ground + 2, z, palette.fence);
-        sink.put(x, ground + 3, z, Block::LANTERN.default_state);
-    } else if mix.is_multiple_of(17) {
-        sink.put(x, ground + 1, z, Block::HAY_BLOCK.default_state);
-        if mix.is_multiple_of(34) {
-            sink.put(x, ground + 1, z, palette.fence);
-            sink.put(x, ground + 2, z, palette.slab);
-        }
-    } else if mix.is_multiple_of(23) {
-        sink.put(x, ground + 1, z, Block::BARREL.default_state);
-    } else if mix.is_multiple_of(29) {
-        sink.put(x, ground + 1, z, palette.planks);
-        sink.put(x, ground + 2, z, Block::CHEST.default_state);
-    }
 }
 
 fn place_market(sink: &mut impl BlockSink, x: i32, ground: i32, z: i32, palette: &Palette) {
@@ -2437,6 +2413,10 @@ fn place_trebuchet(
     palette: &Palette,
 ) {
     sink.put(x, ground, z, palette.cobble);
+    let footing = sink.floor_min().max(ground - 16);
+    for y in footing..ground {
+        sink.put(x, y, z, palette.cobble);
+    }
     clear_above(sink, x, ground + 1, ground + 12, z);
     if plan.has_scene(x, z, crate::scenes::SceneKind::PillagerStronghold) {
         place_ballista_frame(sink, plan, x, ground, z, palette);

@@ -22,7 +22,7 @@
     clippy::too_many_lines
 )]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::Cursor;
 use std::net::SocketAddr;
@@ -83,6 +83,16 @@ fn is_soldier_kind(kind: i32) -> bool {
     kind == entity_id(&EntityType::VILLAGER) || kind == entity_id(&EntityType::IRON_GOLEM)
 }
 
+fn is_any_soldier_kind(kind: i32) -> bool {
+    is_hostile_kind(kind) || is_soldier_kind(kind)
+}
+
+fn is_engine_kind(kind: i32) -> bool {
+    kind == entity_id(&EntityType::BLOCK_DISPLAY)
+        || kind == entity_id(&EntityType::ITEM_DISPLAY)
+        || kind == entity_id(&EntityType::TNT)
+}
+
 struct Args {
     host: SocketAddr,
     name: String,
@@ -93,6 +103,7 @@ struct Args {
     commands: Vec<String>,
     fight: bool,
     prove: bool,
+    visibility: bool,
     kingdom: String,
 }
 
@@ -106,6 +117,7 @@ fn parse_args() -> Result<Args, String> {
     let mut commands = Vec::new();
     let mut fight = false;
     let mut prove = false;
+    let mut visibility = false;
     let mut kingdom = "alder".to_owned();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -124,10 +136,11 @@ fn parse_args() -> Result<Args, String> {
             "--command" => commands.push(next("--command")?),
             "--fight" => fight = true,
             "--prove" => prove = true,
+            "--visibility" => visibility = true,
             "--kingdom" => kingdom = next("--kingdom")?,
             "-h" | "--help" => {
                 println!(
-                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command CMD]... [--fight|--prove --kingdom alder]"
+                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command CMD]... [--fight|--prove|--visibility --kingdom alder]"
                 );
                 std::process::exit(0);
             }
@@ -145,6 +158,7 @@ fn parse_args() -> Result<Args, String> {
         commands,
         fight,
         prove,
+        visibility,
         kingdom,
     })
 }
@@ -175,6 +189,11 @@ struct Bot {
     spawn_log: u32,
     pkt_log: u32,
     pkt_ids: HashMap<i32, u32>,
+    seen_soldiers: HashSet<i32>,
+    seen_engines: HashSet<i32>,
+    moved_soldiers: HashSet<i32>,
+    damage_events: u32,
+    death_events: u32,
 }
 
 impl Bot {
@@ -234,6 +253,11 @@ impl Bot {
             spawn_log: 0,
             pkt_log: 0,
             pkt_ids: HashMap::new(),
+            seen_soldiers: HashSet::new(),
+            seen_engines: HashSet::new(),
+            moved_soldiers: HashSet::new(),
+            damage_events: 0,
+            death_events: 0,
         };
 
         bot.send_packet(&SHandShake {
@@ -268,7 +292,7 @@ impl Bot {
 
         bot.send_packet(&SClientInformationConfig {
             locale: "en_us",
-            view_distance: 4,
+            view_distance: 16,
             chat_mode: VarInt(0),
             chat_colors: true,
             skin_parts: 0x7F,
@@ -298,7 +322,13 @@ impl Bot {
         let keep_id = CKeepAlive::to_id(CURRENT_MC_VERSION);
         let mut saw_play_login = false;
         let mut saw_initial_pos = false;
+        let play_deadline = Instant::now() + Duration::from_secs(15);
         while !(saw_play_login && saw_initial_pos) {
+            if Instant::now() > play_deadline {
+                return Err(format!(
+                    "login incomplete login={saw_play_login} spawn_tp={saw_initial_pos}"
+                ));
+            }
             let pkt = bot.next_packet().await?;
             if pkt.id == play_login_id {
                 saw_play_login = true;
@@ -311,8 +341,7 @@ impl Bot {
                     ]);
                     println!("SELF id={}", bot.self_id);
                 }
-                // Do not wait for CPlayerPosition: the server may hold that
-                // packet until SPlayerLoaded, which deadlocks a second client.
+                // The server holds CPlayerPosition until SPlayerLoaded.
                 let _ = bot.send_packet(&SPlayerLoaded).await;
             }
             // Keep-alives and the spawn teleport can arrive before CLogin.
@@ -320,10 +349,6 @@ impl Bot {
                 bot.handle_play_packet(&pkt).await?;
             }
             if pkt.id == player_pos_id {
-                saw_initial_pos = true;
-            }
-            if saw_play_login && !saw_initial_pos && bot.self_id >= 0 {
-                // Position never arrived; enter play anyway so /tp can run.
                 saw_initial_pos = true;
             }
         }
@@ -396,6 +421,12 @@ impl Bot {
 
     fn note_spawn(&mut self, id: i32, kind: i32, pos: Vector3<f64>) {
         let mob = SeenMob { kind, pos };
+        if is_any_soldier_kind(kind) {
+            self.seen_soldiers.insert(id);
+        }
+        if is_engine_kind(kind) {
+            self.seen_engines.insert(id);
+        }
         if is_hostile_kind(kind) {
             if self.spawn_log < 80 {
                 println!(
@@ -418,10 +449,19 @@ impl Bot {
             self.soldiers.insert(id, mob);
             self.hostiles.remove(&id);
             self.unknown.remove(&id);
+        } else if is_engine_kind(kind) && self.spawn_log < 80 {
+            println!(
+                "SPAWN-ENGINE id={id} kind={kind} pos={:.1},{:.1},{:.1}",
+                pos.x, pos.y, pos.z
+            );
+            self.spawn_log += 1;
         }
     }
 
     fn note_move(&mut self, id: i32, pos: Vector3<f64>) {
+        if self.seen_soldiers.contains(&id) {
+            self.moved_soldiers.insert(id);
+        }
         if let Some(mob) = self.hostiles.get_mut(&id) {
             mob.pos = pos;
             return;
@@ -446,6 +486,9 @@ impl Bot {
 
     fn note_remove(&mut self, ids: &[i32]) {
         for id in ids {
+            if self.seen_soldiers.contains(id) {
+                self.death_events += 1;
+            }
             self.hostiles.remove(id);
             self.soldiers.remove(id);
             self.unknown.remove(id);
@@ -557,13 +600,16 @@ impl Bot {
                 slice.get_var_int(),
                 slice.get_var_int(),
                 slice.get_var_int(),
-            ) && victim.0 == self.self_id
-                && cause.0 > 0
-            {
-                let attacker = cause.0 - 1;
-                if attacker != self.self_id && attacker > 0 && self.spawn_log < 80 {
-                    println!("ATTACKER id={attacker}");
-                    self.spawn_log += 1;
+            ) {
+                if self.seen_soldiers.contains(&victim.0) || victim.0 == self.self_id {
+                    self.damage_events += 1;
+                }
+                if victim.0 == self.self_id && cause.0 > 0 {
+                    let attacker = cause.0 - 1;
+                    if attacker != self.self_id && attacker > 0 && self.spawn_log < 80 {
+                        println!("ATTACKER id={attacker}");
+                        self.spawn_log += 1;
+                    }
                 }
             }
         } else if pkt.id == health_id {
@@ -1094,6 +1140,65 @@ async fn prove_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<(), St
     Ok(())
 }
 
+async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<bool, String> {
+    let wait = seconds.max(60);
+    let spawn = bot.position;
+    println!(
+        "VIS-JOIN pos={:.1},{:.1},{:.1}",
+        bot.position.x, bot.position.y, bot.position.z
+    );
+    bot.chat_command(&format!("kingdom join {kingdom}")).await?;
+    let front_deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < front_deadline {
+        bot.pump(Duration::from_millis(200)).await?;
+        let dist = (bot.position.x - spawn.x).hypot(bot.position.z - spawn.z);
+        if dist > 80.0 {
+            println!(
+                "VIS-FRONT pos={:.1},{:.1},{:.1} dist={dist:.0}",
+                bot.position.x, bot.position.y, bot.position.z
+            );
+            break;
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(wait);
+    let mut last_report = Instant::now();
+    while Instant::now() < deadline {
+        bot.pump(Duration::from_millis(200)).await?;
+        bot.move_to(bot.position).await?;
+        if last_report.elapsed() >= Duration::from_secs(5) {
+            last_report = Instant::now();
+            println!(
+                "VIS-SEEN soldiers={} live_h={} live_s={} engines={} dmg={} deaths={} moved={} pos={:.1},{:.1},{:.1}",
+                bot.seen_soldiers.len(),
+                bot.hostiles.len(),
+                bot.soldiers.len(),
+                bot.seen_engines.len(),
+                bot.damage_events,
+                bot.death_events,
+                bot.moved_soldiers.len(),
+                bot.position.x,
+                bot.position.y,
+                bot.position.z
+            );
+        }
+    }
+    let ok = bot.seen_soldiers.len() >= 20;
+    println!(
+        "VIS-REPORT soldiers={} engines={} damage={} deaths={} moved={} live_h={} live_s={} pos={:.1},{:.1},{:.1} ok={ok}",
+        bot.seen_soldiers.len(),
+        bot.seen_engines.len(),
+        bot.damage_events,
+        bot.death_events,
+        bot.moved_soldiers.len(),
+        bot.hostiles.len(),
+        bot.soldiers.len(),
+        bot.position.x,
+        bot.position.y,
+        bot.position.z
+    );
+    Ok(ok)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = match parse_args() {
@@ -1137,6 +1242,22 @@ async fn main() -> ExitCode {
         }
         println!("done");
         return ExitCode::SUCCESS;
+    }
+    if args.visibility {
+        match visibility_loop(&mut bot, &args.kingdom, args.seconds).await {
+            Ok(true) => {
+                println!("done");
+                return ExitCode::SUCCESS;
+            }
+            Ok(false) => {
+                eprintln!("visibility check failed: fewer than 20 distinct soldier spawn packets");
+                return ExitCode::from(1);
+            }
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        }
     }
     if skip_walk {
         println!("standing at login; soak will /tp");

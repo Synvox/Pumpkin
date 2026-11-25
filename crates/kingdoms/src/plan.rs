@@ -33,12 +33,13 @@ use crate::town::{
     CELL_SIZE, TownPos, border_crossing, border_goal, town_containing, town_in_cell,
 };
 
-/// Pad around castle+town so hinterland farms, hamlets and camps fit.
-const HINTERLAND_PAD: i32 = 120;
+/// Pad around castle+town so hinterland farms, hamlets and camps fit
+/// with a yard between settlements instead of wall-to-wall packing.
+const HINTERLAND_PAD: i32 = 160;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 30;
+pub const PLAN_CACHE_VERSION: u32 = 31;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -732,6 +733,7 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
         well,
         &gates,
         &mut roads,
+        town_rect,
     );
     if walled_city {
         punch_road_gates(&mut occ, town_rect, &mut gates);
@@ -862,11 +864,31 @@ pub fn build_plan(seed: u64, origin: TownPos, grid: HeightGrid, palette: Palette
             &mut TownRng::salted(seed, 23, 5),
             &mut scenes,
         );
-        paint_wind_sails(&mut occ, &lots);
     }
     thicken_water_bridges(&mut occ, &grid);
     paint_scene_yards(&mut occ, &grid, &scenes);
     paint_poi_roads(&mut occ, &grid, &gates, &scenes, &mut roads);
+    thicken_thin_roads(&mut occ, &grid);
+    seal_wet_roads(&mut occ, &grid);
+    smooth_road_stairs(&mut occ, &grid);
+    crate::scenes::paint_farm_paddocks(&mut occ);
+    prune_stray_field_walls(&mut occ);
+    paint_wind_sails(&mut occ, &lots);
+    break_steep_road_steps(&mut occ, &grid);
+    prune_dangling_roads(&mut occ, &gates, &scenes, &mut roads);
+    paint_outbound_roads(
+        &mut occ,
+        &mut border_roads,
+        &grid,
+        origin,
+        seed,
+        well,
+        &gates,
+        &mut roads,
+        town_rect,
+    );
+    smooth_road_stairs(&mut occ, &grid);
+    break_steep_road_steps(&mut occ, &grid);
     crate::scenes::paint_tree_keepout(&mut occ, &grid, &lots, market, town_rect);
     // Courtyard scenes and tree keepout run after `paint_castle`, so re-site
     // the plinth on leftover inner-bailey court, never on a keep spire.
@@ -2000,15 +2022,6 @@ fn paint_roads(occ: &mut Occupancy, grid: &HeightGrid, waypoints: &[(i32, i32)])
             push(bresenham(pair[0].0, pair[0].1, pair[1].0, pair[1].1));
         }
     }
-    let (mx, mz) = waypoints[0];
-    for dir in Dir::ALL {
-        let end = (mx + dir.dx() * 40, mz + dir.dz() * 40);
-        if bounds.contains(end.0, end.1)
-            && let Some(path) = astar(grid, bounds, (mx, mz), end)
-        {
-            push(path);
-        }
-    }
     roads
 }
 
@@ -2021,6 +2034,7 @@ fn paint_outbound_roads(
     well: (i32, i32),
     gates: &[GateInfo],
     roads: &mut Vec<RoadInfo>,
+    town: Rect,
 ) {
     let start = gates
         .iter()
@@ -2035,20 +2049,85 @@ fn paint_outbound_roads(
         if (route_goal.0 - start.0).abs() + (route_goal.1 - start.1).abs() < 28 {
             continue;
         }
-        let search = clip_to_grid(
+        let around = match dir {
+            Dir::East => (town.max_x + 6, start.1),
+            Dir::West => (town.min_x - 6, start.1),
+            Dir::South => (start.0, town.max_z + 6),
+            Dir::North => (start.0, town.min_z - 6),
+        };
+        let edge = match dir {
+            Dir::East => (
+                occ.bounds.max_x,
+                start.1.clamp(occ.bounds.min_z, occ.bounds.max_z),
+            ),
+            Dir::West => (
+                occ.bounds.min_x,
+                start.1.clamp(occ.bounds.min_z, occ.bounds.max_z),
+            ),
+            Dir::South => (
+                start.0.clamp(occ.bounds.min_x, occ.bounds.max_x),
+                occ.bounds.max_z,
+            ),
+            Dir::North => (
+                start.0.clamp(occ.bounds.min_x, occ.bounds.max_x),
+                occ.bounds.min_z,
+            ),
+        };
+        let hinter = clip_to_grid(
             grid,
-            Rect::new(start.0, start.1, route_goal.0, route_goal.1).inflate(80),
+            Rect::new(around.0, around.1, edge.0, edge.1).inflate(48),
         );
-        let path = astar(grid, search, start, route_goal)
-            .unwrap_or_else(|| bresenham(start.0, start.1, route_goal.0, route_goal.1));
-        if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
-            paint_path(occ, overlay, grid, &path);
-            stamp_road_cell(occ, overlay, grid, goal.0, goal.1, CellKind::Road);
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    stamp_road_cell(occ, overlay, grid, goal.0 + dx, goal.1 + dz, CellKind::Road);
+        let mid = (route_goal.0, edge.1);
+        let leg_x = clip_to_grid(grid, Rect::new(edge.0, edge.1, mid.0, mid.1).inflate(24));
+        let leg_z = clip_to_grid(
+            grid,
+            Rect::new(mid.0, mid.1, route_goal.0, route_goal.1).inflate(24),
+        );
+        // Gate → hinterland edge stays inside occupancy; edge → cell border is
+        // two short country legs so A* cannot starve on a 2k-block diagonal.
+        // Paint whatever A* found, then always stamp the hashed crossing so
+        // neighbouring cells meet even when terrain blocks a full walk.
+        let inner = walk_astar_budget(Some(occ), grid, hinter, around, edge, 80_000)
+            .unwrap_or_else(|| vec![edge]);
+        let leg1 = walk_astar_budget_dh(None, grid, leg_x, edge, mid, 40_000, 4)
+            .unwrap_or_else(|| vec![edge]);
+        let leg2 = walk_astar_budget_dh(None, grid, leg_z, mid, route_goal, 40_000, 4)
+            .unwrap_or_else(|| vec![mid]);
+        let mut tail = leg1;
+        if let Some(&first) = leg2.first()
+            && first == *tail.last().unwrap_or(&mid)
+        {
+            tail.extend(leg2.into_iter().skip(1));
+        } else {
+            tail.extend(leg2);
+        }
+        let mut path = inner;
+        if let Some(&first_tail) = tail.first()
+            && first_tail == *path.last().unwrap_or(&edge)
+        {
+            path.extend(tail.into_iter().skip(1));
+        } else {
+            path.extend(tail);
+        }
+        if path.len() >= 2 {
+            paint_wide_path(occ, overlay, grid, &path, true);
+        }
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if !terrain_allows_road(grid, goal.0 + dx, goal.1 + dz) {
+                    continue;
                 }
+                stamp_country_road_cell(
+                    occ,
+                    overlay,
+                    grid,
+                    goal.0 + dx,
+                    goal.1 + dz,
+                    CellKind::Road,
+                );
             }
+        }
+        if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
             roads.push(RoadInfo {
                 from: [first.0, first.1],
                 to: [last.0, last.1],
@@ -2056,6 +2135,7 @@ fn paint_outbound_roads(
             });
         }
     }
+    overlay_follow_terrain(overlay, grid);
 }
 
 fn paint_poi_roads(
@@ -2084,10 +2164,11 @@ fn paint_poi_roads(
         SceneKind::PilgrimChapel,
     ];
     for scene in scenes.iter().filter(|scene| kinds.contains(&scene.kind)) {
-        let Some(start) = poi_road_anchor(occ, grid, scene) else {
+        let (cx, cz) = scene.rect.center();
+        let Some(goal) = nearest_town_gate(gates, (cx, cz)) else {
             continue;
         };
-        let Some(goal) = nearest_town_gate(gates, start) else {
+        let Some(start) = poi_road_anchor(occ, grid, scene, goal) else {
             continue;
         };
         if (start.0 - goal.0).abs() + (start.1 - goal.1).abs() < 16 {
@@ -2095,33 +2176,19 @@ fn paint_poi_roads(
         }
         let search = clip_to_grid(
             grid,
-            Rect::new(start.0, start.1, goal.0, goal.1).inflate(96),
+            Rect::new(start.0, start.1, goal.0, goal.1).inflate(160),
         );
-        let path = astar(grid, search, start, goal)
-            .unwrap_or_else(|| bresenham(start.0, start.1, goal.0, goal.1));
-        let path: Vec<_> = path
-            .into_iter()
-            .filter(|&(x, z)| {
-                occ.bounds.contains(x, z)
-                    && !occ.kind(x, z).is_castle()
-                    && !matches!(
-                        occ.kind(x, z),
-                        CellKind::Building
-                            | CellKind::Palisade
-                            | CellKind::PalisadeGate
-                            | CellKind::Ruin
-                            | CellKind::Ship
-                            | CellKind::Harbor
-                            | CellKind::Dock
-                            | CellKind::Quay
-                            | CellKind::Breakwater
-                            | CellKind::Boat
-                            | CellKind::Crane
-                            | CellKind::Lighthouse
-                    )
-            })
-            .collect();
+        let Some(path) = walk_astar_budget_dh(Some(occ), grid, search, start, goal, 80_000, 4)
+        else {
+            continue;
+        };
         if path.len() < 8 {
+            continue;
+        }
+        if path
+            .last()
+            .is_none_or(|p| (p.0 - goal.0).abs() + (p.1 - goal.1).abs() > 16)
+        {
             continue;
         }
         if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
@@ -2136,33 +2203,36 @@ fn paint_poi_roads(
     }
 }
 
-fn poi_road_anchor(occ: &Occupancy, grid: &HeightGrid, scene: &Scene) -> Option<(i32, i32)> {
-    let (cx, cz) = scene.rect.center();
-    if grid.is_dry(cx, cz) && !occ.kind(cx, cz).is_castle() {
-        return Some((cx, cz));
-    }
+fn poi_road_anchor(
+    occ: &Occupancy,
+    grid: &HeightGrid,
+    scene: &Scene,
+    goal: (i32, i32),
+) -> Option<(i32, i32)> {
+    let mut best: Option<(i32, i32)> = None;
+    let mut best_key = (i32::MAX, i32::MAX, i32::MAX);
     for z in scene.rect.min_z..=scene.rect.max_z {
         for x in scene.rect.min_x..=scene.rect.max_x {
-            if grid.is_dry(x, z)
-                && matches!(
-                    occ.kind(x, z),
-                    CellKind::Green
-                        | CellKind::Plaza
-                        | CellKind::Road
-                        | CellKind::CampCourt
-                        | CellKind::Eave
-                        | CellKind::Beacon
-                        | CellKind::CutStone
-                        | CellKind::Maypole
-                        | CellKind::MarketCross
-                        | CellKind::Pillory
-                )
-            {
-                return Some((x, z));
+            if !grid.is_dry(x, z) || occ.kind(x, z).is_castle() {
+                continue;
+            }
+            let road = occ.kind(x, z).is_walkable_road();
+            if !road && road_blocked(occ, x, z) {
+                continue;
+            }
+            let on_edge = x == scene.rect.min_x
+                || x == scene.rect.max_x
+                || z == scene.rect.min_z
+                || z == scene.rect.max_z;
+            let dist = (x - goal.0).abs() + (z - goal.1).abs();
+            let key = (i32::from(!road), i32::from(!on_edge), dist);
+            if key < best_key {
+                best_key = key;
+                best = Some((x, z));
             }
         }
     }
-    None
+    best
 }
 
 fn nearest_town_gate(gates: &[GateInfo], start: (i32, i32)) -> Option<(i32, i32)> {
@@ -2179,39 +2249,7 @@ fn paint_country_path(
     grid: &HeightGrid,
     path: &[(i32, i32)],
 ) {
-    for window in path.windows(2) {
-        let (x, z) = window[0];
-        let (nx, nz) = window[1];
-        let dh = grid.height(nx, nz) - grid.height(x, z);
-        let stair = if dh.abs() >= 2 {
-            if nx > x {
-                CellKind::RoadStairE
-            } else if nx < x {
-                CellKind::RoadStairW
-            } else if nz > z {
-                CellKind::RoadStairS
-            } else {
-                CellKind::RoadStairN
-            }
-        } else {
-            CellKind::Road
-        };
-        stamp_country_road_cell(occ, overlay, grid, x, z, stair);
-        if !grid.is_dry(x, z) {
-            continue;
-        }
-        for dir in Dir::ALL {
-            let rx = x + dir.dx();
-            let rz = z + dir.dz();
-            if !grid.is_dry(rx, rz) {
-                continue;
-            }
-            stamp_country_road_cell(occ, overlay, grid, rx, rz, CellKind::Road);
-        }
-    }
-    if let Some(&(x, z)) = path.last() {
-        stamp_country_road_cell(occ, overlay, grid, x, z, CellKind::Road);
-    }
+    paint_wide_path(occ, overlay, grid, path, true);
 }
 
 fn place_roadside_markers(occ: &mut Occupancy, grid: &HeightGrid, path: &[(i32, i32)]) {
@@ -2233,10 +2271,8 @@ fn place_roadside_markers(occ: &mut Occupancy, grid: &HeightGrid, path: &[(i32, 
                         .all(|n| grid.height(nx + n.dx(), nz + n.dz()) <= grid.height(nx, nz));
                 if high && i % 84 == 21 {
                     paint_roadside_beacon(occ, nx, nz);
-                } else if i % 84 == 21 {
-                    occ.set(nx, nz, CellKind::Shrine, true);
                 } else {
-                    occ.set(nx, nz, CellKind::FieldWall, true);
+                    occ.set(nx, nz, CellKind::Shrine, true);
                 }
                 break;
             }
@@ -2275,71 +2311,296 @@ fn paint_path(
     grid: &HeightGrid,
     path: &[(i32, i32)],
 ) {
+    paint_wide_path(occ, overlay, grid, path, false);
+}
+
+/// 3-wide terrain-following strip. Skips cells that drop more than two
+/// blocks off the centreline so we never paint a cliff face as road.
+fn paint_wide_path(
+    occ: &mut Occupancy,
+    overlay: &mut HashMap<(i32, i32), CellKind>,
+    grid: &HeightGrid,
+    path: &[(i32, i32)],
+    country: bool,
+) {
+    let stamp = |occ: &mut Occupancy,
+                 overlay: &mut HashMap<(i32, i32), CellKind>,
+                 x: i32,
+                 z: i32,
+                 kind: CellKind| {
+        if country {
+            stamp_country_road_cell(occ, overlay, grid, x, z, kind);
+        } else {
+            stamp_road_cell(occ, overlay, grid, x, z, kind);
+        }
+    };
     for window in path.windows(2) {
         let (x, z) = window[0];
         let (nx, nz) = window[1];
+        let (px, pz) = if nx == x { (1, 0) } else { (0, 1) };
         let dh = grid.height(nx, nz) - grid.height(x, z);
-        let stair = if dh.abs() >= 2 {
-            if nx > x {
-                CellKind::RoadStairE
-            } else if nx < x {
-                CellKind::RoadStairW
-            } else if nz > z {
-                CellKind::RoadStairS
+        if dh.abs() > 4 {
+            continue;
+        }
+        let stair = stair_kind(x, z, nx, nz);
+        let centre_h = grid.height(x, z);
+        for o in -1..=1 {
+            let rx = x + px * o;
+            let rz = z + pz * o;
+            let local = (grid.height(rx, rz) - centre_h).abs();
+            if local > 4 {
+                continue;
+            }
+            let kind = if dh.abs() >= 2 || local >= 2 {
+                stair
             } else {
-                CellKind::RoadStairN
-            }
-        } else {
-            CellKind::Road
-        };
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                let kind = if dx == 0 && dz == 0 {
-                    stair
-                } else {
-                    CellKind::Road
-                };
-                stamp_road_cell(occ, overlay, grid, x + dx, z + dz, kind);
-            }
+                CellKind::Road
+            };
+            stamp(occ, overlay, rx, rz, kind);
         }
     }
     if let Some(&(x, z)) = path.last() {
-        stamp_road_cell(occ, overlay, grid, x, z, CellKind::Road);
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                stamp_road_cell(occ, overlay, grid, x + dx, z + dz, CellKind::Road);
+        let (px, pz) = path
+            .get(path.len().saturating_sub(2))
+            .map_or((1, 0), |&(px, _pz)| if x == px { (1, 0) } else { (0, 1) });
+        let centre_h = grid.height(x, z);
+        for o in -1..=1 {
+            let rx = x + px * o;
+            let rz = z + pz * o;
+            if (grid.height(rx, rz) - centre_h).abs() > 2 {
+                continue;
+            }
+            stamp(occ, overlay, rx, rz, CellKind::Road);
+        }
+    }
+}
+
+fn overlay_follow_terrain(overlay: &mut HashMap<(i32, i32), CellKind>, grid: &HeightGrid) {
+    let cells: Vec<_> = overlay.keys().copied().collect();
+    for (x, z) in cells {
+        let Some(&kind) = overlay.get(&(x, z)) else {
+            continue;
+        };
+        if matches!(
+            kind,
+            CellKind::Bridge | CellKind::Ford | CellKind::TownGate | CellKind::CastleGate
+        ) {
+            continue;
+        }
+        let h = grid.height(x, z);
+        for dir in Dir::ALL {
+            let nx = x + dir.dx();
+            let nz = z + dir.dz();
+            if !overlay.contains_key(&(nx, nz)) {
+                continue;
+            }
+            let dh = grid.height(nx, nz) - h;
+            if dh.abs() >= 2 {
+                overlay.insert((x, z), stair_kind(x, z, nx, nz));
+                break;
             }
         }
     }
 }
 
-fn paint_narrow_path(
-    occ: &mut Occupancy,
-    overlay: &mut HashMap<(i32, i32), CellKind>,
-    grid: &HeightGrid,
-    path: &[(i32, i32)],
-) {
-    for window in path.windows(2) {
-        let (x, z) = window[0];
-        let (nx, nz) = window[1];
-        let dh = grid.height(nx, nz) - grid.height(x, z);
-        let stair = if dh.abs() >= 2 {
-            if nx > x {
-                CellKind::RoadStairE
-            } else if nx < x {
-                CellKind::RoadStairW
-            } else if nz > z {
-                CellKind::RoadStairS
-            } else {
-                CellKind::RoadStairN
-            }
-        } else {
-            CellKind::Road
-        };
-        stamp_road_cell(occ, overlay, grid, x, z, stair);
+fn stair_kind(x: i32, z: i32, nx: i32, nz: i32) -> CellKind {
+    if nx > x {
+        CellKind::RoadStairE
+    } else if nx < x {
+        CellKind::RoadStairW
+    } else if nz > z {
+        CellKind::RoadStairS
+    } else {
+        CellKind::RoadStairN
     }
-    if let Some(&(x, z)) = path.last() {
-        stamp_road_cell(occ, overlay, grid, x, z, CellKind::Road);
+}
+
+fn smooth_road_stairs(occ: &mut Occupancy, grid: &HeightGrid) {
+    let bounds = occ.bounds;
+    let mut updates = Vec::new();
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            if !occ.kind(x, z).is_road_surface() {
+                continue;
+            }
+            if matches!(
+                occ.kind(x, z),
+                CellKind::TownGate
+                    | CellKind::CastleGate
+                    | CellKind::PalisadeGate
+                    | CellKind::Bridge
+                    | CellKind::Ford
+            ) {
+                continue;
+            }
+            let h = grid.height(x, z);
+            let mut stair = None;
+            for dir in Dir::ALL {
+                let nx = x + dir.dx();
+                let nz = z + dir.dz();
+                if !occ.kind(nx, nz).is_road_surface() {
+                    continue;
+                }
+                let dh = grid.height(nx, nz) - h;
+                if dh >= 2 {
+                    stair = Some(stair_kind(x, z, nx, nz));
+                    break;
+                }
+            }
+            if let Some(kind) = stair
+                && !is_road_stair(occ.kind(x, z))
+            {
+                updates.push((x, z, kind));
+            }
+        }
+    }
+    for (x, z, kind) in updates {
+        occ.set(x, z, kind, true);
+    }
+}
+
+fn is_road_stair(kind: CellKind) -> bool {
+    matches!(
+        kind,
+        CellKind::RoadStairN | CellKind::RoadStairS | CellKind::RoadStairE | CellKind::RoadStairW
+    )
+}
+
+fn is_gate_surface(kind: CellKind) -> bool {
+    matches!(
+        kind,
+        CellKind::TownGate | CellKind::CastleGate | CellKind::PalisadeGate
+    )
+}
+
+/// Drop road cells that sit a two-plus-block cliff away from a neighbour so a
+/// player never has to jump. Gates stay; dangling leftovers are pruned later.
+fn break_steep_road_steps(occ: &mut Occupancy, grid: &HeightGrid) {
+    let bounds = occ.bounds;
+    let mut drop = Vec::new();
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            let kind = occ.kind(x, z);
+            if !kind.is_road_surface() || is_gate_surface(kind) {
+                continue;
+            }
+            if matches!(kind, CellKind::Bridge | CellKind::Ford) || is_road_stair(kind) {
+                continue;
+            }
+            let h = grid.height(x, z);
+            for dir in Dir::ALL {
+                let nx = x + dir.dx();
+                let nz = z + dir.dz();
+                let nkind = occ.kind(nx, nz);
+                if !nkind.is_road_surface() {
+                    continue;
+                }
+                if matches!(nkind, CellKind::Bridge | CellKind::Ford) {
+                    continue;
+                }
+                if (grid.height(nx, nz) - h).abs() <= 2 {
+                    continue;
+                }
+                drop.push((x, z));
+                break;
+            }
+        }
+    }
+    for (x, z) in drop {
+        if is_gate_surface(occ.kind(x, z)) {
+            continue;
+        }
+        occ.set(x, z, CellKind::Green, true);
+    }
+}
+
+/// Roads painted onto water become bridges so the walk-test sees a standable surface.
+fn seal_wet_roads(occ: &mut Occupancy, grid: &HeightGrid) {
+    let bounds = occ.bounds;
+    let mut updates = Vec::new();
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            let kind = occ.kind(x, z);
+            if !matches!(
+                kind,
+                CellKind::Road
+                    | CellKind::RoadStairN
+                    | CellKind::RoadStairS
+                    | CellKind::RoadStairE
+                    | CellKind::RoadStairW
+            ) {
+                continue;
+            }
+            if grid.is_dry(x, z) {
+                continue;
+            }
+            updates.push((x, z));
+        }
+    }
+    for (x, z) in updates {
+        occ.set(x, z, CellKind::Bridge, true);
+    }
+}
+
+fn thicken_thin_roads(occ: &mut Occupancy, grid: &HeightGrid) {
+    let bounds = occ.bounds;
+    let mut add = Vec::new();
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            if !matches!(
+                occ.kind(x, z),
+                CellKind::Road
+                    | CellKind::RoadStairN
+                    | CellKind::RoadStairS
+                    | CellKind::RoadStairE
+                    | CellKind::RoadStairW
+            ) {
+                continue;
+            }
+            for (px, pz) in [(1, 0), (0, 1)] {
+                for o in [-1, 1] {
+                    let rx = x + px * o;
+                    let rz = z + pz * o;
+                    if occ.kind(rx, rz).is_road_surface() {
+                        continue;
+                    }
+                    if occ.kind(rx, rz).is_castle() || occ.kind(rx, rz).is_wall_ribbon() {
+                        continue;
+                    }
+                    if !matches!(
+                        occ.kind(rx, rz),
+                        CellKind::Empty
+                            | CellKind::Green
+                            | CellKind::Farm
+                            | CellKind::FarmEdge
+                            | CellKind::Eave
+                            | CellKind::Hedge
+                    ) {
+                        continue;
+                    }
+                    if !grid.is_dry(rx, rz) {
+                        continue;
+                    }
+                    if (grid.height(rx, rz) - grid.height(x, z)).abs() > 2 {
+                        continue;
+                    }
+                    add.push((rx, rz));
+                }
+            }
+        }
+    }
+    for (x, z) in add {
+        if matches!(
+            occ.kind(x, z),
+            CellKind::Empty
+                | CellKind::Green
+                | CellKind::Farm
+                | CellKind::FarmEdge
+                | CellKind::Eave
+                | CellKind::Hedge
+        ) {
+            occ.set(x, z, CellKind::Road, true);
+        }
     }
 }
 
@@ -2393,7 +2654,7 @@ fn paint_winding_lanes(
             continue;
         }
         if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
-            paint_narrow_path(occ, &mut unused, grid, &path);
+            paint_path(occ, &mut unused, grid, &path);
             roads.push(RoadInfo {
                 from: [first.0, first.1],
                 to: [last.0, last.1],
@@ -2401,6 +2662,13 @@ fn paint_winding_lanes(
             });
         }
     }
+}
+
+fn terrain_allows_road(grid: &HeightGrid, x: i32, z: i32) -> bool {
+    // Shallow fords and wet banks, not open sea. Depth 3+ is a harbour berth
+    // or a river channel; paving those is how outbound legs used to paint
+    // unwalkable Bridge ribbons that led nowhere.
+    grid.is_dry(x, z) || grid.water_depth(x, z) <= 2
 }
 
 fn stamp_country_road_cell(
@@ -2411,6 +2679,9 @@ fn stamp_country_road_cell(
     z: i32,
     kind: CellKind,
 ) {
+    if !terrain_allows_road(grid, x, z) {
+        return;
+    }
     let kind = if !grid.is_dry(x, z)
         && matches!(
             kind,
@@ -2428,25 +2699,7 @@ fn stamp_country_road_cell(
         let cell = occ.kind(x, z);
         // Country tracks must not nibble ships, walls or lots. Chapel
         // roads used to wipe the harbour cog by overwriting Ship cells.
-        if !matches!(
-            cell,
-            CellKind::Empty
-                | CellKind::Farm
-                | CellKind::FarmEdge
-                | CellKind::Plaza
-                | CellKind::Green
-                | CellKind::Hedge
-                | CellKind::FieldWall
-                | CellKind::Eave
-                | CellKind::Orchard
-                | CellKind::Pasture
-                | CellKind::Road
-                | CellKind::RoadStairN
-                | CellKind::RoadStairS
-                | CellKind::RoadStairE
-                | CellKind::RoadStairW
-                | CellKind::Bridge
-        ) {
+        if !road_may_overwrite(cell) {
             return;
         }
         occ.set(
@@ -2490,25 +2743,217 @@ fn stamp_road_cell(
     };
     if occ.bounds.contains(x, z) {
         let cell = occ.kind(x, z);
-        if !cell.is_castle() && cell != CellKind::Well {
-            occ.set(
-                x,
-                z,
-                kind,
-                matches!(
-                    cell,
-                    CellKind::Empty
-                        | CellKind::Farm
-                        | CellKind::FarmEdge
-                        | CellKind::Market
-                        | CellKind::Plaza
-                        | CellKind::Green
-                        | CellKind::Harbor
-                ),
-            );
+        // Same allowlist as country tracks: POI and outbound roads must not
+        // nibble ships, quays, mills or lots.
+        if !road_may_overwrite(cell) {
+            return;
         }
+        occ.set(
+            x,
+            z,
+            kind,
+            matches!(
+                cell,
+                CellKind::Empty
+                    | CellKind::Farm
+                    | CellKind::FarmEdge
+                    | CellKind::Market
+                    | CellKind::Plaza
+                    | CellKind::Green
+            ),
+        );
     } else {
         overlay.entry((x, z)).or_insert(kind);
+    }
+}
+
+fn road_may_overwrite(cell: CellKind) -> bool {
+    matches!(
+        cell,
+        CellKind::Empty
+            | CellKind::Farm
+            | CellKind::FarmEdge
+            | CellKind::Plaza
+            | CellKind::Market
+            | CellKind::Green
+            | CellKind::Hedge
+            | CellKind::FieldWall
+            | CellKind::Eave
+            | CellKind::Orchard
+            | CellKind::Pasture
+            | CellKind::Road
+            | CellKind::RoadStairN
+            | CellKind::RoadStairS
+            | CellKind::RoadStairE
+            | CellKind::RoadStairW
+            | CellKind::Bridge
+    )
+}
+
+fn prune_dangling_roads(
+    occ: &mut Occupancy,
+    gates: &[GateInfo],
+    scenes: &[Scene],
+    roads: &mut Vec<RoadInfo>,
+) {
+    let bounds = occ.bounds;
+    let mut seed = HashSet::new();
+    for gate in gates {
+        seed.insert((gate.x, gate.z));
+        for dz in -2..=2 {
+            for dx in -2..=2 {
+                let x = gate.x + dx;
+                let z = gate.z + dz;
+                if occ.kind(x, z).is_walkable_road() {
+                    seed.insert((x, z));
+                }
+            }
+        }
+    }
+    for scene in scenes {
+        if !poi_needs_road(scene.kind) {
+            continue;
+        }
+        for z in scene.rect.min_z..=scene.rect.max_z {
+            for x in scene.rect.min_x..=scene.rect.max_x {
+                if occ.kind(x, z).is_walkable_road() {
+                    seed.insert((x, z));
+                }
+            }
+        }
+    }
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            if !occ.kind(x, z).is_walkable_road() {
+                continue;
+            }
+            let edge =
+                x == bounds.min_x || x == bounds.max_x || z == bounds.min_z || z == bounds.max_z;
+            if edge
+                || matches!(
+                    occ.kind(x, z),
+                    CellKind::TownGate
+                        | CellKind::CastleGate
+                        | CellKind::PalisadeGate
+                        | CellKind::Plaza
+                        | CellKind::Market
+                        | CellKind::Bridge
+                        | CellKind::Ford
+                )
+            {
+                seed.insert((x, z));
+            }
+        }
+    }
+    let mut keep = HashSet::new();
+    let mut stack: Vec<(i32, i32)> = seed.into_iter().collect();
+    while let Some((x, z)) = stack.pop() {
+        if !keep.insert((x, z)) {
+            continue;
+        }
+        for dir in Dir::ALL {
+            let nx = x + dir.dx();
+            let nz = z + dir.dz();
+            if occ.kind(nx, nz).is_walkable_road() && !keep.contains(&(nx, nz)) {
+                stack.push((nx, nz));
+            }
+        }
+    }
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            if occ.kind(x, z).is_walkable_road() && !keep.contains(&(x, z)) {
+                occ.set(x, z, CellKind::Green, true);
+            }
+        }
+    }
+    roads.retain(|road| {
+        road.points.iter().any(|p| keep.contains(&(p[0], p[1])))
+            || road.points.len() >= 8
+                && road
+                    .points
+                    .last()
+                    .is_some_and(|p| !bounds.contains(p[0], p[1]))
+    });
+}
+
+fn poi_needs_road(kind: SceneKind) -> bool {
+    matches!(
+        kind,
+        SceneKind::RoadsideInn
+            | SceneKind::TollBridge
+            | SceneKind::RuinedAbbey
+            | SceneKind::CastleRuin
+            | SceneKind::RuinedCastle
+            | SceneKind::PillagerStronghold
+            | SceneKind::WalledMarket
+            | SceneKind::MillHamlet
+            | SceneKind::Beacon
+            | SceneKind::Quarry
+            | SceneKind::Monastery
+            | SceneKind::HuntingLodge
+            | SceneKind::Manor
+            | SceneKind::RidgeMill
+            | SceneKind::PilgrimChapel
+            | SceneKind::Hamlet
+    )
+}
+
+fn prune_stray_field_walls(occ: &mut Occupancy) {
+    let bounds = occ.bounds;
+    let mut seen = HashSet::new();
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            if occ.kind(x, z) != CellKind::FieldWall || !seen.insert((x, z)) {
+                continue;
+            }
+            let mut cells = vec![(x, z)];
+            let mut i = 0;
+            while i < cells.len() {
+                let (cx, cz) = cells[i];
+                i += 1;
+                for dir in Dir::ALL {
+                    let nx = cx + dir.dx();
+                    let nz = cz + dir.dz();
+                    if occ.kind(nx, nz) == CellKind::FieldWall && seen.insert((nx, nz)) {
+                        cells.push((nx, nz));
+                    }
+                }
+            }
+            let wallish = |kind: CellKind| {
+                matches!(
+                    kind,
+                    CellKind::FieldWall
+                        | CellKind::Lychgate
+                        | CellKind::Palisade
+                        | CellKind::PalisadeGate
+                )
+            };
+            let closed_or_farm = cells.iter().all(|&(cx, cz)| {
+                let n = Dir::ALL
+                    .iter()
+                    .filter(|dir| wallish(occ.kind(cx + dir.dx(), cz + dir.dz())))
+                    .count();
+                n >= 2
+            }) || cells.iter().any(|&(cx, cz)| {
+                Dir::ALL.iter().any(|dir| {
+                    matches!(
+                        occ.kind(cx + dir.dx(), cz + dir.dz()),
+                        CellKind::Farm
+                            | CellKind::FarmEdge
+                            | CellKind::Pasture
+                            | CellKind::Orchard
+                            | CellKind::Grave
+                            | CellKind::Lychgate
+                    )
+                })
+            });
+            if closed_or_farm {
+                continue;
+            }
+            for (cx, cz) in cells {
+                occ.set(cx, cz, CellKind::Empty, true);
+            }
+        }
     }
 }
 
@@ -2654,6 +3099,142 @@ impl PartialOrd for Node {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+fn road_blocked(occ: &Occupancy, x: i32, z: i32) -> bool {
+    let kind = occ.kind(x, z);
+    if kind.is_walkable_road() {
+        return false;
+    }
+    kind.is_castle()
+        || kind.is_wall_ribbon()
+        || matches!(
+            kind,
+            CellKind::Building
+                | CellKind::TownTower
+                | CellKind::PalisadeGate
+                | CellKind::Ruin
+                | CellKind::Ship
+                | CellKind::Harbor
+                | CellKind::Dock
+                | CellKind::Quay
+                | CellKind::Breakwater
+                | CellKind::Boat
+                | CellKind::Crane
+                | CellKind::Lighthouse
+                | CellKind::Well
+        )
+}
+
+fn walk_astar(
+    occ: Option<&Occupancy>,
+    grid: &HeightGrid,
+    bounds: Rect,
+    start: (i32, i32),
+    goal: (i32, i32),
+) -> Option<Vec<(i32, i32)>> {
+    walk_astar_budget(occ, grid, bounds, start, goal, 24_000)
+}
+
+fn walk_astar_budget(
+    occ: Option<&Occupancy>,
+    grid: &HeightGrid,
+    bounds: Rect,
+    start: (i32, i32),
+    goal: (i32, i32),
+    max_nodes: u32,
+) -> Option<Vec<(i32, i32)>> {
+    walk_astar_budget_dh(occ, grid, bounds, start, goal, max_nodes, 2)
+}
+
+fn walk_astar_budget_dh(
+    occ: Option<&Occupancy>,
+    grid: &HeightGrid,
+    bounds: Rect,
+    start: (i32, i32),
+    goal: (i32, i32),
+    max_nodes: u32,
+    max_dh: i32,
+) -> Option<Vec<(i32, i32)>> {
+    let mut open = BinaryHeap::new();
+    let mut came: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
+    let mut gscore: HashMap<(i32, i32), i32> = HashMap::new();
+    open.push(Node {
+        f: heur(start, goal),
+        x: start.0,
+        z: start.1,
+    });
+    gscore.insert(start, 0);
+    let mut guard = 0u32;
+    while let Some(Node { x, z, .. }) = open.pop() {
+        guard += 1;
+        if guard > max_nodes {
+            break;
+        }
+        if (x, z) == goal {
+            return Some(rebuild_walk(&came, start, goal));
+        }
+        let g = *gscore.get(&(x, z)).unwrap_or(&i32::MAX);
+        for dir in Dir::ALL {
+            let nx = x + dir.dx();
+            let nz = z + dir.dz();
+            if !bounds.inflate(8).contains(nx, nz) {
+                continue;
+            }
+            if occ.is_some_and(|occ| road_blocked(occ, nx, nz)) {
+                continue;
+            }
+            if !terrain_allows_road(grid, nx, nz) {
+                continue;
+            }
+            let dh = (grid.height(nx, nz) - grid.height(x, z)).abs();
+            if dh > max_dh {
+                continue;
+            }
+            let mut cost = 1 + dh;
+            if grid.height(nx, nz) <= grid.sea_level + 1 {
+                cost += 20;
+            }
+            let tentative = g.saturating_add(cost);
+            if tentative < *gscore.get(&(nx, nz)).unwrap_or(&i32::MAX) {
+                came.insert((nx, nz), (x, z));
+                gscore.insert((nx, nz), tentative);
+                open.push(Node {
+                    f: tentative + heur((nx, nz), goal),
+                    x: nx,
+                    z: nz,
+                });
+            }
+        }
+    }
+    let (&(bx, bz), _) = gscore.iter().min_by_key(|entry| {
+        let &(x, z) = entry.0;
+        (heur((x, z), goal), heur((x, z), start))
+    })?;
+    if (bx, bz) == start || heur((bx, bz), goal) > 16 {
+        return None;
+    }
+    Some(rebuild_walk(&came, start, (bx, bz)))
+}
+
+fn rebuild_walk(
+    came: &HashMap<(i32, i32), (i32, i32)>,
+    start: (i32, i32),
+    goal: (i32, i32),
+) -> Vec<(i32, i32)> {
+    let mut cur = goal;
+    let mut points = vec![cur];
+    let mut guard = 0u32;
+    while cur != start && guard < 200_000 {
+        guard += 1;
+        let Some(&prev) = came.get(&cur) else {
+            break;
+        };
+        cur = prev;
+        points.push(cur);
+    }
+    points.reverse();
+    points
 }
 
 fn astar(
@@ -3646,7 +4227,11 @@ fn paint_water_uses(occ: &mut Occupancy, grid: &HeightGrid, bounds: Rect, castle
                 | CellKind::Pasture
                 | CellKind::Grave
                 | CellKind::Plaza
-                | CellKind::Fountain => {
+                | CellKind::Fountain
+                | CellKind::WindSail
+                | CellKind::FieldWall
+                | CellKind::Hedge
+                | CellKind::CityDitch => {
                     let dock = Dir::ALL.iter().any(|dir| {
                         let n = occ.kind(x + dir.dx(), z + dir.dz());
                         matches!(
@@ -3679,10 +4264,10 @@ fn paint_water_uses(occ: &mut Occupancy, grid: &HeightGrid, bounds: Rect, castle
                 | CellKind::RoadStairW => {
                     occ.set(x, z, CellKind::Bridge, true);
                 }
-                CellKind::Eave | CellKind::Hedge | CellKind::Shrine | CellKind::FieldWall => {
+                CellKind::Eave | CellKind::Shrine => {
                     occ.set(x, z, CellKind::Harbor, true);
                 }
-                CellKind::WindSail | CellKind::Building => {}
+                CellKind::Building => {}
                 _ => {}
             }
         }
@@ -3883,7 +4468,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 30);
+        assert_eq!(PLAN_CACHE_VERSION, 31);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -3921,8 +4506,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 30;
-    const PLAN_LAYOUT_HASH: u64 = 0x897b_44f0_5ebe_86c7;
+    const PLAN_LAYOUT_VERSION: u32 = 31;
+    const PLAN_LAYOUT_HASH: u64 = 0xf4ca_426a_c2ae_0a33;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

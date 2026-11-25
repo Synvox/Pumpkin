@@ -559,6 +559,39 @@ fn expand_crop_for_cranes(plan: &TownPlan, crop: Rect) -> Rect {
     out
 }
 
+fn ship_hull_outside_crop(
+    plan: &TownPlan,
+    x: i32,
+    z: i32,
+    in_crop: &impl Fn(i32, i32) -> bool,
+) -> bool {
+    let is_hull = |kind: CellKind| {
+        matches!(
+            kind,
+            CellKind::Ship | CellKind::Boat | CellKind::Harbor | CellKind::Dock | CellKind::Quay
+        )
+    };
+    if !is_hull(plan.occ.kind(x, z)) {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    let mut stack = vec![(x, z)];
+    seen.insert((x, z));
+    while let Some((cx, cz)) = stack.pop() {
+        if !in_crop(cx, cz) {
+            return true;
+        }
+        for dir in Dir::ALL {
+            let nx = cx + dir.dx();
+            let nz = cz + dir.dz();
+            if seen.insert((nx, nz)) && is_hull(plan.occ.kind(nx, nz)) {
+                stack.push((nx, nz));
+            }
+        }
+    }
+    false
+}
+
 fn floating_in_rect(
     plan: &TownPlan,
     volume: &VolumeSink,
@@ -709,7 +742,11 @@ fn floating_in_rect(
                     return false;
                 }
             }
-            true
+            // A neighbouring cog's sail or mast clipped by this crop is not a
+            // floater: the hull sits outside in_crop, same as mill hubs.
+            !(ignore_clipped_sails
+                && matches!(kind, CellKind::Ship | CellKind::Boat)
+                && ship_hull_outside_crop(plan, x, z, &in_crop))
         })
         .collect();
     if leftover.is_empty() {

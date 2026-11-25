@@ -19,12 +19,14 @@ use std::sync::Arc;
 
 use pumpkin_data::Block;
 use pumpkin_data::dimension::Dimension;
+use pumpkin_kingdoms::check_plan_roads_with;
 use pumpkin_kingdoms::chunk_fill::fill_volume_from_chunks_in;
 use pumpkin_kingdoms::height::register_world_gen;
 use pumpkin_kingdoms::marker;
 use pumpkin_kingdoms::plan::{TownPlan, plan_for, plan_from_cache};
 use pumpkin_kingdoms::render::{
-    overview_bounds, write_planner_renders, write_renders, write_round37b_renders,
+    overview_bounds, write_planner_renders, write_region_renders, write_renders,
+    write_round37b_renders,
 };
 use pumpkin_kingdoms::scenes::SceneKind;
 use pumpkin_kingdoms::stamp::{MARKER_FLOOR, VolumeSink, fill_volume};
@@ -204,6 +206,41 @@ fn render_one(
         return false;
     }
     println!("  wrote planner PNGs");
+    let (gx, gz) = plan_a
+        .gates
+        .iter()
+        .find(|gate| gate.kind == pumpkin_kingdoms::info::GateKind::Town)
+        .map_or(plan_a.well, |gate| (gate.x, gate.z));
+    if let Err(error) = write_region_renders(
+        &plan_a,
+        &vol_a,
+        out_dir,
+        &format!("{stem}-spawn"),
+        gx,
+        gz,
+        512,
+    ) {
+        eprintln!("region render failed: {error}");
+        return false;
+    }
+    println!("  wrote 512x512 aerial/oblique around gate {gx},{gz}");
+    let neighbor_arcs: Vec<_> = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .into_iter()
+        .map(|(dx, dz)| plan_for(seed, cell_x + dx, cell_z + dz, &world_gen))
+        .collect();
+    let neighbor_refs: Vec<_> = neighbor_arcs
+        .iter()
+        .map(std::convert::AsRef::as_ref)
+        .collect();
+    let walk = check_plan_roads_with(&plan_a, &neighbor_refs);
+    println!("  walk-test {}", walk.summary());
+    if !walk.local_ok() {
+        eprintln!("{}", walk.render());
+        return false;
+    }
+    if !walk.neighbor_paths_fail.is_empty() {
+        eprintln!("  neighbour-stitch {}", walk.render());
+    }
     if seed == 20_261_025 && cell_x == 0 && cell_z == 0 {
         report_castle_sw_andesite(&plan_a, &vol_a);
         if let Err(error) = write_round37b_renders(&plan_a, &vol_a, out_dir, "round37c") {
