@@ -9,12 +9,20 @@
 pub const ROUT_RATIO: u32 = 3;
 /// Do not rout a 2-vs-6 skirmish; need a real press.
 pub const ROUT_MIN_FOES: u32 = 8;
+/// Near a watching player, a 2:1 press is enough to break the line.
+pub const FRONT_ROUT_RATIO: u32 = 2;
+/// Minimum foes for the near-player press. A 2-vs-4 does not count.
+pub const FRONT_ROUT_MIN_FOES: u32 = 5;
+/// How close a player must be for the 2:1 front check (captain chat range).
+pub const FRONT_PLAYER_RANGE: f64 = 48.0;
+/// After a rally, skip local 2:1 / loss checks so the hold can stick.
+pub const RALLY_HOLD_TICKS: u32 = 200;
 /// Captains and standard-bearers rally routed soldiers inside this radius.
 pub const RALLY_RANGE: f64 = 16.0;
 /// Local count radius for the outnumbered check.
 pub const MORALE_RANGE: f64 = 16.0;
 /// Minimum dead before a side's remaining troops consider a heavy-loss rout.
-pub const HEAVY_LOSS_KILLS: u32 = 8;
+pub const HEAVY_LOSS_KILLS: u32 = 6;
 /// Heavy-loss threshold is 2/5 of the force that started this fight.
 pub const HEAVY_LOSS_RATIO_NUM: u32 = 2;
 pub const HEAVY_LOSS_RATIO_DEN: u32 = 5;
@@ -47,6 +55,18 @@ pub struct MoraleState {
 #[must_use]
 pub const fn should_rout(friends: u32, foes: u32) -> bool {
     foes >= ROUT_MIN_FOES && foes >= friends.saturating_mul(ROUT_RATIO)
+}
+
+/// True when a watching player is close enough to see a 2:1 crush.
+#[must_use]
+pub const fn should_rout_front(friends: u32, foes: u32) -> bool {
+    foes >= FRONT_ROUT_MIN_FOES && foes >= friends.saturating_mul(FRONT_ROUT_RATIO)
+}
+
+/// Far 3:1, or 2:1 when a player is in [`FRONT_PLAYER_RANGE`].
+#[must_use]
+pub const fn should_break(friends: u32, foes: u32, player_near: bool) -> bool {
+    should_rout(friends, foes) || (player_near && should_rout_front(friends, foes))
 }
 
 /// True when enough of this side has already fallen.
@@ -180,6 +200,17 @@ mod tests {
     }
 
     #[test]
+    fn front_two_to_one_needs_a_player_and_a_real_press() {
+        assert!(should_rout_front(4, 8));
+        assert!(should_rout_front(5, 10));
+        assert!(!should_rout_front(4, 7));
+        assert!(!should_rout_front(3, 4));
+        assert!(!should_break(4, 8, false));
+        assert!(should_break(4, 8, true));
+        assert!(should_break(4, 12, false));
+    }
+
+    #[test]
     fn local_counts_split_sides() {
         let pos = vec![
             (0.0, 0.0, true),
@@ -219,11 +250,12 @@ mod tests {
 
     #[test]
     fn heavy_losses_need_a_real_butcher_bill() {
-        assert!(!should_rout_losses(7, 20));
-        assert!(!should_rout_losses(8, 20));
+        assert!(!should_rout_losses(5, 20));
+        assert!(!should_rout_losses(6, 20));
+        assert!(should_rout_losses(6, 6));
         assert!(should_rout_losses(8, 8));
         assert!(should_rout_losses(20, 20));
-        assert!(!should_rout_losses(8, 40));
+        assert!(!should_rout_losses(6, 40));
     }
 
     #[test]

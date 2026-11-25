@@ -63,7 +63,7 @@ Roles: `VillagerBed`, `Workstation`, `GuardPost`, `RallyMarket`, `RallyKeep`, `F
 
 Each castle keeps a flag plinth in the inner bailey (never the gatehouse): a 3×3 stone pedestal, oak-fence mast, owner banner, and a ring of stone pressure plates. A town flips when attackers (players of the attacking kingdom, or the raid's bot standard-bearer) stand on that plate with **no defenders within 4 blocks** for 200 ticks (~10 s, `KINGDOMS_HOLD_TICKS`). The hold needs `max(3, 5% of the surviving raid)` on the plate. A defender on the plate or within 4 blocks **pauses** the clock; an empty plate **decays** progress. Hiding in a wall or cellar does nothing. Defenders reclaim the same way. Nearby players see a boss-bar (`Flag 3/3 hold 80/200`); captains shout on start/pause/flip. `/raid stop` and battle end (`Victory` / capture / retake) despawn leftover raid soldiers, extra defenders tagged `kingdoms:temp`, and ram display entities so a later fight does not stack bodies. The plate, mast, and banner are indestructible to players, trebuchet punches, and repair.
 
-A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). The director picks a ladder, ram, or sapper stroke from the town's defences: ladder crews plant at low curtain points (defenders can shove them off; climbers fight on the wall walk), a ram crew hammers a closed gate until its HP hits zero (murder-holes chip the frame; a sally opens a few bars), and sappers still plant breach charges on 40+ raids. Broken leaves enqueue the builder plan-diff. Capture is still a hold on the keep flag plate. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks) or their captain dies; a living captain rallies routed soldiers within 16 blocks.
+A moving battering ram is six block-display entities (dark-oak logs, oak slab roof, fence sides). Ram-job raiders push it along the road; nearby defenders chip its HP (80). The director picks a ladder, ram, or sapper stroke from the town's defences: ladder crews plant at low curtain points (defenders can shove them off; climbers fight on the wall walk), a ram crew hammers a closed gate until its HP hits zero (murder-holes chip the frame; a sally opens a few bars), and sappers still plant breach charges on 40+ raids. Broken leaves enqueue the builder plan-diff. Capture is still a hold on the keep flag plate. Units rout when outnumbered 3:1 (at least 8 foes in 16 blocks), 2:1 near a player, their captain or bearer dies, or losses pile up; a living captain or bearer rallies routed soldiers within 16 blocks.
 
 When no HTTP director has talked to the API in the last 30 s, a war clock starts the next raid on a timer (`KINGDOMS_WAR_CLOCK`, default on; `KINGDOMS_WAR_CLOCK_TICKS`, default 2400 ≈ 2 min). After a flip it waits out the 400-tick hold lockout **plus** a 400-tick repair window so builders can work for the new owner. It can run several concurrent fronts (`KINGDOMS_WAR_CLOCK_FRONTS`, default 1) and alternates pillager raids with alder↔raven border marches. Size/extras: `KINGDOMS_WAR_CLOCK_SIZE` (default 24) and `KINGDOMS_WAR_CLOCK_DEFENDERS`. An authenticated HTTP call that is not observational (`GET /war`, `GET|POST /lines`, `GET|POST /heroes`) marks the external director as connected and pauses the clock.
 
@@ -183,11 +183,12 @@ Soldiers tagged `kingdoms:routed` slide toward the keep (kingdom) or raid camp (
 | Trigger | Who breaks |
 | --- | --- |
 | Local 3:1 with at least 8 foes | that cluster |
-| Captain death | the rest of that side |
-| Heavy losses (at least 8 dead and 2/5 of the force) | the rest of that side |
+| Local 2:1 with at least 5 foes, within 48 blocks of a player | that cluster |
+| Captain or standard-bearer death | the rest of that side |
+| Heavy losses (at least 6 dead and 2/5 of the force) | the rest of that side |
 | Flag captured | the side that just lost the town |
 
-A living captain or standard-bearer within 16 blocks clears the routed tag. Overlay examples: `The Raven line is breaking!` / `The Alder line holds!`. If a watching player is at the front and nothing has broken after warmup, a small nearby squad is shoved so the retreat is actually visible.
+A living captain or standard-bearer within 16 blocks clears the routed tag. Overlay examples: `The Raven line is breaking!` / `The Alder line holds!`. A rally holds the local 2:1 / loss checks for ~10 s so the line does not flip every other tick.
 
 ### Raids
 

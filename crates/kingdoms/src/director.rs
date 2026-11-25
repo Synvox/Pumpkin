@@ -651,7 +651,8 @@ struct TownWar {
     logged_archer: bool,
     logged_sally: bool,
     capture_bar: Option<Uuid>,
-    captain_down: bool,
+    /// `Some(is_pillager)` means that side's captain or bearer just died.
+    captain_down: Option<bool>,
     /// `Some(is_pillager)` means that side just lost the flag and should rout.
     flag_shock: Option<bool>,
     pending_tickets: Vec<Vector2<i32>>,
@@ -752,8 +753,8 @@ struct ActiveRaid {
     virt_defenders: u16,
     virt_march: u32,
     ghosts: Vec<GhostSoldier>,
-    /// A nearby player has already seen a rout/rally this raid.
-    morale_shown: bool,
+    /// Skip local 2:1 / loss routs until this tick so a rally can stick.
+    morale_hold_until: u32,
 }
 
 impl Director {
@@ -1080,7 +1081,7 @@ impl Director {
                 virt_defenders,
                 virt_march: 0,
                 ghosts: Vec::new(),
-                morale_shown: false,
+                morale_hold_until: 0,
             });
             war.approach = approach;
             war.gate_state = GateState::Open;
@@ -1115,7 +1116,7 @@ impl Director {
             war.retake_hold = 0;
             war.ram = None;
             war.treb = None;
-            war.captain_down = false;
+            war.captain_down = None;
             war.flag_shock = None;
             if let Some(g) = gate {
                 war.threatened = Some(g);
@@ -1520,7 +1521,7 @@ impl Director {
         for war in self.towns.values_mut() {
             if let Some(wired) = war.wired.remove(&entity_id) {
                 if wired.captain {
-                    war.captain_down = true;
+                    war.captain_down = Some(matches!(wired.faction, Faction::Pillager));
                 }
                 match wired.faction {
                     Faction::Pillager => {
@@ -1687,7 +1688,9 @@ fn shout_kind(kind: CombatKind) -> Option<ShoutKind> {
     match kind {
         CombatKind::Breach => Some(ShoutKind::GateBreached),
         CombatKind::RaidStart | CombatKind::WarClock | CombatKind::Alarm => Some(ShoutKind::Rally),
-        CombatKind::Rout => Some(ShoutKind::Retreat),
+        // Overlay in `apply_morale` is the player-facing rout cue. A Retreat
+        // shout here used keep coords, heard nobody, and ate the overlay cooldown.
+        CombatKind::Rout => None,
         CombatKind::Victory
         | CombatKind::Capture
         | CombatKind::Retake
@@ -1770,7 +1773,7 @@ impl TownWar {
             logged_archer: false,
             logged_sally: false,
             capture_bar: None,
-            captain_down: false,
+            captain_down: None,
             flag_shock: None,
             pending_tickets: Vec::new(),
             ticket_cursor: 0,
@@ -2017,7 +2020,7 @@ fn apply_saved_town(war: &mut TownWar, saved: siege::SavedTown, now: u32) {
             virt_defenders: raid.virt_defenders,
             virt_march: raid.virt_march,
             ghosts,
-            morale_shown: false,
+            morale_hold_until: 0,
         });
     } else {
         tracing::info!(
@@ -3340,7 +3343,7 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
                     base.entity_id,
                     Wired {
                         faction: faction.clone(),
-                        captain: has_tag(base, TAG_CAPTAIN),
+                        captain: has_tag(base, TAG_CAPTAIN) || has_tag(base, TAG_BEARER),
                         x: p.x,
                         y: p.y,
                         z: p.z,
@@ -4361,7 +4364,6 @@ fn tick_one_town(world: &Arc<World>, town_id: &str, tick: u32) {
     }
     apply_cull(town_id, &cull);
     apply_morale(world, town_id, tick, &snapshots, captain_down, breached);
-    maybe_demo_morale(world, town_id, tick, &snapshots);
     tick_desertion(town_id, tick, &snapshots);
     {
         let dir = lock();
@@ -6381,7 +6383,7 @@ fn maybe_soldier_chatter(world: &World, town_id: &str, tick: u32) {
     if tick % 80 != hash % 80 {
         return;
     }
-    let kind = if captain_down {
+    let kind = if captain_down.is_some() {
         ShoutKind::Fallen
     } else if occupy > 0 {
         ShoutKind::Charge
@@ -9035,10 +9037,10 @@ fn apply_morale(
     town_id: &str,
     tick: u32,
     snapshots: &[(Arc<dyn EntityBase>, Faction)],
-    captain_down: bool,
+    captain_down: Option<bool>,
     breached: bool,
 ) {
-    let (flag_shock, def_killed, raid_killed, keep, kingdom_name) = {
+    let (flag_shock, def_killed, raid_killed, keep, kingdom_name, hold_until) = {
         let dir = lock();
         let Some(war) = dir.towns.get(town_id) else {
             return;
@@ -9049,8 +9051,11 @@ fn apply_morale(
             war.raiders_killed,
             war.scene.keep(),
             war.kingdom.as_str().to_owned(),
+            war.raid.as_ref().map_or(0, |r| r.morale_hold_until),
         )
     };
+    let held = tick < hold_until;
+    let players = world_player_xz(world);
     let positions: Vec<(f64, f64, bool)> = snapshots
         .iter()
         .filter_map(|(e, f)| {
@@ -9078,6 +9083,7 @@ fn apply_morale(
     let mut rally_side = String::new();
     let mut cue_x = f64::from(keep.x);
     let mut cue_z = f64::from(keep.z);
+    let mut local_burst = false;
     for (entity, faction) in snapshots {
         let base = entity.get_entity();
         if matches!(faction, Faction::Neutral) {
@@ -9092,9 +9098,7 @@ fn apply_morale(
             crate::morale::MORALE_RANGE,
             is_pillager,
         );
-        let captain = has_tag(base, TAG_CAPTAIN);
-        let bearer = has_tag(base, TAG_BEARER);
-        let leader = captain || bearer;
+        let leader = has_tag(base, TAG_CAPTAIN) || has_tag(base, TAG_BEARER);
         // Ram crew stay on the engine; they do not break and run.
         if job_of(base) == MarchJob::Ram {
             continue;
@@ -9110,32 +9114,43 @@ fn apply_morale(
             }
             continue;
         }
+        let leader_lost = captain_down == Some(is_pillager);
         let flag_lost = flag_shock == Some(is_pillager);
         let losses = if is_pillager { raid_losses } else { def_losses };
-        if (captain_down || flag_lost || losses) && !leader && !has_tag(base, TAG_ROUTED) {
-            if routed_n < ROUT_TAGS_PER_TICK as u32 {
-                let _ = base.add_scoreboard_tag(TAG_ROUTED);
-                routed_n += 1;
-                if rout_side.is_empty() {
-                    rout_side = morale_side_name(faction, &kingdom_name);
-                    cue_x = pos.x;
-                    cue_z = pos.z;
-                }
+        let player_near =
+            player_near_list(&players, pos.x, pos.z, crate::morale::FRONT_PLAYER_RANGE);
+        let local_break = crate::morale::should_break(friends, foes, player_near);
+        // Captain/flag pulses always fire. Local crush and losses wait out a
+        // rally hold so the line does not flip every other tick.
+        let shock = leader_lost || flag_lost || (!held && (losses || local_break));
+        if shock && !leader && !has_tag(base, TAG_ROUTED) && routed_n < ROUT_TAGS_PER_TICK as u32 {
+            let _ = base.add_scoreboard_tag(TAG_ROUTED);
+            routed_n += 1;
+            if !leader_lost && !flag_lost {
+                local_burst = true;
             }
-            continue;
-        }
-        if crate::morale::should_rout(friends, foes) && !leader {
-            if routed_n < ROUT_TAGS_PER_TICK as u32 && base.add_scoreboard_tag(TAG_ROUTED) {
-                routed_n += 1;
-                if rout_side.is_empty() {
-                    rout_side = morale_side_name(faction, &kingdom_name);
-                    cue_x = pos.x;
-                    cue_z = pos.z;
-                }
+            if rout_side.is_empty() || player_near {
+                rout_side = morale_side_name(faction, &kingdom_name);
+                cue_x = pos.x;
+                cue_z = pos.z;
             }
-            continue;
         }
-        if leader && !has_tag(base, TAG_ROUTED) {
+    }
+    // Rally on a later tick so a break can actually move before it holds.
+    if routed_n == 0 {
+        for (entity, faction) in snapshots {
+            if rallied_n >= ROUT_TAGS_PER_TICK as u32 {
+                break;
+            }
+            let base = entity.get_entity();
+            if matches!(faction, Faction::Neutral) {
+                continue;
+            }
+            let leader = has_tag(base, TAG_CAPTAIN) || has_tag(base, TAG_BEARER);
+            if !leader || has_tag(base, TAG_ROUTED) {
+                continue;
+            }
+            let pos = base.pos.load();
             for (other, other_f) in snapshots {
                 if rallied_n >= ROUT_TAGS_PER_TICK as u32 {
                     break;
@@ -9164,16 +9179,21 @@ fn apply_morale(
     {
         let mut dir = lock();
         if let Some(war) = dir.towns.get_mut(town_id) {
-            if captain_down && routed_n < ROUT_TAGS_PER_TICK as u32 {
-                war.captain_down = false;
+            if captain_down.is_some() && routed_n < ROUT_TAGS_PER_TICK as u32 {
+                war.captain_down = None;
             }
             if flag_shock.is_some() && routed_n < ROUT_TAGS_PER_TICK as u32 {
                 war.flag_shock = None;
             }
-            if routed_n > 0 {
-                if let Some(raid) = war.raid.as_mut() {
-                    raid.morale_shown = true;
+            if let Some(raid) = war.raid.as_mut() {
+                if rallied_n > 0 {
+                    raid.morale_hold_until = tick.saturating_add(crate::morale::RALLY_HOLD_TICKS);
+                } else if local_burst {
+                    // One crush burst, then a tick for captains to rally.
+                    raid.morale_hold_until = tick.saturating_add(2);
                 }
+            }
+            if routed_n > 0 {
                 dir.push_event(CombatEvent {
                     tick,
                     kind: CombatKind::Rout,
@@ -9188,7 +9208,7 @@ fn apply_morale(
     }
     if routed_n > 0 {
         tracing::info!(
-            "kingdoms rout town={town_id} routed={routed_n} rallied={rallied_n} captain_down={captain_down}"
+            "kingdoms rout town={town_id} routed={routed_n} rallied={rallied_n} captain_down={captain_down:?}"
         );
         let mut dir = lock();
         let cue = crate::morale::breaking_cue(&rout_side);
@@ -9206,9 +9226,6 @@ fn apply_morale(
     } else if rallied_n > 0 {
         tracing::info!("kingdoms rally town={town_id} rallied={rallied_n}");
         let mut dir = lock();
-        if let Some(raid) = dir.towns.get_mut(town_id).and_then(|w| w.raid.as_mut()) {
-            raid.morale_shown = true;
-        }
         let cue = crate::morale::rally_cue(&rally_side);
         let (sx, sz) = overlay_origin(world, cue_x, cue_z);
         let _ = chat::try_overlay(
@@ -9225,13 +9242,18 @@ fn apply_morale(
 }
 
 fn overlay_origin(world: &World, x: f64, z: f64) -> (f64, f64) {
+    // Keep-to-front is farther than PLAYER_LIVE_RANGE. Snap to a watching
+    // player so the overlay is not shouted at an empty keep.
+    const SNAP: f64 = 384.0;
+    let mut best: Option<(f64, f64, f64)> = None;
     for player in world.players.load().iter() {
         let pos = player.living_entity.entity.pos.load();
-        if (pos.x - x).hypot(pos.z - z) <= PLAYER_LIVE_RANGE {
-            return (pos.x, pos.z);
+        let d = (pos.x - x).hypot(pos.z - z);
+        if d <= SNAP && best.is_none_or(|(_, _, best_d)| d < best_d) {
+            best = Some((pos.x, pos.z, d));
         }
     }
-    (x, z)
+    best.map_or((x, z), |(px, pz, _)| (px, pz))
 }
 
 fn morale_side_name(faction: &Faction, town_kingdom: &str) -> String {
@@ -9240,99 +9262,6 @@ fn morale_side_name(faction: &Faction, town_kingdom: &str) -> String {
         Faction::Kingdom(k) => k.as_str().to_owned(),
         Faction::Neutral => town_kingdom.to_owned(),
     }
-}
-
-/// If a player is watching a live raid and nothing has broken yet, shove a
-/// small squad so the client actually sees a retreat and a rally.
-fn maybe_demo_morale(
-    world: &World,
-    town_id: &str,
-    tick: u32,
-    snapshots: &[(Arc<dyn EntityBase>, Faction)],
-) {
-    let (shown, warm_until, keep, camp) = {
-        let dir = lock();
-        let Some(war) = dir.towns.get(town_id) else {
-            return;
-        };
-        let Some(raid) = war.raid.as_ref() else {
-            return;
-        };
-        if !raid.materialized || raid.morale_shown {
-            return;
-        }
-        (
-            raid.morale_shown,
-            raid.warm_until,
-            war.scene.keep(),
-            raid.camp,
-        )
-    };
-    if shown || tick < warm_until.saturating_add(200) {
-        return;
-    }
-    let players = world_player_xz(world);
-    if players.is_empty() {
-        return;
-    }
-    let mut tagged = 0u32;
-    let mut side = String::new();
-    for (entity, faction) in snapshots {
-        if tagged >= ROUT_TAGS_PER_TICK as u32 {
-            break;
-        }
-        let base = entity.get_entity();
-        if has_tag(base, TAG_CAPTAIN) || has_tag(base, TAG_BEARER) || has_tag(base, TAG_ROUTED) {
-            continue;
-        }
-        if job_of(base) == MarchJob::Ram {
-            continue;
-        }
-        let pos = base.pos.load();
-        if !player_near_list(&players, pos.x, pos.z, 48.0) {
-            continue;
-        }
-        if matches!(faction, Faction::Neutral) {
-            continue;
-        }
-        if base.add_scoreboard_tag(TAG_ROUTED) {
-            tagged += 1;
-            if side.is_empty() {
-                side = morale_side_name(faction, "alder");
-            }
-        }
-    }
-    if tagged == 0 {
-        return;
-    }
-    let mut dir = lock();
-    if let Some(war) = dir.towns.get_mut(town_id)
-        && let Some(raid) = war.raid.as_mut()
-    {
-        raid.morale_shown = true;
-    }
-    dir.push_event(CombatEvent {
-        tick,
-        kind: CombatKind::Rout,
-        actor: tagged as i32,
-        other: None,
-        x: f64::from(keep.x),
-        z: f64::from(keep.z),
-        note: format!("{town_id} {tagged} routed (player-visible)"),
-    });
-    let cue = crate::morale::breaking_cue(&side);
-    let (sx, sz) = overlay_origin(world, f64::from(camp.x), f64::from(camp.z));
-    let _ = chat::try_overlay(
-        world,
-        tick,
-        town_id,
-        ShoutKind::Retreat,
-        sx,
-        sz,
-        &mut dir.last_shout,
-        &cue,
-    );
-    tracing::info!("kingdoms rout town={town_id} routed={tagged} rallied=0 demo=true");
 }
 
 fn update_capture_meter(

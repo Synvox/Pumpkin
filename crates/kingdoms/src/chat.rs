@@ -252,14 +252,13 @@ pub fn try_overlay(
     if text.is_empty() {
         return false;
     }
-    let key = (town_id.to_owned(), kind);
+    let key = (format!("{town_id}:overlay"), kind);
     if last
         .get(&key)
         .is_some_and(|t| tick.saturating_sub(*t) < CHAT_COOLDOWN_TICKS)
     {
         return false;
     }
-    last.insert(key, tick);
     let overlay = TextComponent::text(text.to_owned()).color_named(NamedColor::Gold);
     let chat = TextComponent::text(text.to_owned()).color_named(NamedColor::Gold);
     let mut n = 0u32;
@@ -278,7 +277,11 @@ pub fn try_overlay(
         text,
         "kingdoms morale overlay"
     );
-    n > 0
+    if n == 0 {
+        return false;
+    }
+    last.insert(key, tick);
+    true
 }
 
 /// True when this player can hear another squad reply.

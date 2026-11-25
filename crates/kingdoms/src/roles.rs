@@ -364,7 +364,11 @@ pub fn classify_equipment(keys: &[&str]) -> Option<&'static str> {
             .any(|k| k.rsplit_once(':').map_or(*k, |(_, n)| n).contains(part))
     };
     if has("banner") {
-        return Some("standard");
+        let iron_body = has("iron_chestplate") || has("iron_leggings") || has("iron_boots");
+        if iron_body {
+            return Some("captain");
+        }
+        return Some("bearer");
     }
     if has("spear") {
         return Some("spearman");
@@ -537,12 +541,26 @@ mod tests {
         );
         assert_eq!(classify_equipment(&["minecraft:iron_axe"]), Some("builder"));
         assert_eq!(
-            classify_equipment(&["minecraft:green_banner", "minecraft:iron_sword"]),
-            Some("standard")
+            classify_equipment(&[
+                "minecraft:green_banner",
+                "minecraft:iron_sword",
+                "minecraft:iron_chestplate",
+                "minecraft:iron_leggings",
+                "minecraft:iron_boots",
+            ]),
+            Some("captain")
+        );
+        assert_eq!(
+            classify_equipment(&[
+                "minecraft:green_banner",
+                "minecraft:iron_sword",
+                "minecraft:leather_chestplate",
+            ]),
+            Some("bearer")
         );
         assert_eq!(
             classify_equipment(&["minecraft:white_banner"]),
-            Some("standard")
+            Some("bearer")
         );
         let names: Vec<&str> = [
             VillagerRole::Guard,
