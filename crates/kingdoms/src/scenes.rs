@@ -32,6 +32,9 @@ pub const TREE_STRIP_MARGIN: i32 = 16;
 /// Close-up iso pad around the war scenes (`inflate(8)` plus render pad 2).
 pub(crate) const WAR_SCENE_CROP: i32 = 10;
 
+/// Minimum gap between hinterland settlements and POIs (yards, not wall-to-wall).
+const MIN_SETTLEMENT_GAP: i32 = 16;
+
 /// Cog hull along the keel. Beam is 7 so the bow can taper to a point.
 const COG_LEN: i32 = 19;
 const COG_BEAM: i32 = 7;
@@ -357,6 +360,21 @@ pub fn place_scenes(
     );
     // Before mills and wayside POIs so mill-sail and quarry-jib keepout can see it.
     place_pillager_stronghold(occ, grid, castle, town, search, lots, seed, &mut scenes);
+    // River crossing before mill sails so a coastal or riverside mill cannot
+    // occupy the only wet yard the toll bridge would have used. Own salt so
+    // mill placement still draws from `rng` in the same order as before.
+    let mut toll_rng = TownRng::salted(seed, 0x7011, origin_salt(search));
+    place_toll_bridge(
+        occ,
+        grid,
+        search,
+        town,
+        keep_out,
+        lots,
+        seed,
+        &mut toll_rng,
+        &mut scenes,
+    );
     place_edge_mills(occ, grid, search, town, keep_out, lots, seed, rng, &scenes);
     paint_wind_sails(occ, lots);
     paint_forge_yards(occ, lots);
@@ -389,14 +407,14 @@ pub fn place_scenes(
         &mut extra,
         &mut scenes,
     );
-    protect_war_scenes(occ, &scenes, town);
+    protect_war_scenes(occ, &scenes, town, lots);
     scenes
 }
 
 /// Vineyard terraces and leftover crop fills must not eat the stronghold or
 /// the ruined castle courtyard. Restore grass over those crop cells, then
 /// stamp the war-scene occupancy again so a restripe cannot wipe the curtain.
-fn protect_war_scenes(occ: &mut Occupancy, scenes: &[Scene], town: Rect) {
+fn protect_war_scenes(occ: &mut Occupancy, scenes: &[Scene], town: Rect, lots: &[Lot]) {
     for scene in scenes {
         if !matches!(
             scene.kind,
@@ -429,6 +447,23 @@ fn protect_war_scenes(occ: &mut Occupancy, scenes: &[Scene], town: Rect) {
                 paint_stronghold_occupancy(occ, &pillager_stronghold_layout(scene.rect, town));
             }
             _ => {}
+        }
+        for lot in lots {
+            if !scene.rect.intersects(lot.rect) {
+                continue;
+            }
+            occ.fill_building(lot.rect, lot.id, true);
+            if !matches!(
+                lot.kind,
+                BuildingKind::Watchtower
+                    | BuildingKind::Outpost
+                    | BuildingKind::BellTower
+                    | BuildingKind::Windmill
+                    | BuildingKind::Watermill
+                    | BuildingKind::Stall
+            ) {
+                paint_eaves(occ, lot.rect);
+            }
         }
     }
 }
@@ -775,39 +810,29 @@ fn place_coaching_inn_scene(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
-    let Some(yard) =
-        find_inland_site_near_road(occ, grid, search, town, keep_out.inflate(8), 36, 30, rng)
-            .or_else(|| {
-                find_inland_site_near_road(
-                    occ,
-                    grid,
-                    search,
-                    town,
-                    keep_out.inflate(8),
-                    34,
-                    30,
-                    rng,
-                )
-            })
-            .or_else(|| {
-                find_inland_site(
-                    occ,
-                    grid,
-                    search,
-                    town,
-                    keep_out.inflate(8),
-                    32,
-                    30,
-                    true,
-                    rng,
-                )
-            })
-    else {
+    let mut blocked = keep_out.inflate(8);
+    let mut yard = None;
+    for &(w, d) in &[(36, 30), (34, 30), (32, 30), (30, 28)] {
+        for _ in 0..6 {
+            let candidate = find_inland_site_near_road(occ, grid, search, town, blocked, w, d, rng)
+                .or_else(|| find_inland_site(occ, grid, search, town, blocked, w, d, true, rng));
+            let Some(candidate) = candidate else {
+                break;
+            };
+            if landmark_blocked(scenes, candidate) || windmill_hits(lots, candidate) {
+                blocked = union_scene_rect(blocked, candidate.inflate(2));
+                continue;
+            }
+            yard = Some(candidate);
+            break;
+        }
+        if yard.is_some() {
+            break;
+        }
+    }
+    let Some(yard) = yard else {
         return;
     };
-    if landmark_blocked(scenes, yard) || windmill_hits(lots, yard) {
-        return;
-    }
     let (tw, td) = BuildingKind::Tavern.size();
     let (bw, bd) = BuildingKind::Barn.size();
     let tavern = Rect::new(
@@ -1019,38 +1044,24 @@ fn place_charcoal_camp(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
-    let Some(yard) = find_site(
-        occ,
-        grid,
-        search,
-        town,
-        keep_out.inflate(8),
-        26,
-        20,
-        false,
-        rng,
-    )
-    .or_else(|| {
-        find_site(
-            occ,
-            grid,
-            search,
-            town,
-            keep_out.inflate(8),
-            22,
-            16,
-            false,
-            rng,
-        )
-    }) else {
+    let mut blocked = keep_out.inflate(8);
+    let mut found = None;
+    for _ in 0..8 {
+        let candidate = find_site(occ, grid, search, town, blocked, 26, 20, false, rng)
+            .or_else(|| find_site(occ, grid, search, town, blocked, 22, 16, false, rng));
+        let Some(yard) = candidate else {
+            break;
+        };
+        if landmark_blocked(scenes, yard) || windmill_hits(lots, yard) {
+            blocked = union_scene_rect(blocked, yard.inflate(8));
+            continue;
+        }
+        found = Some(yard);
+        break;
+    }
+    let Some(yard) = found else {
         return;
     };
-    if landmark_blocked(scenes, yard)
-        || scenes.iter().any(|scene| scene.rect.intersects(yard))
-        || windmill_hits(lots, yard)
-    {
-        return;
-    }
     let (w, d) = BuildingKind::Cottage.size();
     let hut = Rect::new(
         yard.min_x + 2,
@@ -1875,6 +1886,12 @@ fn place_toll_bridge(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
+    if scenes
+        .iter()
+        .any(|scene| scene.kind == SceneKind::TollBridge)
+    {
+        return;
+    }
     let Some(yard) = find_toll_site(occ, grid, search, town, keep_out, lots, scenes, rng) else {
         return;
     };
@@ -1967,6 +1984,23 @@ fn place_toll_bridge(
     });
 }
 
+fn toll_site_blocked(scenes: &[Scene], rect: Rect) -> bool {
+    scenes.iter().any(|scene| {
+        if !matches!(
+            scene.kind,
+            SceneKind::PillagerStronghold
+                | SceneKind::RuinedCastle
+                | SceneKind::Gorge
+                | SceneKind::Harbour
+                | SceneKind::Cathedral
+                | SceneKind::MountainFortress
+        ) {
+            return false;
+        }
+        scene.rect.intersects(rect)
+    })
+}
+
 fn find_toll_site(
     occ: &Occupancy,
     grid: &HeightGrid,
@@ -1990,9 +2024,7 @@ fn find_toll_site(
             if town.inflate(12).intersects(rect) || keep_out.intersects(rect) {
                 continue;
             }
-            if landmark_blocked(scenes, rect)
-                || scenes.iter().any(|scene| scene.rect.intersects(rect))
-            {
+            if toll_site_blocked(scenes, rect) {
                 continue;
             }
             if !toll_yard_open(occ, rect) {
@@ -2090,6 +2122,7 @@ fn toll_yard_open(occ: &Occupancy, rect: Rect) -> bool {
                         | CellKind::RoadStairS
                         | CellKind::RoadStairE
                         | CellKind::RoadStairW
+                        | CellKind::Bridge
                 )
             {
                 ok += 1;
@@ -2296,6 +2329,9 @@ fn place_crossroads_gallows(
                 continue;
             }
             if !grid.rect_is_dry(rect) {
+                continue;
+            }
+            if landmark_blocked(scenes, rect) {
                 continue;
             }
             let score = arms as i32 * 20 + rng.gen_range(0, 6);
@@ -3309,7 +3345,8 @@ fn harbour_open_dir(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> Optio
 }
 
 fn wet_berth(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> bool {
-    !grid.is_dry(x, z)
+    occ.bounds.contains(x, z)
+        && !grid.is_dry(x, z)
         && matches!(
             occ.kind(x, z),
             CellKind::Harbor
@@ -3319,6 +3356,8 @@ fn wet_berth(occ: &Occupancy, grid: &HeightGrid, x: i32, z: i32) -> bool {
                 | CellKind::Green
                 | CellKind::Breakwater
                 | CellKind::CityDitch
+                | CellKind::WindSail
+                | CellKind::Bridge
         )
 }
 
@@ -3622,26 +3661,20 @@ fn hull_cells_ok(occ: &Occupancy, grid: &HeightGrid, search: Rect, hull: Rect, c
             if matches!(kind, CellKind::Ship | CellKind::Boat) && (!cog || kind == CellKind::Boat) {
                 return false;
             }
-            if !matches!(
-                kind,
-                CellKind::Harbor
-                    | CellKind::Dock
-                    | CellKind::Empty
-                    | CellKind::Quay
-                    | CellKind::Ship
-                    | CellKind::Boat
-                    | CellKind::Green
-                    | CellKind::Breakwater
-                    | CellKind::Bridge
-                    | CellKind::Road
-                    | CellKind::RoadStairN
-                    | CellKind::RoadStairS
-                    | CellKind::RoadStairE
-                    | CellKind::RoadStairW
-                    | CellKind::WaterWheel
-                    | CellKind::MillRace
-                    | CellKind::Sluice
-            ) {
+            // Water occupancy is a keep-out soup (ditch, mill sails, gorge
+            // channel). Only refuse solid lots and curtain so the cog still
+            // berths on a painted coast.
+            if kind.is_castle()
+                || matches!(
+                    kind,
+                    CellKind::Building
+                        | CellKind::TownWall
+                        | CellKind::TownTower
+                        | CellKind::TownGate
+                        | CellKind::Lighthouse
+                        | CellKind::Crane
+                )
+            {
                 return false;
             }
         }
@@ -3754,6 +3787,9 @@ fn force_harbour_cog(
                             | CellKind::Dock
                             | CellKind::Quay
                             | CellKind::Boat
+                            | CellKind::WindSail
+                            | CellKind::FieldWall
+                            | CellKind::Hedge
                     ) {
                         occ.set(hx, hz, CellKind::Harbor, true);
                     }
@@ -6514,7 +6550,7 @@ fn place_outskirts(
             if !is_road_cell(occ.kind(x, z)) {
                 continue;
             }
-            if (x + z).rem_euclid(5) != 0 {
+            if (x + z).rem_euclid(11) != 0 {
                 continue;
             }
             if town.inflate(6).contains(x, z) || keep_out.contains(x, z) {
@@ -6532,43 +6568,42 @@ fn place_outskirts(
     let mut cottages = 0;
     let mut workshops = 0;
     for &(x, z) in &samples {
-        if shrines < 10 && place_wayside_shrine(occ, grid, x, z) {
+        if shrines < 6 && place_wayside_shrine(occ, grid, x, z) {
             shrines += 1;
         }
         paint_roadside_hedge_and_wall(occ, grid, x, z);
-        if farms < 22 && place_roadside_farm(occ, grid, town, keep_out, x, z) {
+        if farms < 12 && place_roadside_farm(occ, grid, town, keep_out, x, z) {
             farms += 1;
         }
-        if pastures < 10 && place_roadside_pasture(occ, grid, town, keep_out, x, z, scenes) {
+        if pastures < 6 && place_roadside_pasture(occ, grid, town, keep_out, x, z, scenes) {
             pastures += 1;
         }
-        if orchards < 10 && place_roadside_orchard(occ, grid, search, town, keep_out, x, z, scenes)
-        {
+        if orchards < 6 && place_roadside_orchard(occ, grid, search, town, keep_out, x, z, scenes) {
             orchards += 1;
         }
-        if orchards < 16 && place_roadside_copse(occ, grid, town, keep_out, x, z, scenes) {
+        if orchards < 10 && place_roadside_copse(occ, grid, town, keep_out, x, z, scenes) {
             orchards += 1;
         }
-        if cottages < 28
-            && rng.chance(2, 3)
-            && place_roadside_cottage(occ, grid, lots, seed, town, keep_out, x, z)
+        if cottages < 12
+            && rng.chance(1, 2)
+            && place_roadside_cottage(occ, grid, lots, seed, town, keep_out, x, z, scenes)
         {
             cottages += 1;
         }
-        if workshops < 12
-            && rng.chance(1, 2)
-            && place_roadside_workshop(occ, grid, lots, seed, town, keep_out, x, z)
+        if workshops < 6
+            && rng.chance(1, 3)
+            && place_roadside_workshop(occ, grid, lots, seed, town, keep_out, x, z, scenes)
         {
             workshops += 1;
         }
-        if inns < 10
-            && rng.chance(1, 2)
-            && place_roadside_inn(occ, grid, lots, seed, town, keep_out, x, z)
+        if inns < 4
+            && rng.chance(1, 3)
+            && place_roadside_inn(occ, grid, lots, seed, town, keep_out, x, z, scenes)
         {
             inns += 1;
         }
-        if hamlets < 10
-            && rng.chance(1, 3)
+        if hamlets < 4
+            && rng.chance(1, 4)
             && place_roadside_hamlet(occ, grid, lots, seed, town, keep_out, x, z, scenes)
         {
             hamlets += 1;
@@ -6598,7 +6633,7 @@ fn place_outskirts(
         if far_shrines < 4 && place_wayside_shrine(occ, grid, x, z) {
             far_shrines += 1;
         }
-        if far_inns < 4 && place_roadside_inn(occ, grid, lots, seed, town, keep_out, x, z) {
+        if far_inns < 4 && place_roadside_inn(occ, grid, lots, seed, town, keep_out, x, z, scenes) {
             far_inns += 1;
         }
     }
@@ -6616,34 +6651,50 @@ fn is_road_cell(kind: CellKind) -> bool {
     )
 }
 
-fn paint_roadside_hedge_and_wall(occ: &mut Occupancy, grid: &HeightGrid, x: i32, z: i32) {
-    for dir in Dir::ALL {
-        let hx = x + dir.dx() * 2;
-        let hz = z + dir.dz() * 2;
-        if occ.bounds.contains(hx, hz) && grid.is_dry(hx, hz) && occ.kind(hx, hz) == CellKind::Empty
-        {
-            occ.set(hx, hz, CellKind::Hedge, false);
-        }
-        let wx = x + dir.dx() * 4;
-        let wz = z + dir.dz() * 4;
-        if !occ.bounds.contains(wx, wz) || !grid.is_dry(wx, wz) {
-            continue;
-        }
-        if occ.kind(wx, wz) != CellKind::Empty {
-            continue;
-        }
-        occ.set(wx, wz, CellKind::FieldWall, false);
-        let along = if dir.dx() == 0 { Dir::East } else { Dir::South };
-        for step in -2..=2 {
-            let fx = wx + along.dx() * step;
-            let fz = wz + along.dz() * step;
-            if occ.bounds.contains(fx, fz)
-                && grid.is_dry(fx, fz)
-                && occ.kind(fx, fz) == CellKind::Empty
-            {
-                occ.set(fx, fz, CellKind::FieldWall, false);
+/// Closed paddock walls around farms and pastures. Not countryside ribbons.
+pub(crate) fn paint_farm_paddocks(occ: &mut Occupancy) {
+    let bounds = occ.bounds;
+    let mut walls = Vec::new();
+    for z in bounds.min_z..=bounds.max_z {
+        for x in bounds.min_x..=bounds.max_x {
+            if !matches!(
+                occ.kind(x, z),
+                CellKind::Farm | CellKind::FarmEdge | CellKind::Pasture | CellKind::Orchard
+            ) {
+                continue;
+            }
+            for dir in Dir::ALL {
+                let nx = x + dir.dx();
+                let nz = z + dir.dz();
+                if matches!(
+                    occ.kind(nx, nz),
+                    CellKind::Empty | CellKind::Green | CellKind::Hedge
+                ) {
+                    walls.push((nx, nz));
+                }
             }
         }
+    }
+    for (x, z) in walls {
+        if matches!(
+            occ.kind(x, z),
+            CellKind::Empty | CellKind::Green | CellKind::Hedge
+        ) {
+            occ.set(x, z, CellKind::FieldWall, true);
+        }
+    }
+}
+
+fn paint_roadside_hedge_and_wall(occ: &mut Occupancy, grid: &HeightGrid, x: i32, z: i32) {
+    // Occasional hedge tufts, never a countryside wall ribbon.
+    if (x + z).rem_euclid(9) != 0 {
+        return;
+    }
+    let dir = Dir::ALL[(x.unsigned_abs() as usize + z.unsigned_abs() as usize) % 4];
+    let hx = x + dir.dx() * 2;
+    let hz = z + dir.dz() * 2;
+    if occ.bounds.contains(hx, hz) && grid.is_dry(hx, hz) && occ.kind(hx, hz) == CellKind::Empty {
+        occ.set(hx, hz, CellKind::Hedge, false);
     }
 }
 
@@ -6852,7 +6903,7 @@ fn densify_empty_fields(
                     copses += 1;
                 }
             }
-            x += 16;
+            x += 28;
         }
         z += 14;
     }
@@ -7035,13 +7086,17 @@ fn place_roadside_cottage(
     keep_out: Rect,
     x: i32,
     z: i32,
+    scenes: &[Scene],
 ) -> bool {
     let (w, d) = BuildingKind::Cottage.size();
     for dir in Dir::ALL {
         let cx = x + dir.dx() * (w + 3);
         let cz = z + dir.dz() * (d + 3);
         let rect = Rect::new(cx, cz, cx + w - 1, cz + d - 1);
-        if town.inflate(6).intersects(rect) || keep_out.intersects(rect) {
+        if town.inflate(6).intersects(rect)
+            || keep_out.intersects(rect)
+            || landmark_blocked(scenes, rect)
+        {
             continue;
         }
         if try_lot(
@@ -7070,13 +7125,17 @@ fn place_roadside_workshop(
     keep_out: Rect,
     x: i32,
     z: i32,
+    scenes: &[Scene],
 ) -> bool {
     let (w, d) = BuildingKind::Blacksmith.size();
     for dir in Dir::ALL {
         let wx = x + dir.dx() * (w + 3);
         let wz = z + dir.dz() * (d + 3);
         let rect = Rect::new(wx, wz, wx + w - 1, wz + d - 1);
-        if town.inflate(6).intersects(rect) || keep_out.intersects(rect) {
+        if town.inflate(6).intersects(rect)
+            || keep_out.intersects(rect)
+            || landmark_blocked(scenes, rect)
+        {
             continue;
         }
         if try_lot(
@@ -7105,13 +7164,17 @@ fn place_roadside_inn(
     keep_out: Rect,
     x: i32,
     z: i32,
+    scenes: &[Scene],
 ) -> bool {
     let (w, d) = BuildingKind::Tavern.size();
     for dir in Dir::ALL {
         let ix = x + dir.dx() * (w + 2);
         let iz = z + dir.dz() * (d + 2);
         let rect = Rect::new(ix, iz, ix + w - 1, iz + d - 1);
-        if town.inflate(6).intersects(rect) || keep_out.intersects(rect) {
+        if town.inflate(6).intersects(rect)
+            || keep_out.intersects(rect)
+            || landmark_blocked(scenes, rect)
+        {
             continue;
         }
         if try_lot(
@@ -7146,7 +7209,10 @@ fn place_roadside_hamlet(
         let hx = x + dir.dx() * 16;
         let hz = z + dir.dz() * 12;
         let yard = Rect::new(hx - 10, hz - 8, hx + 10, hz + 8);
-        if town.inflate(8).intersects(yard) || keep_out.intersects(yard) {
+        if town.inflate(8).intersects(yard)
+            || keep_out.intersects(yard)
+            || landmark_blocked(scenes, yard)
+        {
             continue;
         }
         if !occ.bounds.contains(yard.min_x, yard.min_z)
@@ -8151,7 +8217,7 @@ fn place_graveyard(
 }
 
 fn paint_graveyard(occ: &mut Occupancy, rect: Rect) {
-    occ.fill(rect, CellKind::FarmEdge, false);
+    occ.fill(rect, CellKind::FieldWall, false);
     occ.fill(rect.deflate(1), CellKind::Grave, true);
     let gate = Rect::new(
         rect.center().0 - 1,
@@ -8190,6 +8256,9 @@ fn place_pillager_camp(
             let rect = Rect::new(x, z, x + 34, z + 28);
             x += 16;
             if town.inflate(36).intersects(rect) || castle.inflate(20).intersects(rect) {
+                continue;
+            }
+            if near_settlement(occ, rect, MIN_SETTLEMENT_GAP) {
                 continue;
             }
             if !site_ok(occ, grid, rect, 12) {
@@ -9582,12 +9651,22 @@ fn place_lumber_camp(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
-    let Some(rect) = find_site(occ, grid, search, town, keep_out, 22, 16, true, rng) else {
+    let mut blocked = keep_out;
+    let mut found = None;
+    for _ in 0..8 {
+        let Some(rect) = find_site(occ, grid, search, town, blocked, 22, 16, true, rng) else {
+            break;
+        };
+        if landmark_blocked(scenes, rect) {
+            blocked = union_scene_rect(blocked, rect.inflate(8));
+            continue;
+        }
+        found = Some(rect);
+        break;
+    }
+    let Some(rect) = found else {
         return;
     };
-    if scenes.iter().any(|scene| scene.rect.intersects(rect)) {
-        return;
-    }
     occ.fill(rect, CellKind::Green, false);
     scenes.push(Scene {
         kind: SceneKind::LumberCamp,
@@ -9700,14 +9779,32 @@ fn mill_disc_blocked(
                     let gap = MILL_SAIL_RADIUS * 2 + 2;
                     (cx - ox).abs().max((cz - oz).abs()) <= gap
                 } else {
-                    lot.rect.contains(x, z)
+                    lot.rect.inflate(1).contains(x, z)
                 }
             }) {
                 return true;
             }
         }
     }
-    false
+    // Diagonal X-blade tips sit outside the r=11 disc (√200 ≈ 14).
+    mill_blade_tips(cx, cz).iter().any(|&(x, z)| {
+        mill_keepout(occ.kind(x, z), occ.lot(x, z), skip)
+            || !grid.is_dry(x, z)
+            || lots.iter().any(|lot| {
+                Some(lot.id) != skip
+                    && lot.kind != BuildingKind::Windmill
+                    && lot.rect.inflate(1).contains(x, z)
+            })
+    })
+}
+
+fn mill_blade_tips(cx: i32, cz: i32) -> [(i32, i32); 4] {
+    [
+        (cx + MILL_BLADE_LEN, cz + MILL_BLADE_LEN),
+        (cx + MILL_BLADE_LEN, cz - MILL_BLADE_LEN),
+        (cx - MILL_BLADE_LEN, cz + MILL_BLADE_LEN),
+        (cx - MILL_BLADE_LEN, cz - MILL_BLADE_LEN),
+    ]
 }
 
 fn mill_crop_keepout(scenes: &[Scene], cx: i32, cz: i32) -> bool {
@@ -9722,6 +9819,7 @@ fn mill_crop_keepout(scenes: &[Scene], cx: i32, cz: i32) -> bool {
                 | SceneKind::Festival
                 | SceneKind::PillagerStronghold
                 | SceneKind::RuinedCastle
+                | SceneKind::Harbour
         ) && mill_disc_hits_rect(cx, cz, scene.rect.inflate(WAR_SCENE_CROP))
     })
 }
@@ -9732,7 +9830,7 @@ fn windmill_hits(lots: &[Lot], rect: Rect) -> bool {
             return false;
         }
         let (cx, cz) = lot.rect.center();
-        mill_disc_hits_rect(cx, cz, rect.inflate(WAR_SCENE_CROP))
+        mill_disc_hits_rect(cx, cz, rect)
     })
 }
 
@@ -9742,6 +9840,9 @@ fn mill_disc_hits_rect(cx: i32, cz: i32, rect: Rect) -> bool {
     let dx = nx - cx;
     let dz = nz - cz;
     dx * dx + dz * dz <= MILL_SAIL_RADIUS * MILL_SAIL_RADIUS
+        || mill_blade_tips(cx, cz)
+            .iter()
+            .any(|&(tx, tz)| rect.contains(tx, tz))
 }
 
 fn mill_keepout(kind: CellKind, lot: u16, skip: Option<u16>) -> bool {
@@ -9751,6 +9852,7 @@ fn mill_keepout(kind: CellKind, lot: u16, skip: Option<u16>) -> bool {
     matches!(
         kind,
         CellKind::Building
+            | CellKind::Eave
             | CellKind::TownWall
             | CellKind::TownTower
             | CellKind::TownGate
@@ -9778,7 +9880,6 @@ fn mill_keepout(kind: CellKind, lot: u16, skip: Option<u16>) -> bool {
             | CellKind::Vine
             | CellKind::Lighthouse
             | CellKind::Shrine
-            | CellKind::FieldWall
             | CellKind::TourneyList
             | CellKind::TourneyStand
             | CellKind::Beacon
@@ -9804,7 +9905,6 @@ fn mill_keepout(kind: CellKind, lot: u16, skip: Option<u16>) -> bool {
             | CellKind::Ford
             | CellKind::Weir
             | CellKind::CutStone
-            | CellKind::HerbGarden
             | CellKind::Maypole
             | CellKind::MarketCross
             | CellKind::Pillory
@@ -9825,17 +9925,26 @@ fn reserve_sail_disc(occ: &mut Occupancy, cx: i32, cz: i32, mill: Rect) {
             if mill.contains(x, z) {
                 continue;
             }
+            if matches!(occ.kind(x, z), CellKind::Eave | CellKind::Building) {
+                continue;
+            }
             if matches!(
                 occ.kind(x, z),
                 CellKind::Empty
                     | CellKind::Farm
                     | CellKind::FarmEdge
                     | CellKind::Green
-                    | CellKind::Eave
                     | CellKind::Orchard
                     | CellKind::Pasture
                     | CellKind::Hedge
                     | CellKind::Plaza
+                    | CellKind::FieldWall
+                    | CellKind::HerbGarden
+                    | CellKind::Road
+                    | CellKind::RoadStairN
+                    | CellKind::RoadStairS
+                    | CellKind::RoadStairE
+                    | CellKind::RoadStairW
             ) {
                 occ.set(x, z, CellKind::Green, true);
             }
@@ -9849,11 +9958,15 @@ pub(crate) fn rect_hits_mill_sail(lots: &[Lot], rect: Rect) -> bool {
             return false;
         }
         let (cx, cz) = lot.rect.center();
-        let nearest_x = rect.min_x.max(cx.min(rect.max_x));
-        let nearest_z = rect.min_z.max(cz.min(rect.max_z));
+        let pad = rect.inflate(1);
+        let nearest_x = pad.min_x.max(cx.min(pad.max_x));
+        let nearest_z = pad.min_z.max(cz.min(pad.max_z));
         let dx = nearest_x - cx;
         let dz = nearest_z - cz;
         dx * dx + dz * dz <= MILL_SAIL_RADIUS * MILL_SAIL_RADIUS
+            || mill_blade_tips(cx, cz)
+                .iter()
+                .any(|&(tx, tz)| pad.contains(tx, tz))
     })
 }
 
@@ -9865,17 +9978,24 @@ pub(crate) fn paint_wind_sails(occ: &mut Occupancy, lots: &[Lot]) {
         let (cx, cz) = lot.rect.center();
         reserve_sail_disc(occ, cx, cz, lot.rect);
         for (sx, sz) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
+            occupy_sail_tip(
+                occ,
+                lots,
+                lot,
+                cx + sx * MILL_BLADE_LEN,
+                cz + sz * MILL_BLADE_LEN,
+            );
             for dist in 1..=MILL_BLADE_LEN {
                 let x = cx + sx * dist;
                 let z = cz + sz * dist;
                 let stitch_z = cz + sz * (dist - 1);
                 if !lot.rect.contains(x, z) && crate::stamp::mill_owns_sail(lots, lot, x, z) {
-                    occupy_sail(occ, x, z);
+                    occupy_sail_owned(occ, lots, lot, x, z);
                 }
                 if !lot.rect.contains(x, stitch_z)
                     && crate::stamp::mill_owns_sail(lots, lot, x, stitch_z)
                 {
-                    occupy_sail(occ, x, stitch_z);
+                    occupy_sail_owned(occ, lots, lot, x, stitch_z);
                 }
             }
         }
@@ -9883,11 +10003,28 @@ pub(crate) fn paint_wind_sails(occ: &mut Occupancy, lots: &[Lot]) {
 }
 
 fn occupy_sail(occ: &mut Occupancy, x: i32, z: i32) -> bool {
+    if occ.kind(x, z) == CellKind::WindSail {
+        return true;
+    }
     if mill_keepout(occ.kind(x, z), occ.lot(x, z), None) {
         return false;
     }
     occ.set(x, z, CellKind::WindSail, true);
     true
+}
+
+fn occupy_sail_owned(occ: &mut Occupancy, lots: &[Lot], mill: &Lot, x: i32, z: i32) -> bool {
+    if lots
+        .iter()
+        .any(|lot| lot.id != mill.id && lot.rect.inflate(1).contains(x, z))
+    {
+        return false;
+    }
+    occupy_sail(occ, x, z)
+}
+
+fn occupy_sail_tip(occ: &mut Occupancy, lots: &[Lot], mill: &Lot, x: i32, z: i32) {
+    let _ = occupy_sail_owned(occ, lots, mill, x, z);
 }
 
 fn place_hero(
@@ -11429,9 +11566,15 @@ pub(crate) fn try_lot(
                         | CellKind::Maypole
                         | CellKind::MarketCross
                         | CellKind::Pillory
+                        | CellKind::Gallows
+                        | CellKind::StandingStone
                         | CellKind::Ropewalk
                         | CellKind::Slipway
                         | CellKind::Sawpit
+                        | CellKind::Ruin
+                        | CellKind::Palisade
+                        | CellKind::PalisadeWalk
+                        | CellKind::PalisadeGate
                         | CellKind::Ship
                         | CellKind::TourneyList
                         | CellKind::TourneyStand
@@ -11527,9 +11670,15 @@ pub(crate) fn force_lot(
                         | CellKind::Maypole
                         | CellKind::MarketCross
                         | CellKind::Pillory
+                        | CellKind::Gallows
+                        | CellKind::StandingStone
                         | CellKind::Ropewalk
                         | CellKind::Slipway
                         | CellKind::Sawpit
+                        | CellKind::Ruin
+                        | CellKind::Palisade
+                        | CellKind::PalisadeWalk
+                        | CellKind::PalisadeGate
                         | CellKind::Burnt
                         | CellKind::Breakwater
                         | CellKind::SiegeTrench
@@ -11595,6 +11744,48 @@ fn paint_eaves(occ: &mut Occupancy, rect: Rect) {
             }
         }
     }
+}
+
+fn near_settlement(occ: &Occupancy, rect: Rect, gap: i32) -> bool {
+    let pad = rect.inflate(gap);
+    let min_x = pad.min_x.max(occ.bounds.min_x);
+    let max_x = pad.max_x.min(occ.bounds.max_x);
+    let min_z = pad.min_z.max(occ.bounds.min_z);
+    let max_z = pad.max_z.min(occ.bounds.max_z);
+    let mut poi = 0u32;
+    let mut z = min_z;
+    while z <= max_z {
+        let mut x = min_x;
+        while x <= max_x {
+            match occ.kind(x, z) {
+                CellKind::Palisade
+                | CellKind::PalisadeGate
+                | CellKind::PalisadeWalk
+                | CellKind::Tent
+                | CellKind::WarTent
+                | CellKind::Cage
+                | CellKind::Ruin
+                | CellKind::WatchPost
+                | CellKind::Beacon
+                | CellKind::Gallows
+                | CellKind::StandingStone
+                | CellKind::Lighthouse
+                | CellKind::FortressWall
+                | CellKind::SiegeTreb
+                | CellKind::SiegeRam => poi += 1,
+                _ => {}
+            }
+            // Hinterland camps and ruins must not stack. The walled town is
+            // already excluded by keep-out; counting its curtain or lots here
+            // starved every nearby mill, chapel and quay.
+            if poi >= 8 {
+                return true;
+            }
+            x += 4;
+        }
+        z += 4;
+    }
+    false
 }
 
 fn site_ok(occ: &Occupancy, grid: &HeightGrid, rect: Rect, max_relief: i32) -> bool {

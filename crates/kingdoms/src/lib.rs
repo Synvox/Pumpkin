@@ -69,6 +69,7 @@ pub mod ram;
 pub mod render;
 pub mod repair;
 pub mod rng;
+pub mod roads;
 pub mod roles;
 pub mod scene;
 pub mod scenes;
@@ -94,6 +95,7 @@ pub use info::{
 };
 pub use plan::{plan_at, plan_from_cache};
 pub use raid::{RaidSide, RaidSpec};
+pub use roads::{RoadWalkReport, check_plan_roads, check_plan_roads_with};
 pub use roles::VillagerRole;
 pub use scene::{TownInfoScene, TownScene};
 pub use scenes::{Scene, SceneKind};
