@@ -344,7 +344,6 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
                 }
             }
             SceneKind::Watchtower
-            | SceneKind::MountainFortress
             | SceneKind::HermitTower
             | SceneKind::BanditHideout
             | SceneKind::CastleRuin
@@ -389,6 +388,25 @@ fn collect_spawns(plan: &TownPlan) -> Vec<SpawnPoint> {
             | SceneKind::CathedralCity => {
                 let (cx, cz) = scene.rect.center();
                 spawns.push(at(SpawnRole::GuardPost, cx, cz));
+            }
+            SceneKind::MountainFortress => {
+                if let Some(layout) = crate::fortress::layout_for_plan(
+                    plan,
+                    scene.rect.center().0,
+                    scene.rect.center().1,
+                ) {
+                    spawns.push(at(SpawnRole::GuardPost, layout.keep.cx, layout.keep.cz));
+                    spawns.push(at(SpawnRole::GuardPost, layout.gate.0, layout.gate.1));
+                    spawns.push(at(SpawnRole::RallyKeep, layout.keep.cx, layout.keep.cz));
+                    spawns.push(at(SpawnRole::Flag, layout.flag.0, layout.flag.1));
+                    spawns.push(at(SpawnRole::Gate, layout.gate.0, layout.gate.1));
+                    for tower in &layout.towers {
+                        spawns.push(at(SpawnRole::GuardPost, tower.cx, tower.cz));
+                    }
+                } else {
+                    let (cx, cz) = scene.rect.center();
+                    spawns.push(at(SpawnRole::GuardPost, cx, cz));
+                }
             }
             _ => {}
         }

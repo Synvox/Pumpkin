@@ -358,6 +358,44 @@ pub fn furnish_barracks(
     let _ = palette;
 }
 
+/// Armoury: weapon racks, chests, grindstone and anvil.
+pub fn furnish_armoury(
+    sink: &mut impl BlockSink,
+    rect: Rect,
+    x: i32,
+    floor: i32,
+    z: i32,
+    roof_y: i32,
+    palette: &Palette,
+) {
+    if rect.on_edge(x, z) {
+        if !gable_door_at(rect, x, z) {
+            decorate_wall(sink, rect, x, floor, z, false);
+        }
+        return;
+    }
+    let lx = x - rect.min_x;
+    let lz = z - rect.min_z;
+    if lz == 1 && lx % 2 == 1 {
+        sink.put(x, floor + 1, z, Block::IRON_BARS.default_state);
+        sink.put(x, floor + 2, z, Block::IRON_BARS.default_state);
+    } else if lx == 1 && lz == 2 {
+        sink.put(x, floor + 1, z, Block::ANVIL.default_state);
+    } else if lx == 1 && lz == 3 {
+        sink.put(x, floor + 1, z, Block::GRINDSTONE.default_state);
+    } else if lx == 1 && lz == 4 {
+        sink.put(x, floor + 1, z, Block::SMITHING_TABLE.default_state);
+    } else if (lx + lz) % 5 == 0 {
+        sink.put(x, floor + 1, z, Block::CHEST.default_state);
+    } else if (lx + lz) % 4 == 1 {
+        sink.put(x, floor + 1, z, Block::BARREL.default_state);
+    }
+    if light_here(x, z, 4) && roof_y >= floor + 4 {
+        hang_lantern(sink, x, (roof_y - 2).max(floor + 3), z, roof_y);
+    }
+    let _ = palette;
+}
+
 /// Stables: stalls, hay, troughs. Front is fenced, not open air.
 pub fn furnish_stables(
     sink: &mut impl BlockSink,

@@ -26,7 +26,7 @@ use pumpkin_kingdoms::marker;
 use pumpkin_kingdoms::plan::{TownPlan, plan_for, plan_from_cache};
 use pumpkin_kingdoms::render::{
     overview_bounds, write_planner_renders, write_region_renders, write_renders,
-    write_round37b_renders, write_round38_renders,
+    write_round37b_renders, write_round38_renders, write_round39_renders,
 };
 use pumpkin_kingdoms::scenes::SceneKind;
 use pumpkin_kingdoms::stamp::{MARKER_FLOOR, VolumeSink, fill_volume};
@@ -225,6 +225,10 @@ fn render_one(
         }
         if let Err(error) = write_round38_renders(&plan_a, &vol_a, out_dir, "round38") {
             eprintln!("round38 render failed: {error}");
+            return false;
+        }
+        if let Err(error) = write_round39_renders(&plan_a, &vol_a, out_dir, "round39") {
+            eprintln!("round39 render failed: {error}");
             return false;
         }
     }

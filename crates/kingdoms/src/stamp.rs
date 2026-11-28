@@ -654,22 +654,81 @@ pub fn stamp_column(
         }
         CellKind::Lychgate => place_lychgate(sink, plan, x, ground, z, &palette),
         CellKind::FortressWall => {
-            place_curtain(sink, plan, x, floor, ground, z, &palette, 8, true);
+            place_curtain(sink, plan, x, floor, ground, z, &palette, 10, true);
         }
         CellKind::FortressKeep => {
-            let rect = blob_of(plan, x, z, CellKind::FortressKeep);
-            let mut keep_floor = ridge_floor(plan, rect);
-            if plan.has_scene(x, z, crate::scenes::SceneKind::Manor) {
-                keep_floor += 5;
-            }
-            place_gabled(sink, rect, x, keep_floor, ground, z, &palette, 10, true);
-            let (roof_y, _) = gable_roof_y(rect, x, z, keep_floor + 10, 1);
-            interior::furnish_hall(sink, rect, x, keep_floor, z, roof_y, &palette);
+            place_fortress_keep(sink, plan, x, floor, ground, z, &palette);
         }
         CellKind::FortressTower => {
             place_fortress_tower(sink, plan, x, floor, ground, z, &palette);
         }
         CellKind::FortressCourt => place_court(sink, x, ground, z, &palette),
+        CellKind::FortressGate => {
+            place_fortress_gatehouse(sink, plan, x, floor, ground, z, &palette);
+        }
+        CellKind::FortressHall => {
+            place_fortress_room(
+                sink,
+                plan,
+                x,
+                ground,
+                z,
+                &palette,
+                CellKind::FortressHall,
+                10,
+            );
+        }
+        CellKind::FortressChapel => {
+            place_fortress_room(
+                sink,
+                plan,
+                x,
+                ground,
+                z,
+                &palette,
+                CellKind::FortressChapel,
+                8,
+            );
+        }
+        CellKind::FortressKitchen => {
+            place_fortress_room(
+                sink,
+                plan,
+                x,
+                ground,
+                z,
+                &palette,
+                CellKind::FortressKitchen,
+                6,
+            );
+        }
+        CellKind::FortressBarracks => {
+            place_fortress_room(
+                sink,
+                plan,
+                x,
+                ground,
+                z,
+                &palette,
+                CellKind::FortressBarracks,
+                7,
+            );
+        }
+        CellKind::FortressArmoury => {
+            place_fortress_room(
+                sink,
+                plan,
+                x,
+                ground,
+                z,
+                &palette,
+                CellKind::FortressArmoury,
+                7,
+            );
+        }
+        CellKind::FortressBarbican => {
+            place_fortress_barbican(sink, plan, x, floor, ground, z, &palette);
+        }
         CellKind::CathedralNave
         | CellKind::CathedralTransept
         | CellKind::CathedralChoir
@@ -737,6 +796,7 @@ pub fn stamp_column(
         CellKind::Sawpit => place_sawpit(sink, plan, x, ground, z, &palette),
     }
     apply_column_damage(sink, plan, x, z, kind, floor, ground, &palette);
+    carve_fortress_mine(sink, plan, x, ground, z, &palette);
     // Harbour cranes used to punch mill walls. Restamp the mill envelope on
     // any lot cell that occupancy overwrote, except the wheel itself and
     // harbour hulls that later claimed the same water.
@@ -2822,6 +2882,190 @@ fn place_lychgate(
     sink.put(x, ground + 5, z, palette.roof_slab);
 }
 
+fn place_fortress_keep(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    _floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    if let Some(layout) = crate::fortress::layout_for_plan(plan, x, z)
+        && layout.keep.contains(x, z)
+    {
+        place_shaped_tower(sink, plan, layout.keep, x, ground, z, palette);
+        return;
+    }
+    let rect = blob_of(plan, x, z, CellKind::FortressKeep);
+    let mut keep_floor = ridge_floor(plan, rect);
+    if plan.has_scene(x, z, crate::scenes::SceneKind::Manor) {
+        keep_floor += 5;
+    }
+    place_gabled(sink, rect, x, keep_floor, ground, z, palette, 10, true);
+    let (roof_y, _) = gable_roof_y(rect, x, z, keep_floor + 10, 1);
+    interior::furnish_hall(sink, rect, x, keep_floor, z, roof_y, palette);
+}
+
+fn place_fortress_room(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+    kind: CellKind,
+    wall_h: i32,
+) {
+    let rect = blob_of(plan, x, z, kind);
+    let floor = ridge_floor(plan, rect);
+    place_gabled(sink, rect, x, floor, ground, z, palette, wall_h, true);
+    let (roof_y, _) = gable_roof_y(rect, x, z, floor + wall_h, 1);
+    match kind {
+        CellKind::FortressHall => {
+            interior::furnish_hall(sink, rect, x, floor, z, roof_y, palette);
+        }
+        CellKind::FortressChapel => {
+            interior::furnish_chapel(sink, rect, x, floor, z, roof_y, palette, true);
+        }
+        CellKind::FortressKitchen => {
+            interior::furnish_kitchen(sink, rect, x, floor, z, roof_y, palette);
+        }
+        CellKind::FortressBarracks => {
+            interior::furnish_barracks(sink, rect, x, floor, z, roof_y, palette);
+        }
+        CellKind::FortressArmoury => {
+            interior::furnish_armoury(sink, rect, x, floor, z, roof_y, palette);
+        }
+        _ => {}
+    }
+}
+
+fn place_fortress_gatehouse(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    foundation(sink, x, floor, ground, z, palette);
+    let Some(layout) = crate::fortress::layout_for_plan(plan, x, z) else {
+        place_curtain(sink, plan, x, floor, ground, z, palette, 12, true);
+        return;
+    };
+    let (cx, cz) = layout.gate;
+    let passage = match layout.gate_dir {
+        Dir::North | Dir::South => (x - cx).abs() <= 1,
+        Dir::East | Dir::West => (z - cz).abs() <= 1,
+    };
+    if passage {
+        sink.put(x, floor, z, palette.path);
+        clear_above(sink, x, floor + 1, floor + 4, z);
+        sink.put(x, floor + 1, z, Block::IRON_BARS.default_state);
+        sink.put(x, floor + 2, z, Block::IRON_BARS.default_state);
+        sink.put(x, floor + 3, z, Block::IRON_BARS.default_state);
+        sink.put(x, floor + 4, z, Block::IRON_BARS.default_state);
+        sink.put(x, floor + 5, z, palette.masonry(2));
+        sink.put(x, floor + 6, z, palette.planks);
+        interior::furnish_winch(sink, x, floor, z, x == cx && z == cz);
+        sink.put(x, floor + 11, z, palette.planks);
+        sink.put(x, floor + 12, z, palette.masonry(2));
+        sink.put(x, floor + 13, z, palette.brick_wall);
+        return;
+    }
+    for y in floor..=floor + 12 {
+        sink.put(x, y, z, palette.masonry(((x + y) as u8) & 15));
+    }
+    if ((x + z) & 1) == 0 {
+        sink.put(x, floor + 13, z, palette.masonry(1));
+        sink.put(x, floor + 14, z, palette.brick_wall);
+    }
+}
+
+fn place_fortress_barbican(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    floor: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    if let Some(layout) = crate::fortress::layout_for_plan(plan, x, z) {
+        let spec = TowerSpec {
+            cx: layout.barbican.center().0,
+            cz: layout.barbican.center().1,
+            radius: 4,
+            height: 12,
+            shape: TowerShape::DShape {
+                flat: layout.gate_dir.opposite(),
+            },
+            roof: RoofKind::Crenellated,
+            inner: false,
+        };
+        if spec.contains(x, z) {
+            place_shaped_tower(sink, plan, spec, x, ground, z, palette);
+            return;
+        }
+    }
+    foundation(sink, x, floor, ground, z, palette);
+    for y in floor..=floor + 8 {
+        sink.put(x, y, z, palette.masonry(3));
+    }
+    if ((x + z) & 1) == 0 {
+        sink.put(x, floor + 9, z, palette.brick_wall);
+    }
+}
+
+fn carve_fortress_mine(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let Some(layout) = crate::fortress::layout_for_plan(plan, x, z) else {
+        return;
+    };
+    if !layout.tunnel_at(x, z) {
+        return;
+    }
+    let floor = layout.tunnel_y.min(ground - 1).max(sink.floor_min() + 4);
+    let roof = floor + 3;
+    sink.put(x, floor, z, palette.cobble);
+    clear_above(sink, x, floor + 1, roof, z);
+    sink.put(x, roof, z, palette.andesite);
+    let edge = Dir::ALL
+        .iter()
+        .any(|dir| !layout.tunnel_at(x + dir.dx(), z + dir.dz()));
+    if edge {
+        sink.put(x, floor + 1, z, Block::OAK_LOG.default_state);
+        sink.put(x, floor + 2, z, Block::OAK_LOG.default_state);
+        let ore = match (x + z).rem_euclid(7) {
+            0 => Block::IRON_ORE.default_state,
+            1 => Block::COPPER_ORE.default_state,
+            2 => Block::COAL_ORE.default_state,
+            3 => Block::DEEPSLATE_IRON_ORE.default_state,
+            _ => palette.andesite,
+        };
+        if (x + z).rem_euclid(2) == 0 {
+            sink.put(x, floor + 1, z, ore);
+        }
+    } else {
+        sink.put(x, floor + 1, z, Block::RAIL.default_state);
+        if (x + z).rem_euclid(6) == 0 {
+            sink.put(x, roof, z, Block::LANTERN.default_state);
+        }
+        if (x + z).rem_euclid(8) == 0 {
+            sink.put(x, floor + 1, z, Block::OAK_TRAPDOOR.default_state);
+            sink.put(x, floor + 2, z, Block::CHEST.default_state);
+        }
+    }
+}
+
 fn place_fortress_tower(
     sink: &mut impl BlockSink,
     plan: &TownPlan,
@@ -2831,6 +3075,12 @@ fn place_fortress_tower(
     z: i32,
     palette: &Palette,
 ) {
+    if let Some(layout) = crate::fortress::layout_for_plan(plan, x, z)
+        && let Some(crate::fortress::FortressFeature::Tower(spec)) = layout.feature_at(x, z)
+    {
+        place_shaped_tower(sink, plan, spec, x, ground, z, palette);
+        return;
+    }
     foundation(sink, x, floor, ground, z, palette);
     let rect = blob_of(plan, x, z, CellKind::FortressTower);
     let top = floor + 14;
@@ -5813,7 +6063,8 @@ fn clear_hill_above_roof(
 }
 
 fn place_flag_plinth(sink: &mut impl BlockSink, plan: &TownPlan, x: i32, ground: i32, z: i32) {
-    let (fx, fz) = plan.castle.flag;
+    let (fx, fz) =
+        crate::fortress::layout_for_plan(plan, x, z).map_or(plan.castle.flag, |layout| layout.flag);
     sink.put(x, ground, z, Block::STONE_BRICKS.default_state);
     clear_above(sink, x, ground + 1, ground + 12, z);
     if x == fx && z == fz {
@@ -5838,7 +6089,10 @@ fn place_flag_plinth(sink: &mut impl BlockSink, plan: &TownPlan, x: i32, ground:
 }
 
 fn flag_panel_axes(plan: &TownPlan, fx: i32, fz: i32) -> (i32, i32, i32, i32) {
-    let (kx, kz) = plan.castle.keep.center();
+    let (kx, kz) = crate::fortress::layout_for_plan(plan, fx, fz).map_or_else(
+        || plan.castle.keep.center(),
+        |layout| (layout.keep.cx, layout.keep.cz),
+    );
     let dx = (fx - kx).signum();
     let dz = (fz - kz).signum();
     if dx.abs() >= dz.abs() {
@@ -8918,11 +9172,50 @@ fn place_crane(
         place_quarry_crane(sink, plan, x, ground, z, palette);
         return;
     }
+    if crate::fortress::layout_for_plan(plan, x, z)
+        .is_some_and(|layout| layout.crane.contains(x, z))
+    {
+        place_mine_windlass(sink, plan, x, ground, z, palette);
+        return;
+    }
     if plan.has_scene(x, z, crate::scenes::SceneKind::Shipyard) {
         place_shipyard_crane(sink, plan, x, ground, z, sea, palette);
         return;
     }
     place_harbour_jib_crane(sink, plan, x, ground, z, sea, palette);
+}
+
+fn place_mine_windlass(
+    sink: &mut impl BlockSink,
+    plan: &TownPlan,
+    x: i32,
+    ground: i32,
+    z: i32,
+    palette: &Palette,
+) {
+    let rect = blob_of(plan, x, z, CellKind::Crane);
+    let (cx, cz) = rect.center();
+    sink.put(x, ground, z, palette.cobble);
+    clear_above(sink, x, ground + 1, ground + 12, z);
+    if x == cx && z == cz {
+        for y in ground + 1..=ground + 8 {
+            sink.put(x, y, z, Block::OAK_LOG.default_state);
+        }
+        sink.put(x, ground + 9, z, Block::OAK_FENCE.default_state);
+        sink.put(x, ground + 10, z, Block::LANTERN.default_state);
+        return;
+    }
+    if (x - cx).abs() + (z - cz).abs() == 1 {
+        sink.put(x, ground + 6, z, Block::OAK_LOG.default_state);
+        sink.put(x, ground + 5, z, Block::OAK_FENCE.default_state);
+        sink.put(x, ground + 4, z, Block::OAK_FENCE.default_state);
+        sink.put(x, ground + 3, z, Block::OAK_TRAPDOOR.default_state);
+        sink.put(x, ground + 2, z, Block::BARREL.default_state);
+        return;
+    }
+    if rect.on_edge(x, z) {
+        sink.put(x, ground + 1, z, Block::OAK_FENCE.default_state);
+    }
 }
 
 fn harbour_crane_boom_dir(plan: &TownPlan, x: i32, z: i32) -> Dir {

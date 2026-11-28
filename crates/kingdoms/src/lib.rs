@@ -50,6 +50,7 @@ pub mod engines;
 pub mod events;
 pub mod faction;
 pub mod flow;
+pub mod fortress;
 pub mod geom;
 pub mod goals;
 pub mod height;

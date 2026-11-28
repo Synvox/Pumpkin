@@ -259,6 +259,16 @@ pub fn place_scenes(
         palette,
         &mut scenes,
     );
+    crate::fortress::place_mountain_fortress(
+        occ,
+        grid,
+        search,
+        town,
+        keep_out,
+        lots,
+        seed,
+        &mut scenes,
+    );
     place_hamlet(
         occ,
         grid,
@@ -336,6 +346,7 @@ pub fn place_scenes(
     place_frontier(occ, grid, search, town, keep_out, origin, rng, &mut scenes);
     place_riverside(occ, grid, search, town, keep_out, lots, seed, &mut scenes);
     paint_monastery_switchback(occ, grid, town, &scenes);
+    crate::fortress::paint_fortress_switchback(occ, grid, town, &scenes);
     place_manor(occ, grid, search, town, keep_out, lots, seed, &mut scenes);
     place_hunting_lodge(occ, grid, search, town, keep_out, lots, seed, &mut scenes);
     place_vineyard(occ, grid, search, town, keep_out, lots, seed, &mut scenes);
@@ -1677,7 +1688,7 @@ fn place_quarry(
     });
 }
 
-fn mill_sail_keepout(lots: &[Lot], rect: Rect) -> bool {
+pub(crate) fn mill_sail_keepout(lots: &[Lot], rect: Rect) -> bool {
     windmill_hits(lots, rect)
 }
 
@@ -9837,6 +9848,8 @@ fn mill_crop_keepout(scenes: &[Scene], cx: i32, cz: i32) -> bool {
                 | SceneKind::RuinedCastle
                 | SceneKind::Harbour
                 | SceneKind::CathedralCity
+                | SceneKind::MountainFortress
+                | SceneKind::Mine
         ) && mill_disc_hits_rect(cx, cz, scene.rect.inflate(WAR_SCENE_CROP))
     })
 }
@@ -9918,6 +9931,15 @@ fn mill_keepout(kind: CellKind, lot: u16, skip: Option<u16>) -> bool {
             | CellKind::CampCourt
             | CellKind::FortressWall
             | CellKind::FortressKeep
+            | CellKind::FortressTower
+            | CellKind::FortressCourt
+            | CellKind::FortressGate
+            | CellKind::FortressHall
+            | CellKind::FortressChapel
+            | CellKind::FortressKitchen
+            | CellKind::FortressBarracks
+            | CellKind::FortressArmoury
+            | CellKind::FortressBarbican
             | CellKind::WatchPost
             | CellKind::Ford
             | CellKind::Weir
@@ -10062,9 +10084,6 @@ fn place_hero(
     place_cathedral_district(
         occ, grid, town, keep, search, lots, seed, capital, palette, rng, scenes,
     );
-    if let Some(yard) = find_peak_site(occ, grid, search, town, keep, 28, 24, 0, rng) {
-        paint_mountain_fortress(occ, yard, scenes);
-    }
 }
 
 fn place_cathedral_district(
@@ -10582,7 +10601,7 @@ fn paint_cathedral_city_lots(
     }
 }
 
-fn evict_lots_from(occ: &mut Occupancy, lots: &mut Vec<Lot>, rect: Rect) {
+pub(crate) fn evict_lots_from(occ: &mut Occupancy, lots: &mut Vec<Lot>, rect: Rect) {
     let ids: Vec<u16> = lots
         .iter()
         .filter(|lot| lot.rect.intersects(rect))
@@ -11291,56 +11310,6 @@ fn paint_romanesque_church(occ: &mut Occupancy, yard: Rect) {
     occ.set(west.center().0, west.center().1, CellKind::Fountain, true);
 }
 
-fn paint_mountain_fortress(occ: &mut Occupancy, yard: Rect, scenes: &mut Vec<Scene>) {
-    occ.fill(yard, CellKind::FortressWall, false);
-    occ.fill(yard.deflate(1), CellKind::FortressCourt, true);
-    let keep = Rect::new(
-        yard.min_x + 9,
-        yard.min_z + 7,
-        yard.min_x + 18,
-        yard.min_z + 16,
-    );
-    occ.fill(keep, CellKind::FortressKeep, true);
-    let towers = [
-        Rect::new(
-            yard.min_x + 1,
-            yard.min_z + 1,
-            yard.min_x + 5,
-            yard.min_z + 5,
-        ),
-        Rect::new(
-            yard.max_x - 5,
-            yard.min_z + 1,
-            yard.max_x - 1,
-            yard.min_z + 5,
-        ),
-        Rect::new(
-            yard.min_x + 1,
-            yard.max_z - 5,
-            yard.min_x + 5,
-            yard.max_z - 1,
-        ),
-        Rect::new(
-            yard.max_x - 5,
-            yard.max_z - 5,
-            yard.max_x - 1,
-            yard.max_z - 1,
-        ),
-    ];
-    for tower in towers {
-        occ.fill(tower, CellKind::FortressTower, true);
-    }
-    let (cx, _) = yard.center();
-    for x in cx - 1..=cx + 1 {
-        occ.set(x, yard.max_z, CellKind::PalisadeGate, true);
-        occ.set(x, yard.max_z - 1, CellKind::FortressCourt, true);
-    }
-    scenes.push(Scene {
-        kind: SceneKind::MountainFortress,
-        rect: yard,
-    });
-}
-
 fn place_mine(
     occ: &mut Occupancy,
     grid: &HeightGrid,
@@ -11350,6 +11319,9 @@ fn place_mine(
     rng: &mut TownRng,
     scenes: &mut Vec<Scene>,
 ) {
+    if scenes.iter().any(|scene| scene.kind == SceneKind::Mine) {
+        return;
+    }
     let Some(yard) = find_peak_site(occ, grid, search, town, keep_out, 22, 16, 10, rng) else {
         return;
     };
@@ -18057,6 +18029,178 @@ mod tests {
             assert!(
                 max_y - min_y >= 2,
                 "cathedral city curtain should step with terrain lo={lo} hi={hi} wall={min_y}..{max_y}"
+            );
+        }
+    }
+
+    #[test]
+    fn round39_mountain_fortress_mine_and_switchback() {
+        let origin = town_in_cell(20_261_025, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            24,
+            16,
+        );
+        let plan = build_plan(20_261_025, origin, grid, PaletteKind::Oak);
+        let fortress = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == SceneKind::MountainFortress)
+            .unwrap_or_else(|| {
+                panic!(
+                    "mountain fortress missing in {:?}",
+                    plan.scenes.iter().map(|s| s.kind).collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            fortress.rect.width() >= 128 && fortress.rect.depth() >= 128,
+            "fortress footprint {}x{}",
+            fortress.rect.width(),
+            fortress.rect.depth()
+        );
+        assert!(
+            plan.scenes
+                .iter()
+                .any(|scene| scene.kind == SceneKind::Mine),
+            "working mine scene"
+        );
+        let mut wall = 0;
+        let mut keep = 0;
+        let mut hall = 0;
+        let mut chapel = 0;
+        let mut kitchen = 0;
+        let mut barracks = 0;
+        let mut armoury = 0;
+        let mut gate = 0;
+        let mut barbican = 0;
+        let mut tower = 0;
+        let mut flag = 0;
+        let mut adit = 0;
+        let mut rail = 0;
+        let mut spoil = 0;
+        let mut crane = 0;
+        let mut road = 0;
+        for z in plan.occ.bounds.min_z..=plan.occ.bounds.max_z {
+            for x in plan.occ.bounds.min_x..=plan.occ.bounds.max_x {
+                match plan.occ.kind(x, z) {
+                    CellKind::FortressWall => wall += 1,
+                    CellKind::FortressKeep => keep += 1,
+                    CellKind::FortressHall => hall += 1,
+                    CellKind::FortressChapel => chapel += 1,
+                    CellKind::FortressKitchen => kitchen += 1,
+                    CellKind::FortressBarracks => barracks += 1,
+                    CellKind::FortressArmoury => armoury += 1,
+                    CellKind::FortressGate => gate += 1,
+                    CellKind::FortressBarbican => barbican += 1,
+                    CellKind::FortressTower => tower += 1,
+                    CellKind::FlagPlinth if fortress.rect.contains(x, z) => flag += 1,
+                    CellKind::MineAdit => adit += 1,
+                    CellKind::MineRail => rail += 1,
+                    CellKind::MineSpoil => spoil += 1,
+                    CellKind::Crane if fortress.rect.inflate(32).contains(x, z) => crane += 1,
+                    CellKind::Road
+                    | CellKind::RoadStairN
+                    | CellKind::RoadStairS
+                    | CellKind::RoadStairE
+                    | CellKind::RoadStairW
+                        if fortress.rect.inflate(64).contains(x, z) =>
+                    {
+                        road += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(wall >= 80, "ridge curtain {wall}");
+        assert!(keep >= 40, "keep {keep}");
+        assert!(hall >= 40, "great hall {hall}");
+        assert!(chapel >= 20, "chapel {chapel}");
+        assert!(kitchen >= 16, "kitchen {kitchen}");
+        assert!(barracks >= 20, "barracks {barracks}");
+        assert!(armoury >= 16, "armoury {armoury}");
+        assert!(gate >= 6, "gatehouse {gate}");
+        assert!(barbican >= 8, "barbican {barbican}");
+        assert!(tower >= 24, "towers {tower}");
+        assert!(flag >= 1, "keep flag plinth {flag}");
+        assert!(adit >= 8, "mine adit {adit}");
+        assert!(rail >= 6, "mine rail {rail}");
+        assert!(spoil >= 8, "spoil {spoil}");
+        assert!(crane >= 4, "mine crane {crane}");
+        assert!(road >= 20, "switchback {road}");
+        let info = TownInfo::from_plan(&plan);
+        assert!(
+            info.spawns
+                .iter()
+                .any(|s| s.role == SpawnRole::GuardPost && fortress.rect.contains(s.x, s.z)),
+            "fortress guard posts"
+        );
+        assert!(
+            info.spawns
+                .iter()
+                .any(|s| s.role == SpawnRole::Flag && fortress.rect.contains(s.x, s.z)),
+            "fortress flag spawn"
+        );
+        let volume = crate::stamp::fill_volume(&plan);
+        let check = crate::watertight::check_town(&plan, &volume);
+        let fails: Vec<_> = check
+            .failures()
+            .into_iter()
+            .filter(|b| b.name.contains("fortress"))
+            .map(|b| {
+                format!(
+                    "{} leak={:?} float={} sky={} ridge={}",
+                    b.name, b.leak, b.floating_roofs, b.sky_open, b.open_ridges
+                )
+            })
+            .collect();
+        assert!(fails.is_empty(), "enclosed fortress rooms: {fails:?}");
+        let floating = crate::watertight::check_floating_fragments(&plan, &volume);
+        let fortress_float: Vec<_> = floating
+            .iter()
+            .filter(|line| line.contains("fortress") || line.contains("MountainFortress"))
+            .collect();
+        assert!(
+            fortress_float.is_empty(),
+            "floating fortress parts: {fortress_float:?}"
+        );
+        let walk = crate::roads::check_plan_roads(&plan);
+        assert!(
+            walk.local_ok(),
+            "fortress switchback should stay on the road network: {}",
+            walk.render()
+        );
+        for dir in crate::render::round39_artifact_dirs() {
+            crate::render::write_round39_renders(&plan, &volume, &dir, "round39")
+                .expect("round39 synthetic renders");
+        }
+        let (lo, hi) = plan.heights.range(
+            fortress.rect.min_x,
+            fortress.rect.min_z,
+            fortress.rect.max_x,
+            fortress.rect.max_z,
+        );
+        let mut wall_top = Vec::new();
+        for z in fortress.rect.min_z..=fortress.rect.max_z {
+            for x in fortress.rect.min_x..=fortress.rect.max_x {
+                if plan.occ.kind(x, z) != CellKind::FortressWall {
+                    continue;
+                }
+                if let Some((top, _)) = volume.top(x, z) {
+                    wall_top.push(top);
+                }
+            }
+        }
+        if hi - lo >= 6 && wall_top.len() >= 8 {
+            let min_y = *wall_top.iter().min().unwrap_or(&0);
+            let max_y = *wall_top.iter().max().unwrap_or(&0);
+            assert!(
+                max_y - min_y >= 2,
+                "fortress curtain should step with terrain lo={lo} hi={hi} wall={min_y}..{max_y}"
             );
         }
     }

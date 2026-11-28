@@ -990,6 +990,63 @@ pub fn check_town(plan: &TownPlan, volume: &VolumeSink) -> TownCheck {
         volume,
         plan,
     );
+    for (name, kind) in [
+        ("fortress-hall", CellKind::FortressHall),
+        ("fortress-chapel", CellKind::FortressChapel),
+        ("fortress-kitchen", CellKind::FortressKitchen),
+        ("fortress-barracks", CellKind::FortressBarracks),
+        ("fortress-armoury", CellKind::FortressArmoury),
+    ] {
+        for (i, cols) in collect_kind_blobs(plan, kind).into_iter().enumerate() {
+            if cols.len() < 8 {
+                continue;
+            }
+            buildings.push(check_columns(
+                &format!("{name}{i}"),
+                cols,
+                volume,
+                plan,
+                true,
+            ));
+        }
+    }
+    if let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::MountainFortress)
+        && let Some(layout) =
+            crate::fortress::layout_for_plan(plan, scene.rect.center().0, scene.rect.center().1)
+    {
+        for (i, spec) in layout.towers.iter().enumerate() {
+            let cols = collect_spec(plan, CellKind::FortressTower, |x, z| {
+                matches!(
+                    layout.feature_at(x, z),
+                    Some(crate::fortress::FortressFeature::Tower(found))
+                        if found.cx == spec.cx && found.cz == spec.cz
+                )
+            });
+            if cols.len() < 8 {
+                continue;
+            }
+            buildings.push(check_columns(
+                &format!("fortress-tower{i}"),
+                cols,
+                volume,
+                plan,
+                !matches!(spec.roof, crate::castle::RoofKind::Crenellated),
+            ));
+        }
+        let barbican_cols = collect_kind(plan, CellKind::FortressBarbican, plan.bounds);
+        if barbican_cols.len() >= 8 {
+            buildings.push(check_columns(
+                "fortress-barbican",
+                barbican_cols,
+                volume,
+                plan,
+                false,
+            ));
+        }
+    }
     push_if_any(
         &mut buildings,
         "cathedral",
@@ -1486,6 +1543,13 @@ fn is_exterior(kind: CellKind) -> bool {
             | CellKind::FortressKeep
             | CellKind::FortressTower
             | CellKind::FortressWall
+            | CellKind::FortressGate
+            | CellKind::FortressHall
+            | CellKind::FortressChapel
+            | CellKind::FortressKitchen
+            | CellKind::FortressBarracks
+            | CellKind::FortressArmoury
+            | CellKind::FortressBarbican
             | CellKind::CathedralNave
             | CellKind::CathedralTransept
             | CellKind::CathedralChoir
@@ -3237,6 +3301,120 @@ mod tests {
             "detached jib should fail:\n{}",
             after.join("\n")
         );
+    }
+
+    #[test]
+    fn round39_fortress_gate_renders_for_a_joined_client() {
+        use pumpkin_data::dimension::Dimension;
+        use pumpkin_util::world_seed::Seed;
+        use pumpkin_world::generation::get_world_gen;
+        use std::sync::Arc;
+
+        let seed = 20_261_025u64;
+        let boxed = get_world_gen(
+            Seed(seed),
+            Dimension::OVERWORLD,
+            false,
+            Vec::new(),
+            String::new(),
+        );
+        let world_gen = Arc::from(boxed);
+        crate::height::register_world_gen(Arc::clone(&world_gen));
+        crate::marker::register_hooks(world_gen.extensions());
+        let plan = crate::plan::plan_for(seed, 0, 0, &world_gen);
+        let Some(scene) = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == crate::scenes::SceneKind::MountainFortress)
+        else {
+            panic!("mountain fortress missing on seed {seed} cell 0,0");
+        };
+        let layout =
+            crate::fortress::layout_for_plan(&plan, scene.rect.center().0, scene.rect.center().1)
+                .expect("fortress layout");
+        let (gx, gz) = layout.gate;
+        let region = Rect::new(gx - 24, gz - 24, gx + 24, gz + 24);
+        let volume = crate::chunk_fill::fill_volume_from_chunks_in(&plan, &world_gen, region);
+        let mut stone = 0;
+        let mut bars = 0;
+        let mut gate_cells = 0;
+        for z in gz - 6..=gz + 6 {
+            for x in gx - 6..=gx + 6 {
+                if plan.occ.kind(x, z) == CellKind::FortressGate {
+                    gate_cells += 1;
+                }
+                let Some((top, state)) = volume.top(x, z) else {
+                    continue;
+                };
+                let id = Block::from_state_id(state.id).id;
+                if id == Block::STONE_BRICKS.id
+                    || id == Block::COBBLESTONE.id
+                    || id == Block::ANDESITE.id
+                    || id == Block::MOSSY_STONE_BRICKS.id
+                    || id == Block::CRACKED_STONE_BRICKS.id
+                    || id == Block::DEEPSLATE_BRICKS.id
+                    || id == Block::TUFF.id
+                    || id == Block::IRON_BARS.id
+                    || id == Block::STONE_BRICK_WALL.id
+                    || id == Block::COBBLESTONE_WALL.id
+                    || id == Block::STONE_BRICK_STAIRS.id
+                    || id == Block::COBBLESTONE_STAIRS.id
+                {
+                    stone += 1;
+                }
+                let ground = plan.heights.height(x, z);
+                for y in ground..=top {
+                    if volume
+                        .get(x, y, z)
+                        .is_some_and(|s| Block::from_state_id(s.id).id == Block::IRON_BARS.id)
+                    {
+                        bars += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            stone >= 4,
+            "fortress gate should render masonry to a joined client, stone={stone}"
+        );
+        assert!(
+            gate_cells >= 4,
+            "gate approach occupancy should be a walkable passage, gate={gate_cells}"
+        );
+        assert!(
+            bars >= 1,
+            "gatehouse portcullis should render iron bars, bars={bars}"
+        );
+        let info = crate::info::TownInfo::from_plan(&plan);
+        let guards = info
+            .spawns
+            .iter()
+            .filter(|s| {
+                s.role == crate::info::SpawnRole::GuardPost && scene.rect.contains(s.x, s.z)
+            })
+            .count();
+        assert!(
+            guards >= 1,
+            "fortress soldiers need guard posts a client can see, guards={guards}"
+        );
+        let stamp = fill_volume(&plan);
+        let metrics = format!(
+            "seed={seed} fortress={}x{} gate={},{} keep={},{} mine={}x{} guards={guards} stone={stone} bars={bars} gate_cells={gate_cells}\n",
+            scene.rect.width(),
+            scene.rect.depth(),
+            gx,
+            gz,
+            layout.keep.cx,
+            layout.keep.cz,
+            layout.mine.width(),
+            layout.mine.depth(),
+        );
+        for dir in crate::render::round39_artifact_dirs() {
+            crate::render::write_round39_renders(&plan, &stamp, &dir, "round39")
+                .expect("round39 real-world renders");
+            std::fs::write(dir.join("round39-metrics.txt"), &metrics).expect("round39 metrics");
+        }
     }
 
     struct DamageGuard(String);
