@@ -104,6 +104,7 @@ struct Args {
     fight: bool,
     prove: bool,
     visibility: bool,
+    visibility_fortress: bool,
     kingdom: String,
 }
 
@@ -118,6 +119,7 @@ fn parse_args() -> Result<Args, String> {
     let mut fight = false;
     let mut prove = false;
     let mut visibility = false;
+    let mut visibility_fortress = false;
     let mut kingdom = "alder".to_owned();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -137,10 +139,11 @@ fn parse_args() -> Result<Args, String> {
             "--fight" => fight = true,
             "--prove" => prove = true,
             "--visibility" => visibility = true,
+            "--visibility-fortress" => visibility_fortress = true,
             "--kingdom" => kingdom = next("--kingdom")?,
             "-h" | "--help" => {
                 println!(
-                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command CMD]... [--fight|--prove|--visibility --kingdom alder]"
+                    "kingdoms-raid-bot --host 127.0.0.1:25565 --x X --y Y --z Z --seconds 180 [--command CMD]... [--fight|--prove|--visibility|--visibility-fortress --kingdom alder]"
                 );
                 std::process::exit(0);
             }
@@ -159,6 +162,7 @@ fn parse_args() -> Result<Args, String> {
         fight,
         prove,
         visibility,
+        visibility_fortress,
         kingdom,
     })
 }
@@ -196,10 +200,13 @@ struct Bot {
     death_events: u32,
     equipment: HashMap<i32, HashSet<String>>,
     seen_roles: HashSet<String>,
+    chunk_batches: u32,
     morale_events: u32,
     rout_events: u32,
     rally_events: u32,
     debug_morale: u32,
+    first_soldier_at: Option<Instant>,
+    watch_origin: Option<Instant>,
 }
 
 impl Bot {
@@ -266,10 +273,13 @@ impl Bot {
             death_events: 0,
             equipment: HashMap::new(),
             seen_roles: HashSet::new(),
+            chunk_batches: 0,
             morale_events: 0,
             rout_events: 0,
             rally_events: 0,
             debug_morale: 0,
+            first_soldier_at: None,
+            watch_origin: None,
         };
 
         bot.send_packet(&SHandShake {
@@ -447,6 +457,9 @@ impl Bot {
         let mob = SeenMob { kind, pos };
         if is_any_soldier_kind(kind) {
             self.seen_soldiers.insert(id);
+            if self.first_soldier_at.is_none() {
+                self.first_soldier_at = Some(Instant::now());
+            }
         }
         if is_engine_kind(kind) {
             self.seen_engines.insert(id);
@@ -582,6 +595,7 @@ impl Bot {
             })
             .await?;
         } else if pkt.id == batch_end_id {
+            self.chunk_batches += 1;
             // Vanilla acks every CChunkBatchEnd. Without this the server holds
             // in_flight_batches and never sends the front's chunks after teleport.
             self.send_packet(&SChunkBatch {
@@ -1215,6 +1229,62 @@ async fn prove_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<(), St
     Ok(())
 }
 
+fn vis_first_ms(bot: &Bot) -> u64 {
+    match (bot.watch_origin, bot.first_soldier_at) {
+        (Some(origin), Some(at)) => at.saturating_duration_since(origin).as_millis() as u64,
+        (Some(origin), None) => origin.elapsed().as_millis() as u64,
+        _ => 0,
+    }
+}
+
+async fn fortress_visibility_loop(bot: &mut Bot, seconds: u64) -> Result<bool, String> {
+    let wait = seconds.max(60);
+    println!(
+        "VIS-FORTRESS-JOIN pos={:.1},{:.1},{:.1}",
+        bot.position.x, bot.position.y, bot.position.z
+    );
+    let step = Vector3::new(bot.position.x + 1.0, bot.position.y, bot.position.z);
+    bot.move_to(step).await?;
+    let watch_start = Instant::now();
+    bot.watch_origin = Some(watch_start);
+    let deadline = watch_start + Duration::from_secs(wait);
+    let mut last_report = Instant::now();
+    let mut soldiers_at_60 = None;
+    while Instant::now() < deadline {
+        bot.pump(Duration::from_millis(200)).await?;
+        bot.move_to(bot.position).await?;
+        if soldiers_at_60.is_none() && watch_start.elapsed() >= Duration::from_secs(60) {
+            soldiers_at_60 = Some(bot.seen_soldiers.len());
+            println!("VIS-FORTRESS-SOLDIERS-60 n={}", bot.seen_soldiers.len());
+        }
+        if last_report.elapsed() >= Duration::from_secs(5) {
+            last_report = Instant::now();
+            println!(
+                "VIS-FORTRESS-SEEN soldiers={} chunks={} first_ms={} pos={:.1},{:.1},{:.1}",
+                bot.seen_soldiers.len(),
+                bot.chunk_batches,
+                vis_first_ms(bot),
+                bot.position.x,
+                bot.position.y,
+                bot.position.z
+            );
+        }
+    }
+    let soldiers_60 = soldiers_at_60.unwrap_or(bot.seen_soldiers.len());
+    let ok = bot.chunk_batches >= 1 && !bot.seen_soldiers.is_empty();
+    println!(
+        "VIS-FORTRESS-REPORT soldiers={} soldiers_60={} chunks={} first_ms={} pos={:.1},{:.1},{:.1} ok={ok}",
+        bot.seen_soldiers.len(),
+        soldiers_60,
+        bot.chunk_batches,
+        vis_first_ms(bot),
+        bot.position.x,
+        bot.position.y,
+        bot.position.z
+    );
+    Ok(ok)
+}
+
 async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<bool, String> {
     let wait = seconds.max(60);
     let spawn = bot.position;
@@ -1240,6 +1310,7 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
         }
     }
     let watch_start = Instant::now();
+    bot.watch_origin = Some(watch_start);
     let deadline = watch_start + Duration::from_secs(wait);
     let mut last_report = Instant::now();
     let mut soldiers_at_60 = None;
@@ -1253,7 +1324,7 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
         if last_report.elapsed() >= Duration::from_secs(5) {
             last_report = Instant::now();
             println!(
-                "VIS-SEEN soldiers={} live_h={} live_s={} engines={} dmg={} deaths={} moved={} roles={} rout={} rally={} debug={} pos={:.1},{:.1},{:.1}",
+                "VIS-SEEN soldiers={} live_h={} live_s={} engines={} dmg={} deaths={} moved={} roles={} rout={} rally={} debug={} first_ms={} pos={:.1},{:.1},{:.1}",
                 bot.seen_soldiers.len(),
                 bot.hostiles.len(),
                 bot.soldiers.len(),
@@ -1265,6 +1336,7 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
                 bot.rout_events,
                 bot.rally_events,
                 bot.debug_morale,
+                vis_first_ms(bot),
                 bot.position.x,
                 bot.position.y,
                 bot.position.z
@@ -1282,9 +1354,10 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
     roles.sort();
     println!("VIS-ROLES n={} list={}", roles.len(), roles.join(","));
     println!(
-        "VIS-REPORT soldiers={} soldiers_60={} engines={} damage={} deaths={} moved={} live_h={} live_s={} roles={} rout={} rally={} debug={} morale={} pos={:.1},{:.1},{:.1} ok={ok}",
+        "VIS-REPORT soldiers={} soldiers_60={} first_ms={} engines={} damage={} deaths={} moved={} live_h={} live_s={} roles={} rout={} rally={} debug={} morale={} pos={:.1},{:.1},{:.1} ok={ok}",
         bot.seen_soldiers.len(),
         soldiers_60,
+        vis_first_ms(bot),
         bot.seen_engines.len(),
         bot.damage_events,
         bot.death_events,
@@ -1346,6 +1419,28 @@ async fn main() -> ExitCode {
         }
         println!("done");
         return ExitCode::SUCCESS;
+    }
+    if args.visibility_fortress {
+        if let Err(err) = bot.move_to(stand).await {
+            eprintln!("move to fortress gate failed: {err}");
+            return ExitCode::from(1);
+        }
+        match fortress_visibility_loop(&mut bot, args.seconds).await {
+            Ok(true) => {
+                println!("done");
+                return ExitCode::SUCCESS;
+            }
+            Ok(false) => {
+                eprintln!(
+                    "fortress visibility check failed: need chunk batches and at least one soldier spawn at the gate"
+                );
+                return ExitCode::from(1);
+            }
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        }
     }
     if args.visibility {
         if let Err(err) = bot.move_to(stand).await {

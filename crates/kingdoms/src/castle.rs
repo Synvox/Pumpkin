@@ -1008,7 +1008,7 @@ fn barbican_spec(rect: Rect, dir: Dir) -> TowerSpec {
     }
 }
 
-fn fill_shape(occ: &mut Occupancy, spec: TowerSpec, kind: CellKind) {
+pub(crate) fn fill_shape(occ: &mut Occupancy, spec: TowerSpec, kind: CellKind) {
     fill_shape_except_keep(occ, spec, kind, &[]);
 }
 

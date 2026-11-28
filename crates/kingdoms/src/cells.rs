@@ -180,6 +180,20 @@ pub enum CellKind {
     Slipway,
     /// Sawpit beside a shipyard slip.
     Sawpit,
+    /// Mountain-fortress gatehouse passage (portcullis).
+    FortressGate,
+    /// Mountain-fortress great hall.
+    FortressHall,
+    /// Mountain-fortress chapel.
+    FortressChapel,
+    /// Mountain-fortress kitchen.
+    FortressKitchen,
+    /// Mountain-fortress barracks.
+    FortressBarracks,
+    /// Mountain-fortress armoury.
+    FortressArmoury,
+    /// Mountain-fortress barbican on the approach.
+    FortressBarbican,
 }
 
 impl CellKind {
@@ -202,6 +216,17 @@ impl CellKind {
                 | Self::CastleMoat
                 | Self::CastleInnerWall
                 | Self::FlagPlinth
+                | Self::FortressWall
+                | Self::FortressKeep
+                | Self::FortressTower
+                | Self::FortressCourt
+                | Self::FortressGate
+                | Self::FortressHall
+                | Self::FortressChapel
+                | Self::FortressKitchen
+                | Self::FortressBarracks
+                | Self::FortressArmoury
+                | Self::FortressBarbican
         )
     }
 
@@ -226,6 +251,7 @@ impl CellKind {
                 | Self::TownGate
                 | Self::CastleGate
                 | Self::PalisadeGate
+                | Self::FortressGate
                 | Self::Ford
         )
     }
@@ -263,6 +289,16 @@ impl CellKind {
                 | Self::CathedralTransept
                 | Self::CathedralChoir
                 | Self::CathedralTower
+                | Self::FortressWall
+                | Self::FortressKeep
+                | Self::FortressTower
+                | Self::FortressGate
+                | Self::FortressHall
+                | Self::FortressChapel
+                | Self::FortressKitchen
+                | Self::FortressBarracks
+                | Self::FortressArmoury
+                | Self::FortressBarbican
         )
     }
 }

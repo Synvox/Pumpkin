@@ -39,7 +39,7 @@ const HINTERLAND_PAD: i32 = 160;
 
 /// Disk snapshot format. Bump when plan or scene layout changes so files
 /// written by older code are not reused.
-pub const PLAN_CACHE_VERSION: u32 = 35;
+pub const PLAN_CACHE_VERSION: u32 = 37;
 
 #[derive(Serialize, Deserialize)]
 struct PlanCacheFile {
@@ -2163,6 +2163,7 @@ fn paint_poi_roads(
         SceneKind::RidgeMill,
         SceneKind::PilgrimChapel,
         SceneKind::CathedralCity,
+        SceneKind::MountainFortress,
     ];
     for scene in scenes.iter().filter(|scene| kinds.contains(&scene.kind)) {
         let (cx, cz) = scene.rect.center();
@@ -2847,6 +2848,7 @@ fn prune_dangling_roads(
                     CellKind::TownGate
                         | CellKind::CastleGate
                         | CellKind::PalisadeGate
+                        | CellKind::FortressGate
                         | CellKind::Plaza
                         | CellKind::Market
                         | CellKind::Bridge
@@ -2908,6 +2910,7 @@ fn poi_needs_road(kind: SceneKind) -> bool {
             | SceneKind::PilgrimChapel
             | SceneKind::Hamlet
             | SceneKind::CathedralCity
+            | SceneKind::MountainFortress
     )
 }
 
@@ -4485,7 +4488,7 @@ mod tests {
 
     #[test]
     fn stale_plan_cache_version_is_ignored() {
-        assert_eq!(PLAN_CACHE_VERSION, 35);
+        assert_eq!(PLAN_CACHE_VERSION, 37);
         let dir = std::env::temp_dir().join(format!(
             "kingdoms-plans-test-{}-{}",
             std::process::id(),
@@ -4523,8 +4526,8 @@ mod tests {
 
     /// Occupancy fingerprint of `build_plan(20_261_025, cell 0, Oak slope)`.
     /// When plan output changes, bump [`PLAN_CACHE_VERSION`] (and this pair).
-    const PLAN_LAYOUT_VERSION: u32 = 35;
-    const PLAN_LAYOUT_HASH: u64 = 0xa7da_9ba9_ca8f_c2a8;
+    const PLAN_LAYOUT_VERSION: u32 = 37;
+    const PLAN_LAYOUT_HASH: u64 = 0xd4cb_764c_2f5c_a770;
 
     #[test]
     fn plan_cache_version_tracks_layout() {

@@ -93,6 +93,8 @@ pub fn is_breach_column(kind: CellKind) -> bool {
             | CellKind::CastleInnerWall
             | CellKind::FortressWall
             | CellKind::FortressTower
+            | CellKind::FortressGate
+            | CellKind::FortressBarbican
     )
 }
 
@@ -100,8 +102,17 @@ pub fn is_breach_column(kind: CellKind) -> bool {
 #[must_use]
 pub fn band_for_kind(kind: CellKind) -> RepairBand {
     match kind {
-        CellKind::TownGate | CellKind::CastleGate | CellKind::CastleBarbican => RepairBand::Gate,
-        CellKind::CastleKeep | CellKind::CastleHall | CellKind::CastleCourt => RepairBand::Keep,
+        CellKind::TownGate
+        | CellKind::CastleGate
+        | CellKind::CastleBarbican
+        | CellKind::FortressGate
+        | CellKind::FortressBarbican => RepairBand::Gate,
+        CellKind::CastleKeep
+        | CellKind::CastleHall
+        | CellKind::CastleCourt
+        | CellKind::FortressKeep
+        | CellKind::FortressHall
+        | CellKind::FortressCourt => RepairBand::Keep,
         CellKind::TownWall
         | CellKind::TownTower
         | CellKind::CastleWall

@@ -422,6 +422,166 @@ pub fn write_round38_renders(
     Ok(())
 }
 
+/// Round 39 review set: mountain fortress, switchback, gate, hall and mine.
+/// Directories that receive round-39 PNGs (repo `artifacts/` plus the cloud store).
+#[cfg(test)]
+#[must_use]
+pub(crate) fn round39_artifact_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![
+        std::path::PathBuf::from("/opt/cursor/artifacts"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("artifacts"),
+    ];
+    dirs.retain(|dir| {
+        let _ = std::fs::create_dir_all(dir);
+        dir.is_dir()
+    });
+    dirs
+}
+
+pub fn write_round39_renders(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    out_dir: &std::path::Path,
+    stem: &str,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(out_dir)?;
+    let Some(scene) = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == SceneKind::MountainFortress)
+    else {
+        return Ok(());
+    };
+    let Some(layout) =
+        crate::fortress::layout_for_plan(plan, scene.rect.center().0, scene.rect.center().1)
+    else {
+        return Ok(());
+    };
+    let rect = scene.rect.inflate(8);
+    let title = "Mountain fortress · ridge curtain, keep, towers, mine";
+    save(
+        &out_dir.join(format!("{stem}-fortress-aerial.png")),
+        &render_topdown_rect(plan, volume, rect),
+    )?;
+    save(
+        &out_dir.join(format!("{stem}-fortress-iso.png")),
+        &render_iso_view(
+            volume,
+            rect.min_x,
+            rect.min_z,
+            rect.max_x,
+            rect.max_z,
+            0,
+            1,
+            |x, _, z| rect.contains(x, z),
+            Some(title),
+            false,
+            0,
+        ),
+    )?;
+    save(
+        &out_dir.join(format!("{stem}-fortress-iso-sw.png")),
+        &render_iso_view(
+            volume,
+            rect.min_x,
+            rect.min_z,
+            rect.max_x,
+            rect.max_z,
+            0,
+            1,
+            |x, _, z| rect.contains(x, z),
+            Some(title),
+            false,
+            1,
+        ),
+    )?;
+    save(
+        &out_dir.join(format!("{stem}-fortress-hillside.png")),
+        &render_iso_on_terrain(
+            plan,
+            volume,
+            rect.min_x,
+            rect.min_z,
+            rect.max_x,
+            rect.max_z,
+            Some("Mountain fortress · true surface, no Y slice"),
+            0,
+        ),
+    )?;
+    save(
+        &out_dir.join(format!("{stem}-fortress-hillside-sw.png")),
+        &render_iso_on_terrain(
+            plan,
+            volume,
+            rect.min_x,
+            rect.min_z,
+            rect.max_x,
+            rect.max_z,
+            Some("Mountain fortress · true surface from the switchback"),
+            1,
+        ),
+    )?;
+    let (gx, gz) = layout.gate;
+    write_eye_level_road(
+        plan,
+        volume,
+        out_dir,
+        &format!("{stem}-fortress-gate-eye"),
+        gx,
+        gz,
+        "Fortress gate · barbican and portcullis from the approach",
+    )?;
+    let mid_x = (gx + layout.yard.center().0) / 2;
+    let mid_z = (gz + layout.yard.center().1) / 2;
+    let mut road = (mid_x, mid_z);
+    for z in scene.rect.min_z - 40..=scene.rect.max_z + 40 {
+        for x in scene.rect.min_x - 40..=scene.rect.max_x + 40 {
+            if plan.occ.kind(x, z).is_road_surface()
+                && ((x - gx).abs() + (z - gz).abs()) > 8
+                && ((x - gx).abs() + (z - gz).abs()) < 48
+            {
+                road = (x, z);
+            }
+        }
+    }
+    write_eye_level_road(
+        plan,
+        volume,
+        out_dir,
+        &format!("{stem}-fortress-switchback-eye"),
+        road.0,
+        road.1,
+        "Switchback · 3-wide climb to the mountain fortress",
+    )?;
+    let hall_floor = ridge_floor(plan, layout.hall);
+    save(
+        &out_dir.join(format!("{stem}-fortress-hall-cutaway.png")),
+        &render_room(
+            volume,
+            layout.hall,
+            hall_floor,
+            hall_floor + 10,
+            "Fortress · furnished great hall",
+        ),
+    )?;
+    let (ax, az) = layout.adit.center();
+    let tunnel_floor = layout.tunnel_y.min(plan.heights.height(ax, az) - 1);
+    let mine_rect = layout.adit.inflate(10);
+    save(
+        &out_dir.join(format!("{stem}-mine-tunnel-cutaway.png")),
+        &render_room(
+            volume,
+            mine_rect,
+            tunnel_floor - 1,
+            tunnel_floor + 5,
+            "Fortress mine · timbered tunnel, rails and ore",
+        ),
+    )?;
+    Ok(())
+}
+
 /// Complete house lots along a capital street, padded only for eaves so a
 /// neighbour is not sliced into a floating wall.
 fn town_street_cluster(plan: &TownPlan) -> Option<(Rect, Vec<u16>)> {
@@ -3065,6 +3225,34 @@ fn render_iso_view(
         blit_label(&mut image, title);
     }
     image
+}
+
+fn render_iso_on_terrain(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    min_x: i32,
+    min_z: i32,
+    max_x: i32,
+    max_z: i32,
+    title: Option<&str>,
+    rot: u8,
+) -> RgbImage {
+    render_iso_view(
+        volume,
+        min_x,
+        min_z,
+        max_x,
+        max_z,
+        0,
+        1,
+        |x, y, z| {
+            let surface = plan.heights.height(x, z);
+            y >= surface - 1 && (min_x..=max_x).contains(&x) && (min_z..=max_z).contains(&z)
+        },
+        title,
+        false,
+        rot,
+    )
 }
 
 fn occupied_bounds(

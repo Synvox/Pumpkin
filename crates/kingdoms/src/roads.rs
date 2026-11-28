@@ -336,6 +336,7 @@ fn count_dangling_roads(plan: &TownPlan) -> u32 {
                 CellKind::TownGate
                     | CellKind::CastleGate
                     | CellKind::PalisadeGate
+                    | CellKind::FortressGate
                     | CellKind::Plaza
                     | CellKind::Market
                     | CellKind::Bridge
@@ -378,6 +379,7 @@ fn poi_needs_road(kind: SceneKind) -> bool {
             | SceneKind::RidgeMill
             | SceneKind::PilgrimChapel
             | SceneKind::CathedralCity
+            | SceneKind::MountainFortress
     )
 }
 
@@ -684,7 +686,7 @@ mod tests {
             "too few road tiles {}",
             report.road_tiles
         );
-        assert_eq!(PLAN_CACHE_VERSION, 35);
+        assert_eq!(PLAN_CACHE_VERSION, 37);
     }
 
     #[test]
