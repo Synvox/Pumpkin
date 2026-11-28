@@ -372,10 +372,7 @@ fn compute_layout(yard: Rect, grid: &HeightGrid, seed: u64) -> MountainFortressL
         if step > 8 && step % 8 == 0 {
             let side = if step % 16 == 0 { Dir::East } else { Dir::West };
             for branch in 1..=6 {
-                let bx = x + side.dx() * branch;
-                let bz = z + side.dz() * branch;
-                tunnel.push((bx, bz));
-                tunnel.push((bx + inward.dx(), bz + inward.dz()));
+                tunnel.push((x + side.dx() * branch, z + side.dz() * branch));
             }
         }
     }

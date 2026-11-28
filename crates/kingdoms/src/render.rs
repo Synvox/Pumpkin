@@ -497,6 +497,32 @@ pub fn write_round39_renders(
             1,
         ),
     )?;
+    save(
+        &out_dir.join(format!("{stem}-fortress-hillside.png")),
+        &render_iso_on_terrain(
+            plan,
+            volume,
+            rect.min_x,
+            rect.min_z,
+            rect.max_x,
+            rect.max_z,
+            Some("Mountain fortress · true surface, no Y slice"),
+            0,
+        ),
+    )?;
+    save(
+        &out_dir.join(format!("{stem}-fortress-hillside-sw.png")),
+        &render_iso_on_terrain(
+            plan,
+            volume,
+            rect.min_x,
+            rect.min_z,
+            rect.max_x,
+            rect.max_z,
+            Some("Mountain fortress · true surface from the switchback"),
+            1,
+        ),
+    )?;
     let (gx, gz) = layout.gate;
     write_eye_level_road(
         plan,
@@ -3199,6 +3225,34 @@ fn render_iso_view(
         blit_label(&mut image, title);
     }
     image
+}
+
+fn render_iso_on_terrain(
+    plan: &TownPlan,
+    volume: &VolumeSink,
+    min_x: i32,
+    min_z: i32,
+    max_x: i32,
+    max_z: i32,
+    title: Option<&str>,
+    rot: u8,
+) -> RgbImage {
+    render_iso_view(
+        volume,
+        min_x,
+        min_z,
+        max_x,
+        max_z,
+        0,
+        1,
+        |x, y, z| {
+            let surface = plan.heights.height(x, z);
+            y >= surface - 1 && (min_x..=max_x).contains(&x) && (min_z..=max_z).contains(&z)
+        },
+        title,
+        false,
+        rot,
+    )
 }
 
 fn occupied_bounds(

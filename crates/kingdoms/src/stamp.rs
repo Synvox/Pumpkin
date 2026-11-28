@@ -1,12 +1,14 @@
 //! Per-column stamping. Each chunk writes only its own columns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use pumpkin_data::Block;
 use pumpkin_data::BlockState;
 use pumpkin_data::BlockStateId;
 use pumpkin_data::biome::Biome;
-use pumpkin_data::block_properties::WheatLikeProperties;
+use pumpkin_data::block_properties::{
+    HorizontalFacing, LanternLikeProperties, WallTorchLikeProperties, WheatLikeProperties,
+};
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_world::generation::hooks::ChunkDecorationContext;
 
@@ -654,17 +656,27 @@ pub fn stamp_column(
         }
         CellKind::Lychgate => place_lychgate(sink, plan, x, ground, z, &palette),
         CellKind::FortressWall => {
-            place_curtain(sink, plan, x, floor, ground, z, &palette, 10, true);
+            place_curtain(
+                sink,
+                plan,
+                x,
+                follow_floor(plan, x, z),
+                ground,
+                z,
+                &palette,
+                10,
+                true,
+            );
         }
         CellKind::FortressKeep => {
             place_fortress_keep(sink, plan, x, floor, ground, z, &palette);
         }
         CellKind::FortressTower => {
-            place_fortress_tower(sink, plan, x, floor, ground, z, &palette);
+            place_fortress_tower(sink, plan, x, follow_floor(plan, x, z), ground, z, &palette);
         }
-        CellKind::FortressCourt => place_court(sink, x, ground, z, &palette),
+        CellKind::FortressCourt => place_court(sink, x, follow_floor(plan, x, z), z, &palette),
         CellKind::FortressGate => {
-            place_fortress_gatehouse(sink, plan, x, floor, ground, z, &palette);
+            place_fortress_gatehouse(sink, plan, x, follow_floor(plan, x, z), ground, z, &palette);
         }
         CellKind::FortressHall => {
             place_fortress_room(
@@ -727,7 +739,7 @@ pub fn stamp_column(
             );
         }
         CellKind::FortressBarbican => {
-            place_fortress_barbican(sink, plan, x, floor, ground, z, &palette);
+            place_fortress_barbican(sink, plan, x, follow_floor(plan, x, z), ground, z, &palette);
         }
         CellKind::CathedralNave
         | CellKind::CathedralTransept
@@ -914,6 +926,40 @@ fn contour_terrace(y: i32) -> i32 {
 
 fn follow_floor(plan: &TownPlan, x: i32, z: i32) -> i32 {
     contour_terrace(plan.heights.height(x, z).max(plan.heights.sea_level + 2))
+}
+
+fn wall_torch_state(dir: Dir) -> &'static BlockState {
+    let facing = match dir {
+        Dir::North => HorizontalFacing::North,
+        Dir::South => HorizontalFacing::South,
+        Dir::East => HorizontalFacing::East,
+        Dir::West => HorizontalFacing::West,
+    };
+    let props = WallTorchLikeProperties { facing };
+    BlockState::from_id(props.to_state_id(&Block::WALL_TORCH))
+}
+
+fn hanging_lantern_state() -> &'static BlockState {
+    let mut props = LanternLikeProperties::default(&Block::LANTERN);
+    props.hanging = true;
+    props.waterlogged = false;
+    BlockState::from_id(props.to_state_id(&Block::LANTERN))
+}
+
+fn is_light_source(state: &BlockState) -> bool {
+    let id = Block::from_state_id(state.id).id;
+    id == Block::TORCH.id
+        || id == Block::WALL_TORCH.id
+        || id == Block::LANTERN.id
+        || id == Block::SOUL_LANTERN.id
+}
+
+fn mine_passable(state: Option<&BlockState>) -> bool {
+    match state {
+        None => false,
+        Some(state) if state.is_air() => true,
+        Some(state) => !state.is_full_cube(),
+    }
 }
 
 fn city_surface_y(
@@ -3023,7 +3069,7 @@ fn carve_fortress_mine(
     sink: &mut impl BlockSink,
     plan: &TownPlan,
     x: i32,
-    ground: i32,
+    _ground: i32,
     z: i32,
     palette: &Palette,
 ) {
@@ -3033,15 +3079,30 @@ fn carve_fortress_mine(
     if !layout.tunnel_at(x, z) {
         return;
     }
-    let floor = layout.tunnel_y.min(ground - 1).max(sink.floor_min() + 4);
+    let floor = layout.tunnel_y.max(sink.floor_min() + 4);
     let roof = floor + 3;
     sink.put(x, floor, z, palette.cobble);
     clear_above(sink, x, floor + 1, roof, z);
     sink.put(x, roof, z, palette.andesite);
-    let edge = Dir::ALL
+    let inward = layout.gate_dir.opposite();
+    let (ax, az) = layout.adit.center();
+    let along = inward.dx() * (x - ax) + inward.dz() * (z - az);
+    let across = inward.dz() * (x - ax) - inward.dx() * (z - az);
+    let doorway = Dir::ALL.iter().any(|dir| {
+        let nx = x + dir.dx();
+        let nz = z + dir.dz();
+        if !layout.tunnel_at(nx, nz) {
+            return false;
+        }
+        let nacross = inward.dz() * (nx - ax) - inward.dx() * (nz - az);
+        nacross.abs() > 1
+    });
+    let post = along >= 0 && across.abs() == 1 && !doorway;
+    let wall_dir = Dir::ALL
         .iter()
-        .any(|dir| !layout.tunnel_at(x + dir.dx(), z + dir.dz()));
-    if edge {
+        .copied()
+        .find(|dir| !layout.tunnel_at(x + dir.dx(), z + dir.dz()));
+    if post {
         sink.put(x, floor + 1, z, Block::OAK_LOG.default_state);
         sink.put(x, floor + 2, z, Block::OAK_LOG.default_state);
         let ore = match (x + z).rem_euclid(7) {
@@ -3056,12 +3117,20 @@ fn carve_fortress_mine(
         }
     } else {
         sink.put(x, floor + 1, z, Block::RAIL.default_state);
-        if (x + z).rem_euclid(6) == 0 {
-            sink.put(x, roof, z, Block::LANTERN.default_state);
-        }
-        if (x + z).rem_euclid(8) == 0 {
-            sink.put(x, floor + 1, z, Block::OAK_TRAPDOOR.default_state);
-            sink.put(x, floor + 2, z, Block::CHEST.default_state);
+        let lantern_here = (x + z).rem_euclid(6) == 0;
+        if lantern_here {
+            sink.put(x, floor + 2, z, hanging_lantern_state());
+        } else if (x + z).rem_euclid(4) == 0
+            && let Some(dir) = wall_dir.or_else(|| {
+                Dir::ALL.iter().copied().find(|dir| {
+                    layout.tunnel_at(x + dir.dx(), z + dir.dz())
+                        && Dir::ALL.iter().any(|side| {
+                            !layout.tunnel_at(x + dir.dx() + side.dx(), z + dir.dz() + side.dz())
+                        })
+                })
+            })
+        {
+            sink.put(x, floor + 2, z, wall_torch_state(dir));
         }
     }
 }
@@ -10713,6 +10782,209 @@ pub fn fill_volume(plan: &TownPlan) -> VolumeSink {
         }
     }
     volume
+}
+
+/// Walk and lighting report for a mountain-fortress mine.
+#[derive(Clone, Debug)]
+pub struct FortressMineWalk {
+    pub cells: usize,
+    pub reachable: usize,
+    pub unreachable: usize,
+    pub lights: usize,
+    pub dark: usize,
+}
+
+impl FortressMineWalk {
+    /// Tunnels are connected from the adit and lit.
+    #[must_use]
+    pub fn ok(&self) -> bool {
+        self.cells > 0 && self.unreachable == 0 && self.dark == 0 && self.lights >= 4
+    }
+}
+
+fn mine_column_floor(volume: &VolumeSink, x: i32, z: i32, hint: i32) -> Option<i32> {
+    let floor = volume.get(x, hint, z)?;
+    if floor.is_air() || !floor.is_solid() {
+        return None;
+    }
+    (mine_passable(volume.get(x, hint + 1, z)) && mine_passable(volume.get(x, hint + 2, z)))
+        .then_some(hint)
+}
+
+/// Adit-to-end walk through carved tunnels, plus torch/lantern coverage.
+#[must_use]
+pub fn check_fortress_mine(plan: &TownPlan, volume: &VolumeSink) -> Option<FortressMineWalk> {
+    let scene = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == crate::scenes::SceneKind::MountainFortress)?;
+    let layout =
+        crate::fortress::layout_for_plan(plan, scene.rect.center().0, scene.rect.center().1)?;
+    let hint = layout.tunnel_y;
+    let mut cells: HashSet<(i32, i32)> = HashSet::new();
+    for &(x, z) in &layout.tunnel {
+        cells.insert((x, z));
+    }
+    let mut floor_at = HashMap::new();
+    let mut walkable = HashSet::new();
+    for &(x, z) in &cells {
+        if let Some(y) = mine_column_floor(volume, x, z, hint) {
+            floor_at.insert((x, z), y);
+            walkable.insert((x, z));
+        }
+    }
+    let start = layout.adit.center();
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::new();
+    let start_cell = if walkable.contains(&start) {
+        Some(start)
+    } else {
+        walkable
+            .iter()
+            .copied()
+            .find(|&(x, z)| layout.adit.contains(x, z))
+    };
+    if let Some(cell) = start_cell {
+        seen.insert(cell);
+        queue.push_back(cell);
+    }
+    while let Some((x, z)) = queue.pop_front() {
+        let Some(&y) = floor_at.get(&(x, z)) else {
+            continue;
+        };
+        for dir in Dir::ALL {
+            let n = (x + dir.dx(), z + dir.dz());
+            let Some(&ny) = floor_at.get(&n) else {
+                continue;
+            };
+            if (ny - y).abs() <= 1 && walkable.contains(&n) && seen.insert(n) {
+                queue.push_back(n);
+            }
+        }
+    }
+    let mut lights = Vec::new();
+    for &(x, z) in &cells {
+        for y in hint - 2..=hint + 5 {
+            if let Some(state) = volume.get(x, y, z)
+                && is_light_source(state)
+            {
+                lights.push((x, y, z));
+            }
+        }
+    }
+    let mut dark = 0;
+    for &(x, z) in &walkable {
+        let lit = lights
+            .iter()
+            .any(|&(lx, _, lz)| (x - lx).abs().max((z - lz).abs()) <= 7);
+        if !lit {
+            dark += 1;
+        }
+    }
+    Some(FortressMineWalk {
+        cells: walkable.len(),
+        reachable: seen.len(),
+        unreachable: walkable.len().saturating_sub(seen.len()),
+        lights: lights.len(),
+        dark,
+    })
+}
+
+/// Bailey terraces stay 1–2 blocks and curtain/tower feet sit on terrain.
+pub fn check_fortress_terrain(plan: &TownPlan, volume: &VolumeSink) -> Result<(), String> {
+    let scene = plan
+        .scenes
+        .iter()
+        .find(|scene| scene.kind == crate::scenes::SceneKind::MountainFortress)
+        .ok_or_else(|| "no mountain fortress scene".to_owned())?;
+    let mut court_y = Vec::new();
+    let mut terrace_fail = 0;
+    let mut flatten_same = 0;
+    let mut floating = Vec::new();
+    for z in scene.rect.min_z..=scene.rect.max_z {
+        for x in scene.rect.min_x..=scene.rect.max_x {
+            let kind = plan.occ.kind(x, z);
+            let h = plan.heights.height(x, z);
+            if kind == CellKind::FortressCourt {
+                let y = follow_floor(plan, x, z);
+                if (y - h).abs() > 2 {
+                    terrace_fail += 1;
+                }
+                court_y.push(y);
+                for dir in Dir::ALL {
+                    let nx = x + dir.dx();
+                    let nz = z + dir.dz();
+                    if plan.occ.kind(nx, nz) != CellKind::FortressCourt {
+                        continue;
+                    }
+                    let ny = follow_floor(plan, nx, nz);
+                    let nh = plan.heights.height(nx, nz);
+                    let step = (y - ny).abs();
+                    let raw = (h - nh).abs();
+                    if raw <= 3 && step > 2 {
+                        terrace_fail += 1;
+                    }
+                }
+            }
+            if matches!(
+                kind,
+                CellKind::FortressWall
+                    | CellKind::FortressTower
+                    | CellKind::FortressGate
+                    | CellKind::FortressBarbican
+                    | CellKind::FortressKeep
+            ) {
+                let perimeter = Dir::ALL
+                    .iter()
+                    .any(|dir| plan.occ.kind(x + dir.dx(), z + dir.dz()) != kind);
+                if !perimeter {
+                    continue;
+                }
+                let seated = (h - 2..=h + 1).any(|y| {
+                    volume
+                        .get(x, y, z)
+                        .is_some_and(|state| !state.is_air() && state.is_solid())
+                });
+                if !seated {
+                    floating.push((x, z, kind, h));
+                }
+            }
+        }
+    }
+    if court_y.len() >= 16 {
+        let min_y = *court_y.iter().min().unwrap_or(&0);
+        let max_y = *court_y.iter().max().unwrap_or(&0);
+        let (lo, hi) = plan.heights.range(
+            scene.rect.min_x,
+            scene.rect.min_z,
+            scene.rect.max_x,
+            scene.rect.max_z,
+        );
+        if hi - lo >= 8 && max_y == min_y {
+            flatten_same = 1;
+        }
+    }
+    if terrace_fail > 0 {
+        return Err(format!(
+            "bailey terraces exceed 1-2 blocks on {terrace_fail} court edges"
+        ));
+    }
+    if flatten_same > 0 {
+        return Err("bailey court is a single mean floor on a sloped ridge".into());
+    }
+    if !floating.is_empty() {
+        let sample: Vec<_> = floating
+            .iter()
+            .take(8)
+            .map(|(x, z, kind, h)| format!("{kind:?}@{x},{z} h={h}"))
+            .collect();
+        return Err(format!(
+            "{} wall/tower columns do not sit on terrain: {}",
+            floating.len(),
+            sample.join("; ")
+        ));
+    }
+    Ok(())
 }
 
 /// One intended town block. Repair bots can diff this against the live world.

@@ -205,6 +205,8 @@ struct Bot {
     rout_events: u32,
     rally_events: u32,
     debug_morale: u32,
+    first_soldier_at: Option<Instant>,
+    watch_origin: Option<Instant>,
 }
 
 impl Bot {
@@ -276,6 +278,8 @@ impl Bot {
             rout_events: 0,
             rally_events: 0,
             debug_morale: 0,
+            first_soldier_at: None,
+            watch_origin: None,
         };
 
         bot.send_packet(&SHandShake {
@@ -453,6 +457,9 @@ impl Bot {
         let mob = SeenMob { kind, pos };
         if is_any_soldier_kind(kind) {
             self.seen_soldiers.insert(id);
+            if self.first_soldier_at.is_none() {
+                self.first_soldier_at = Some(Instant::now());
+            }
         }
         if is_engine_kind(kind) {
             self.seen_engines.insert(id);
@@ -1222,8 +1229,16 @@ async fn prove_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<(), St
     Ok(())
 }
 
+fn vis_first_ms(bot: &Bot) -> u64 {
+    match (bot.watch_origin, bot.first_soldier_at) {
+        (Some(origin), Some(at)) => at.saturating_duration_since(origin).as_millis() as u64,
+        (Some(origin), None) => origin.elapsed().as_millis() as u64,
+        _ => 0,
+    }
+}
+
 async fn fortress_visibility_loop(bot: &mut Bot, seconds: u64) -> Result<bool, String> {
-    let wait = seconds.max(20);
+    let wait = seconds.max(60);
     println!(
         "VIS-FORTRESS-JOIN pos={:.1},{:.1},{:.1}",
         bot.position.x, bot.position.y, bot.position.z
@@ -1231,31 +1246,38 @@ async fn fortress_visibility_loop(bot: &mut Bot, seconds: u64) -> Result<bool, S
     let step = Vector3::new(bot.position.x + 1.0, bot.position.y, bot.position.z);
     bot.move_to(step).await?;
     let watch_start = Instant::now();
+    bot.watch_origin = Some(watch_start);
     let deadline = watch_start + Duration::from_secs(wait);
     let mut last_report = Instant::now();
+    let mut soldiers_at_60 = None;
     while Instant::now() < deadline {
         bot.pump(Duration::from_millis(200)).await?;
         bot.move_to(bot.position).await?;
+        if soldiers_at_60.is_none() && watch_start.elapsed() >= Duration::from_secs(60) {
+            soldiers_at_60 = Some(bot.seen_soldiers.len());
+            println!("VIS-FORTRESS-SOLDIERS-60 n={}", bot.seen_soldiers.len());
+        }
         if last_report.elapsed() >= Duration::from_secs(5) {
             last_report = Instant::now();
             println!(
-                "VIS-FORTRESS-SEEN soldiers={} chunks={} pos={:.1},{:.1},{:.1}",
+                "VIS-FORTRESS-SEEN soldiers={} chunks={} first_ms={} pos={:.1},{:.1},{:.1}",
                 bot.seen_soldiers.len(),
                 bot.chunk_batches,
+                vis_first_ms(bot),
                 bot.position.x,
                 bot.position.y,
                 bot.position.z
             );
         }
-        if bot.chunk_batches >= 1 && !bot.seen_soldiers.is_empty() {
-            break;
-        }
     }
+    let soldiers_60 = soldiers_at_60.unwrap_or(bot.seen_soldiers.len());
     let ok = bot.chunk_batches >= 1 && !bot.seen_soldiers.is_empty();
     println!(
-        "VIS-FORTRESS-REPORT soldiers={} chunks={} pos={:.1},{:.1},{:.1} ok={ok}",
+        "VIS-FORTRESS-REPORT soldiers={} soldiers_60={} chunks={} first_ms={} pos={:.1},{:.1},{:.1} ok={ok}",
         bot.seen_soldiers.len(),
+        soldiers_60,
         bot.chunk_batches,
+        vis_first_ms(bot),
         bot.position.x,
         bot.position.y,
         bot.position.z
@@ -1288,6 +1310,7 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
         }
     }
     let watch_start = Instant::now();
+    bot.watch_origin = Some(watch_start);
     let deadline = watch_start + Duration::from_secs(wait);
     let mut last_report = Instant::now();
     let mut soldiers_at_60 = None;
@@ -1301,7 +1324,7 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
         if last_report.elapsed() >= Duration::from_secs(5) {
             last_report = Instant::now();
             println!(
-                "VIS-SEEN soldiers={} live_h={} live_s={} engines={} dmg={} deaths={} moved={} roles={} rout={} rally={} debug={} pos={:.1},{:.1},{:.1}",
+                "VIS-SEEN soldiers={} live_h={} live_s={} engines={} dmg={} deaths={} moved={} roles={} rout={} rally={} debug={} first_ms={} pos={:.1},{:.1},{:.1}",
                 bot.seen_soldiers.len(),
                 bot.hostiles.len(),
                 bot.soldiers.len(),
@@ -1313,6 +1336,7 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
                 bot.rout_events,
                 bot.rally_events,
                 bot.debug_morale,
+                vis_first_ms(bot),
                 bot.position.x,
                 bot.position.y,
                 bot.position.z
@@ -1330,9 +1354,10 @@ async fn visibility_loop(bot: &mut Bot, kingdom: &str, seconds: u64) -> Result<b
     roles.sort();
     println!("VIS-ROLES n={} list={}", roles.len(), roles.join(","));
     println!(
-        "VIS-REPORT soldiers={} soldiers_60={} engines={} damage={} deaths={} moved={} live_h={} live_s={} roles={} rout={} rally={} debug={} morale={} pos={:.1},{:.1},{:.1} ok={ok}",
+        "VIS-REPORT soldiers={} soldiers_60={} first_ms={} engines={} damage={} deaths={} moved={} live_h={} live_s={} roles={} rout={} rally={} debug={} morale={} pos={:.1},{:.1},{:.1} ok={ok}",
         bot.seen_soldiers.len(),
         soldiers_60,
+        vis_first_ms(bot),
         bot.seen_engines.len(),
         bot.damage_events,
         bot.death_events,

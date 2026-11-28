@@ -3006,6 +3006,8 @@ mod tests {
                     | crate::scenes::SceneKind::RuinedAbbey
                     | crate::scenes::SceneKind::RuinedCastle
                     | crate::scenes::SceneKind::PillagerStronghold
+                    | crate::scenes::SceneKind::MountainFortress
+                    | crate::scenes::SceneKind::Mine
             )
         }) {
             let margin = crate::scenes::scene_tree_margin(scene.kind);
@@ -3399,21 +3401,196 @@ mod tests {
             "fortress soldiers need guard posts a client can see, guards={guards}"
         );
         let stamp = fill_volume(&plan);
+        let mine_walk = crate::stamp::check_fortress_mine(&plan, &stamp)
+            .expect("real-world fortress mine walk-test");
+        assert!(
+            mine_walk.ok(),
+            "real-world mine walk/light: cells={} reach={} unreach={} lights={} dark={}",
+            mine_walk.cells,
+            mine_walk.reachable,
+            mine_walk.unreachable,
+            mine_walk.lights,
+            mine_walk.dark
+        );
+        crate::stamp::check_fortress_terrain(&plan, &stamp)
+            .expect("real-world bailey terraces and foundations");
+        let gy = plan.heights.height(gx, gz) + 1;
         let metrics = format!(
-            "seed={seed} fortress={}x{} gate={},{} keep={},{} mine={}x{} guards={guards} stone={stone} bars={bars} gate_cells={gate_cells}\n",
+            "seed={seed} fortress={}x{} gate={gx},{gy},{gz} keep={},{} mine={}x{} guards={guards} stone={stone} bars={bars} gate_cells={gate_cells} mine_cells={} mine_reach={} mine_unreach={} mine_lights={} mine_dark={}\n",
             scene.rect.width(),
             scene.rect.depth(),
-            gx,
-            gz,
             layout.keep.cx,
             layout.keep.cz,
             layout.mine.width(),
             layout.mine.depth(),
+            mine_walk.cells,
+            mine_walk.reachable,
+            mine_walk.unreachable,
+            mine_walk.lights,
+            mine_walk.dark,
         );
+        write_vis_stand(seed, &plan, Some(&mine_walk));
         for dir in crate::render::round39_artifact_dirs() {
             crate::render::write_round39_renders(&plan, &stamp, &dir, "round39")
                 .expect("round39 real-world renders");
             std::fs::write(dir.join("round39-metrics.txt"), &metrics).expect("round39 metrics");
+        }
+    }
+
+    #[test]
+    fn round39_seed_7_world_gen_fortress_is_site_driven() {
+        use pumpkin_data::dimension::Dimension;
+        use pumpkin_util::world_seed::Seed;
+        use pumpkin_world::generation::get_world_gen;
+        use std::sync::Arc;
+
+        let seed = 7u64;
+        let boxed = get_world_gen(
+            Seed(seed),
+            Dimension::OVERWORLD,
+            false,
+            Vec::new(),
+            String::new(),
+        );
+        let world_gen = Arc::from(boxed);
+        crate::height::register_world_gen(Arc::clone(&world_gen));
+        crate::marker::register_hooks(world_gen.extensions());
+        let plan = crate::plan::plan_for(seed, 0, 0, &world_gen);
+        let fortress = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == crate::scenes::SceneKind::MountainFortress);
+        write_vis_stand(seed, &plan, None);
+        // Site-driven: seed 7 cell 0,0 has no ridge that scores a 128x128
+        // fortress. The same placer still puts one on a synthetic slope
+        // (`round39_seed_7_synthetic_also_places_fortress`).
+        let Some(scene) = fortress else {
+            return;
+        };
+        assert!(
+            scene.rect.width() >= 128 && scene.rect.depth() >= 128,
+            "seed 7 world fortress {}x{}",
+            scene.rect.width(),
+            scene.rect.depth()
+        );
+        let volume = fill_volume(&plan);
+        let mine_walk =
+            crate::stamp::check_fortress_mine(&plan, &volume).expect("seed 7 world mine");
+        assert!(
+            mine_walk.ok(),
+            "seed 7 world mine walk/light: cells={} unreach={} lights={} dark={}",
+            mine_walk.cells,
+            mine_walk.unreachable,
+            mine_walk.lights,
+            mine_walk.dark
+        );
+        crate::stamp::check_fortress_terrain(&plan, &volume).expect("seed 7 world terrain");
+        write_vis_stand(seed, &plan, Some(&mine_walk));
+    }
+
+    #[test]
+    fn round39_visibility_stand_coords() {
+        use pumpkin_data::dimension::Dimension;
+        use pumpkin_util::world_seed::Seed;
+        use pumpkin_world::generation::get_world_gen;
+        use std::sync::Arc;
+
+        for seed in [20_261_025u64, 7] {
+            let boxed = get_world_gen(
+                Seed(seed),
+                Dimension::OVERWORLD,
+                false,
+                Vec::new(),
+                String::new(),
+            );
+            let world_gen = Arc::from(boxed);
+            crate::height::register_world_gen(Arc::clone(&world_gen));
+            crate::marker::register_hooks(world_gen.extensions());
+            let plan = crate::plan::plan_for(seed, 0, 0, &world_gen);
+            write_vis_stand(seed, &plan, None);
+        }
+    }
+
+    fn write_vis_stand(
+        seed: u64,
+        plan: &crate::plan::TownPlan,
+        mine: Option<&crate::stamp::FortressMineWalk>,
+    ) {
+        let info = crate::info::TownInfo::from_plan(plan);
+        let mut lines = vec![format!("seed={seed}")];
+        let ox = plan.origin.x;
+        let oz = plan.origin.z;
+        let oy = plan.heights.height(ox, oz) + 1;
+        let (wx, wz) = plan.well;
+        let wy = plan.heights.height(wx, wz) + 1;
+        lines.push(format!("origin={ox},{oy},{oz}"));
+        lines.push(format!("well={wx},{wy},{wz}"));
+        if let Some(gate) = info
+            .gates
+            .iter()
+            .find(|gate| gate.kind == crate::info::GateKind::Town)
+        {
+            let y = plan.heights.height(gate.x, gate.z) + 1;
+            lines.push(format!("town_gate={},{},{}", gate.x, y, gate.z));
+        }
+        if let Some(scene) = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == crate::scenes::SceneKind::MountainFortress)
+        {
+            lines.push(format!(
+                "fortress_rect={}x{} at {},{}..{},{}",
+                scene.rect.width(),
+                scene.rect.depth(),
+                scene.rect.min_x,
+                scene.rect.min_z,
+                scene.rect.max_x,
+                scene.rect.max_z
+            ));
+            if let Some(layout) =
+                crate::fortress::layout_for_plan(plan, scene.rect.center().0, scene.rect.center().1)
+            {
+                let (gx, gz) = layout.gate;
+                let gy = plan.heights.height(gx, gz) + 1;
+                lines.push(format!("fortress_gate={gx},{gy},{gz}"));
+            }
+            let guards: Vec<_> = info
+                .spawns
+                .iter()
+                .filter(|s| {
+                    s.role == crate::info::SpawnRole::GuardPost && scene.rect.contains(s.x, s.z)
+                })
+                .collect();
+            lines.push(format!("fortress_guards={}", guards.len()));
+            for guard in guards {
+                lines.push(format!("guard={},{},{}", guard.x, guard.y, guard.z));
+            }
+        } else {
+            lines.push("fortress=none".to_owned());
+        }
+        let scenes: Vec<_> = plan
+            .scenes
+            .iter()
+            .map(|scene| {
+                format!(
+                    "{}@{},{}",
+                    scene.kind.label(),
+                    scene.rect.min_x,
+                    scene.rect.min_z
+                )
+            })
+            .collect();
+        lines.push(format!("scenes={}", scenes.join(";")));
+        if let Some(mine) = mine {
+            lines.push(format!(
+                "mine_cells={} mine_reach={} mine_unreach={} mine_lights={} mine_dark={}",
+                mine.cells, mine.reachable, mine.unreachable, mine.lights, mine.dark
+            ));
+        }
+        let body = lines.join("\n") + "\n";
+        for dir in crate::render::round39_artifact_dirs() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join(format!("round39-vis-{seed}.txt")), &body);
         }
     }
 

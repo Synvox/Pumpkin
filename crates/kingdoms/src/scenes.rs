@@ -4563,8 +4563,13 @@ fn place_frontier(
     scenes: &mut Vec<Scene>,
 ) {
     let dir = frontier_dir(origin);
+    let blocked = |yard: &Rect| landmark_blocked(scenes, yard.inflate(MIN_SETTLEMENT_GAP));
     let Some(yard) = find_frontier_site(occ, grid, search, town, keep_out, dir, rng)
-        .or_else(|| find_site(occ, grid, search, town, keep_out, 28, 22, false, rng))
+        .filter(|yard| !blocked(yard))
+        .or_else(|| {
+            find_site(occ, grid, search, town, keep_out, 28, 22, false, rng)
+                .filter(|yard| !blocked(yard))
+        })
     else {
         return;
     };
@@ -5936,6 +5941,8 @@ fn landmark_blocked(scenes: &[Scene], rect: Rect) -> bool {
             SceneKind::PillagerStronghold | SceneKind::RuinedCastle
         ) {
             scene.rect.inflate(WAR_SCENE_CROP)
+        } else if scene.kind == SceneKind::MountainFortress {
+            scene.rect
         } else {
             scene.rect.deflate(2)
         };
@@ -12672,6 +12679,31 @@ mod tests {
     use crate::plan::build_plan;
     use crate::town::town_in_cell;
 
+    fn settlement_scene(kind: SceneKind) -> bool {
+        matches!(
+            kind,
+            SceneKind::Hamlet
+                | SceneKind::Farmstead
+                | SceneKind::Monastery
+                | SceneKind::Manor
+                | SceneKind::Vineyard
+                | SceneKind::CathedralCity
+                | SceneKind::MountainFortress
+                | SceneKind::Mine
+                | SceneKind::HuntingLodge
+                | SceneKind::MillHamlet
+                | SceneKind::WalledMarket
+                | SceneKind::RoadsideInn
+                | SceneKind::PillagerCamp
+                | SceneKind::PillagerStronghold
+                | SceneKind::RuinedCastle
+                | SceneKind::Harbour
+                | SceneKind::Frontier
+                | SceneKind::Gorge
+                | SceneKind::Caravanserai
+        )
+    }
+
     #[test]
     fn hinterland_has_scenes_and_spawn_points() {
         let origin = town_in_cell(20_261_025, 0, 0);
@@ -18174,6 +18206,55 @@ mod tests {
             "fortress switchback should stay on the road network: {}",
             walk.render()
         );
+        let mine_walk =
+            crate::stamp::check_fortress_mine(&plan, &volume).expect("fortress mine walk-test");
+        assert!(
+            mine_walk.ok(),
+            "mine adit/tunnels should be walkable and lit: cells={} reach={} unreach={} lights={} dark={}",
+            mine_walk.cells,
+            mine_walk.reachable,
+            mine_walk.unreachable,
+            mine_walk.lights,
+            mine_walk.dark
+        );
+        crate::stamp::check_fortress_terrain(&plan, &volume)
+            .expect("bailey terraces and wall foundations");
+        let mine_line = format!(
+            "synthetic_mine_cells={} reach={} unreach={} lights={} dark={}\n",
+            mine_walk.cells,
+            mine_walk.reachable,
+            mine_walk.unreachable,
+            mine_walk.lights,
+            mine_walk.dark
+        );
+        for dir in crate::render::round39_artifact_dirs() {
+            let _ = std::fs::write(dir.join("round39-mine-walk.txt"), &mine_line);
+        }
+        let (gx, gz) = crate::fortress::layout_for_plan(
+            &plan,
+            fortress.rect.center().0,
+            fortress.rect.center().1,
+        )
+        .expect("layout")
+        .gate;
+        assert!(
+            plan.strips_trees(gx, gz),
+            "fortress gate should strip hanging Features trees"
+        );
+        for scene in &plan.scenes {
+            if scene.kind == SceneKind::MountainFortress || scene.kind == SceneKind::Mine {
+                continue;
+            }
+            if !settlement_scene(scene.kind) {
+                continue;
+            }
+            assert!(
+                !fortress.rect.inflate(16).intersects(scene.rect),
+                "fortress settlement spacing vs {} {:?}",
+                scene.kind.label(),
+                scene.rect
+            );
+        }
         for dir in crate::render::round39_artifact_dirs() {
             crate::render::write_round39_renders(&plan, &volume, &dir, "round39")
                 .expect("round39 synthetic renders");
@@ -18203,5 +18284,62 @@ mod tests {
                 "fortress curtain should step with terrain lo={lo} hi={hi} wall={min_y}..{max_y}"
             );
         }
+    }
+
+    #[test]
+    fn round39_seed_7_synthetic_also_places_fortress() {
+        let origin = town_in_cell(7, 0, 0);
+        let grid = HeightGrid::synthetic_slope(
+            origin.x - 360,
+            origin.z - 360,
+            origin.x + 360,
+            origin.z + 360,
+            8,
+            78,
+            24,
+            16,
+        );
+        let plan = build_plan(7, origin, grid, PaletteKind::Oak);
+        let fortress = plan
+            .scenes
+            .iter()
+            .find(|scene| scene.kind == SceneKind::MountainFortress)
+            .unwrap_or_else(|| {
+                panic!(
+                    "mountain fortress missing on seed 7 synthetic: {:?}",
+                    plan.scenes.iter().map(|s| s.kind).collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            fortress.rect.width() >= 128 && fortress.rect.depth() >= 128,
+            "seed 7 fortress {}x{}",
+            fortress.rect.width(),
+            fortress.rect.depth()
+        );
+        assert!(
+            plan.scenes
+                .iter()
+                .any(|scene| scene.kind == SceneKind::Mine),
+            "seed 7 working mine"
+        );
+        let volume = crate::stamp::fill_volume(&plan);
+        let mine_walk =
+            crate::stamp::check_fortress_mine(&plan, &volume).expect("seed 7 mine walk-test");
+        assert!(
+            mine_walk.ok(),
+            "seed 7 mine walk/light: cells={} reach={} unreach={} lights={} dark={}",
+            mine_walk.cells,
+            mine_walk.reachable,
+            mine_walk.unreachable,
+            mine_walk.lights,
+            mine_walk.dark
+        );
+        crate::stamp::check_fortress_terrain(&plan, &volume).expect("seed 7 terrain");
+        let walk = crate::roads::check_plan_roads(&plan);
+        assert!(
+            walk.local_ok(),
+            "seed 7 fortress switchback: {}",
+            walk.render()
+        );
     }
 }
